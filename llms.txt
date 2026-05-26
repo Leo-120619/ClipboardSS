@@ -1,0 +1,76 @@
+# ClipboardSS
+
+ClipboardSS is a native macOS application that manages clipboard history for both text and images, performs local OCR (optical character recognition) on screenshots, provides a drag-to-select screen text extractor, and integrates a full-featured visual annotation image canvas editor. All operations are run 100% locally and privately.
+
+## Primary Links
+- **GitHub Repository**: [https://github.com/Leo-120619/ClipboardSS](https://github.com/Leo-120619/ClipboardSS)
+- **Sponsors**: [https://github.com/sponsors/Leo-120619](https://github.com/sponsors/Leo-120619)
+- **Donation**: [https://www.buymeacoffee.com/Leo120619](https://www.buymeacoffee.com/Leo120619)
+
+---
+
+## Technical Stack & Architecture
+
+ClipboardSS is built as a Swift Package Manager (SPM) project using:
+- **Language & Frameworks**: Swift 5.9+, SwiftUI, AppKit, Carbon (for global hotkey monitoring).
+- **OCR Engine**: Apple's Vision Framework (`VNRecognizeTextRequest`), running entirely locally.
+- **Storage**: Flat files and JSON metadata saved inside `~/Library/Application Support/ClipboardSS/` or custom environments.
+- **Modularity**:
+  - `ClipboardCore`: Cross-cutting database, data models, file I/O, and cross-platform friendly logic.
+  - `ClipboardSS`: The main macOS application layer, UI windows, views, status menus, and screen overlays.
+
+---
+
+## Codebase Map & Key Files
+
+### ClipboardCore (Library Target)
+- **[ClipItem.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardCore/ClipItem.swift)**: Defines the primary data model representing clipboard clips (text, image path, custom title, pinned state, timestamps).
+- **[ClipStore.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardCore/ClipStore.swift)**: The persistent storage manager. Manages adding clips, pinning, deleting, cleanups, and queries.
+- **[ClipboardIO.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardCore/ClipboardIO.swift)**: Standard definitions for reading and writing structures.
+- **[ScreenTextSelectionState.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardCore/ScreenTextSelectionState.swift)**: Manages mouse drag selection coordinates, scaling, and bounding box computations for drag-to-OCR.
+
+### ClipboardSS (App Target)
+- **[main.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/main.swift)**: Main entry point instantiating `NSApplication` with the app delegate.
+- **[AppDelegate.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/AppDelegate.swift)**: Orchestrates system setup, application activation policies, status item configurations, custom global hotkeys, and the main clipboard polling timer (0.75s interval).
+- **[AppModel.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/AppModel.swift)**: Central `@MainActor` state observable. Connects services for screenshots, local OCR, photo editor coordination, and preferences.
+- **[PhotoEditorView.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/PhotoEditorView.swift)**: A comprehensive canvas view featuring state variables for brush properties, vector shape placements (rectangles, ellipses, arrows, text), cropping boxes, image rotation logic, filter adjustments, and saving pipelines.
+- **[ScreenTextOverlayController.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/ScreenTextOverlayController.swift)** & **[ScreenTextCaptureService.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/ScreenTextCaptureService.swift)**: Creates full-screen transparent overlays across all active macOS displays to enable mouse drag-select coordinates for regional screenshots and OCR operations.
+- **[OCRService.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/OCRService.swift)**: Interfaces with Apple's `Vision` framework to process image assets offline and retrieve bounding boxes and text blocks.
+- **[ScreenshotCaptureService.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/ScreenshotCaptureService.swift)**: Invokes local interactive screenshot commands to capture customizable screen regions.
+- **[ClipboardRootView.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/ClipboardRootView.swift)** & **[ClipCard.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/ClipCard.swift)**: Main grid layout displaying search interfaces, filter sidebars, interactive hover actions, and coach mark guides.
+- **[HotKeyManager.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/HotKeyManager.swift)** & **[ShortcutRecorderView.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/ShortcutRecorderView.swift)**: Carbon-based shortcut recorder and listeners that enable quick global triggers.
+- **[CoachMarkOverlay.swift](file:///Users/leolml/Development/Clipboard%20SS/Sources/ClipboardSS/CoachMarkOverlay.swift)**: Handles the educational onboarding wizard.
+
+---
+
+## Core Flows & Implementations
+
+### 1. Clipboard Polling & Insertion
+1. `AppDelegate.pollClipboard()` runs every `0.75` seconds.
+2. Checks if `SystemPasteboardClient` has new contents (by hashing content or tracking change counts).
+3. If new data matches, adds it to `ClipStore`.
+4. Flat files are saved in `/Application Support/ClipboardSS/clips/` for images, and metadata is updated in `store.json`.
+5. Run `AppModel.cleanupExpiredClips()` to find unpinned items older than 7 days and delete them.
+
+### 2. Drag-to-OCR (Screen Text Selector)
+1. User activates Screen Text Selection (shortcut or menu bar).
+2. `ScreenTextCaptureService.captureAllDisplays()` grabs screen snapshots across all active monitors.
+3. Translucent, non-focusable SwiftUI overlay windows are presented full screen.
+4. User drag-selects a region. Coordinates are updated in `ScreenTextSelectionState`.
+5. On mouse release, cropped region image is sent to local `OCRService` which processes characters.
+6. The compiled text is copied directly to the clipboard, and overlay windows dismiss.
+
+### 3. Canvas Image Editor
+1. Image is loaded into `PhotoEditorView`.
+2. Core canvas operations track drawing actions as arrays of shapes and annotations.
+3. Drawing is composited inside a `Canvas` context.
+4. Crop and rotate operations update standard CoreGraphics matrices.
+5. On save, the canvas is rendered to an `NSImage`, converted to PNG bytes, saved in the `ClipStore`, and immediately copied back into the clipboard for rapid paste integration.
+
+---
+
+## Building and Running
+
+- **Development Run**: `swift run ClipboardSS`
+- **Compile App Bundle**: `scripts/build_app.sh`
+- **Install locally**: `scripts/build_app.sh --install` (installs to `/Applications/ClipboardSS.app`)
