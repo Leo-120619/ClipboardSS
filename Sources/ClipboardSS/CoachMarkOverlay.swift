@@ -56,16 +56,8 @@ struct CoachMarkOverlay: View {
             Color.black.opacity(0.32)
         }
         .mask {
-            Rectangle()
-                .overlay {
-                    if let spotlightFrame {
-                        spotlightShapeView(shape: shape)
-                            .frame(width: spotlightFrame.width, height: spotlightFrame.height)
-                            .position(x: spotlightFrame.midX, y: spotlightFrame.midY)
-                            .blendMode(.destinationOut)
-                    }
-                }
-                .compositingGroup()
+            ScrimWithHole(spotlightFrame: spotlightFrame, spotlightShape: shape)
+                .fill(style: FillStyle(eoFill: true))
         }
     }
 
@@ -115,30 +107,32 @@ struct CoachMarkOverlay: View {
 
     @ViewBuilder
     private func cardPlacement(spotlightFrame: CGRect?, containerSize: CGSize) -> some View {
+        let cardWidth = min(380, max(280, containerSize.width - 32))
+
         if let spotlightFrame {
             let isTopHalf = spotlightFrame.midY <= containerSize.height / 2
-            let targetMidX = spotlightFrame.midX
-            let cardXOffset = max(16, min(containerSize.width - 380 - 16, targetMidX - 190))
 
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(spacing: 0) {
                 if isTopHalf {
                     Spacer()
                         .frame(height: spotlightFrame.maxY + 16)
                     coachMarkCard
-                        .offset(x: cardXOffset)
-                    Spacer()
+                        .frame(width: cardWidth)
+                    Spacer(minLength: 16)
                 } else {
-                    Spacer()
+                    Spacer(minLength: 16)
                     coachMarkCard
-                        .offset(x: cardXOffset)
+                        .frame(width: cardWidth)
                     Spacer()
                         .frame(height: (containerSize.height - spotlightFrame.minY) + 16)
                 }
             }
+            .frame(maxWidth: .infinity)
         } else {
             VStack {
                 Spacer()
                 coachMarkCard
+                    .frame(width: cardWidth)
                 Spacer()
             }
             .frame(maxWidth: .infinity)
@@ -198,7 +192,7 @@ struct CoachMarkOverlay: View {
             }
         }
         .padding(18)
-        .frame(width: 380)
+        .frame(minWidth: 280, idealWidth: 380, maxWidth: 380)
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 20)
@@ -312,6 +306,27 @@ struct SecondaryPremiumButtonStyle: ButtonStyle {
 enum SpotlightShape: Equatable {
     case circle
     case roundedRect(cornerRadius: CGFloat)
+}
+
+struct ScrimWithHole: Shape {
+    let spotlightFrame: CGRect?
+    let spotlightShape: SpotlightShape
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path(rect)
+        if let frame = spotlightFrame {
+            switch spotlightShape {
+            case .circle:
+                path.addEllipse(in: frame)
+            case .roundedRect(let cornerRadius):
+                path.addRoundedRect(
+                    in: frame,
+                    cornerSize: CGSize(width: cornerRadius, height: cornerRadius)
+                )
+            }
+        }
+        return path
+    }
 }
 
 struct CoachMarkStep {
