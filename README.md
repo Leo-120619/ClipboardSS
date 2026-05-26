@@ -98,8 +98,7 @@ If prompts do not appear automatically, go to **System Settings > Privacy & Secu
 If you find this utility helpful, consider supporting its development:
 - **GitHub Sponsors**: [Sponsor Leo-120619](https://github.com/sponsors/Leo-120619)
 - **Buy Me a Coffee**: [Buy a coffee for Leo-120619](https://www.buymeacoffee.com/Leo120619)
-
+- Solana network: J3TXCeLR2QqCpJJfk6dEfhKAgRtCwFtfn6p6qwhajtdq
+- EVM Network: 0x120164D71906b298CcC432bEE9EbEC19E4aC7995
 ---
 
-## License
-Licensed under the MIT License. See [LICENSE](LICENSE) for details.
