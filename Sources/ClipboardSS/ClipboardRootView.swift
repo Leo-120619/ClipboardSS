@@ -70,6 +70,9 @@ struct ClipboardRootView: View {
         .sheet(isPresented: $model.showPreferences) {
             PreferencesView(model: model)
         }
+        .sheet(isPresented: $model.showDevices) {
+            DevicesView(model: model)
+        }
         .alert("ClipboardSS", isPresented: Binding(
             get: { model.lastError != nil },
             set: { if !$0 { model.lastError = nil } }
@@ -100,26 +103,30 @@ struct ClipboardRootView: View {
                 .coachMarkTarget(.windowShortcut)
                 Spacer()
                 Button {
+                    model.requestDevices()
+                } label: {
+                    Image(systemName: "laptopcomputer.and.iphone")
+                }
+                .help("Devices")
+                .accessibilityLabel("Devices")
+                Button {
                     model.startScreenTextSelection()
                 } label: {
-                    Label(model.isSelectingScreenText ? "Scanning" : "Screen Text", systemImage: "text.viewfinder")
+                    Image(systemName: "text.viewfinder")
                 }
                 .disabled(model.isSelectingScreenText)
+                .help(model.isSelectingScreenText ? "Scanning screen text" : "Screen Text")
+                .accessibilityLabel(model.isSelectingScreenText ? "Scanning screen text" : "Screen Text")
                 .coachMarkTarget(.screenTextButton)
                 Button {
                     model.captureScreenshot()
                 } label: {
-                    Label(model.isCapturingScreenshot ? "Capturing" : "Screenshot", systemImage: "camera.viewfinder")
+                    Image(systemName: "camera.viewfinder")
                 }
                 .disabled(model.isCapturingScreenshot)
+                .help(model.isCapturingScreenshot ? "Capturing screenshot" : "Screenshot")
+                .accessibilityLabel(model.isCapturingScreenshot ? "Capturing screenshot" : "Screenshot")
                 .coachMarkTarget(.screenshotButton)
-                Button {
-                    model.editClipboardImage()
-                } label: {
-                    Label("Edit Clipboard", systemImage: "pencil")
-                }
-                .disabled(!model.clipboardHasImage)
-                .help(model.clipboardHasImage ? "Edit current image in clipboard" : "No image in clipboard to edit")
                 Button {
                     model.requestPreferences()
                 } label: {

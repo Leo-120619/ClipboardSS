@@ -1,0 +1,37 @@
+name: ClipboardSS
+options:
+  bundleIdPrefix: com.local
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  ClipboardSS:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/ClipboardSS
+    dependencies:
+      - target: ClipboardCore
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: ClipboardSS
+        LSUIElement: true
+        LSMinimumSystemVersion: "14.0"
+        NSHighResolutionCapable: true
+        NSHumanReadableCopyright: "Copyright © 2026 ClipboardSS"
+        NSLocalNetworkUsageDescription: "This app needs local network access to pair with and sync clipboards with your companion devices."
+        NSBonjourServices:
+          - _clipboardss._tcp
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.local.ClipboardSS
+      CODE_SIGN_STYLE: Manual
+      CODE_SIGN_IDENTITY: "ClipboardSS Local Code Signing"
+      CODE_SIGNING_REQUIRED: YES
+      ENABLE_DEBUG_DYLIB: NO
+      ENABLE_HARDENED_RUNTIME: YES
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  ClipboardCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/ClipboardCore

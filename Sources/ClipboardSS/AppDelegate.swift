@@ -21,13 +21,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let pasteboard = SystemPasteboardClient()
             let writer = ClipboardWriter(pasteboard: pasteboard, store: store)
             let screenTextOverlayController = ScreenTextOverlayController()
+
+            let identity = DeviceIdentity(
+                id: Self.loadDeviceIdentityId(),
+                name: Host.current().localizedName ?? "Mac"
+            )
+            let pairedStore = try PairedDeviceStore(
+                storageURL: store.storageDirectory.appendingPathComponent("paired-devices.json"),
+                keyStorage: KeychainPairKeyStorage()
+            )
+            let transport = NWPeerTransport()
+            let pairingCoordinator = PairingCoordinator(
+                identity: identity,
+                pairedStore: pairedStore,
+                transport: transport
+            )
+            let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard)
+            let clipServer = try ClipServer(
+                identity: identity,
+                receiver: clipReceiver,
+                pairingCoordinator: pairingCoordinator
+            )
+            let peerBrowser = PeerBrowser(identityId: identity.id)
+            let clipSender = ClipSender(
+                identity: identity,
+                pairedStore: pairedStore,
+                transport: transport,
+                storageDirectory: store.storageDirectory
+            )
+
             let model = AppModel(
                 store: store,
                 writer: writer,
                 screenshotCaptureService: ScreenshotCaptureService(),
                 ocrService: OCRService(),
                 screenTextCaptureService: ScreenTextCaptureService(),
-                pasteboard: pasteboard
+                pasteboard: pasteboard,
+                pairingCoordinator: pairingCoordinator,
+                peerBrowser: peerBrowser,
+                clipSender: clipSender,
+                clipServer: clipServer
             )
             let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
             let windowController = ClipboardWindowController(model: model)
@@ -64,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             configureStatusItem()
+            model.startNetworking()
             hotKeyManager.start {
                 windowController.toggle()
             } screenshotCallback: {
@@ -109,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open Clipboard", action: #selector(openClipboard), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Select Screen Text", action: #selector(selectScreenText), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Devices", action: #selector(openDevices), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Preferences", action: #selector(openPreferences), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ClipboardSS", action: #selector(quit), keyEquivalent: "q"))
@@ -125,12 +160,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.showPreferences()
     }
 
+    @objc private func openDevices() {
+        windowController?.showDevices()
+    }
+
     @objc private func selectScreenText() {
         model?.startScreenTextSelection()
     }
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    /// Loads the persistent device identity UUID, regenerating (and persisting) a
+    /// fresh one if none is stored or the stored value is corrupt. Persisted as a
+    /// lowercase canonical UUID string under the "deviceId" key.
+    static func loadDeviceIdentityId(defaults: UserDefaults = .standard) -> UUID {
+        if let stored = defaults.string(forKey: "deviceId"),
+           let uuid = UUID(uuidString: stored) {
+            return uuid
+        }
+        let newId = UUID()
+        defaults.set(newId.uuidString.lowercased(), forKey: "deviceId")
+        return newId
     }
 
     private static func defaultStorageDirectory() throws -> URL {

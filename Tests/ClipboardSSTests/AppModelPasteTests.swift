@@ -57,6 +57,40 @@ struct AppModelPasteTests {
         #expect(fixture.pasteboard.lastText == "again")
         #expect(requests == [.keepClipboardOpenAfterPaste])
     }
+
+    @Test("send targets union mDNS peers with paired hosts, de-duped by id")
+    func sendTargetUnion() {
+        let id1 = UUID()
+        let id2 = UUID()
+        let mdns = [Peer(id: id1, name: "Phone", host: "192.168.0.9", port: 51888)]
+        let paired = [
+            PairedDevice(id: id1, name: "Phone", host: "192.168.0.99"),
+            PairedDevice(id: id2, name: "Tablet", host: "192.168.0.20"),
+        ]
+
+        let targets = AppModel.composeSendTargets(mdnsPeers: mdns, pairedDevices: paired)
+
+        #expect(targets.count == 2)
+        #expect(targets.first { $0.id == id1 }?.host == "192.168.0.9")
+        #expect(targets.first { $0.id == id2 }?.host == "192.168.0.20")
+    }
+
+    @Test("join candidates try mDNS first then swept peers")
+    func joinCandidateUnion() {
+        let id1 = UUID()
+        let id2 = UUID()
+        let mdns = [Peer(id: id1, name: "Wrong", host: "192.168.0.10", port: 51888)]
+        let swept = [
+            Peer(id: id2, name: "Mac", host: "192.168.0.20", port: 51888),
+            Peer(id: id1, name: "Wrong Duplicate", host: "192.168.0.11", port: 51888),
+        ]
+
+        let targets = AppModel.composeJoinCandidates(mdnsPeers: mdns, sweptPeers: swept)
+
+        #expect(targets.map(\.id) == [id1, id2])
+        #expect(targets[0].host == "192.168.0.10")
+        #expect(targets[1].host == "192.168.0.20")
+    }
 }
 
 @MainActor
@@ -71,13 +105,7 @@ private struct AppModelFixture {
         let pasteboard = FakePasteboard()
         self.store = store
         self.pasteboard = pasteboard
-        self.model = AppModel(
-            store: store,
-            writer: ClipboardWriter(pasteboard: pasteboard, store: store),
-            screenshotCaptureService: ScreenshotCaptureService(),
-            ocrService: OCRService(),
-            pasteboard: pasteboard
-        )
+        self.model = try makeTestAppModel(store: store, pasteboard: pasteboard)
     }
 }
 

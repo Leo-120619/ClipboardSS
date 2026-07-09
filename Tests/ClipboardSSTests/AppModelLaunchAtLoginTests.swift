@@ -58,13 +58,10 @@ private struct AppModelLaunchAtLoginFixture {
         self.store = store
         self.pasteboard = pasteboard
         self.launchAtLogin = launchAtLogin
-        self.model = AppModel(
+        self.model = try makeTestAppModel(
             store: store,
-            writer: ClipboardWriter(pasteboard: pasteboard, store: store),
-            screenshotCaptureService: ScreenshotCaptureService(),
-            ocrService: OCRService(),
-            launchAtLogin: launchAtLogin,
-            pasteboard: pasteboard
+            pasteboard: pasteboard,
+            launchAtLogin: launchAtLogin
         )
     }
 }

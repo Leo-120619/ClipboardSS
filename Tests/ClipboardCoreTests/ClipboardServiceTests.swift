@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import CryptoKit
 @testable import ClipboardCore
 
 @Suite("Clipboard service")
@@ -50,6 +51,21 @@ struct ClipboardServiceTests {
 
         #expect(store.items.map(\.text) == ["two", "one"])
     }
+
+    @Test("PairedDevice persists optional host and legacy records decode")
+    func pairedDeviceHostRoundTrip() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data(#"[{"id":"\#(UUID().uuidString)","name":"Old"}]"#.utf8).write(to: tmp)
+
+        let store = try PairedDeviceStore(storageURL: tmp, keyStorage: InMemoryPairKeyStorage())
+        #expect(await store.devices.first?.host == nil)
+
+        let dev = PairedDevice(id: UUID(), name: "Mac", host: "192.168.0.4")
+        try await store.addDevice(dev, key: SymmetricKey(size: .bits256))
+
+        let reopened = try PairedDeviceStore(storageURL: tmp, keyStorage: InMemoryPairKeyStorage())
+        #expect(await reopened.devices.contains { $0.host == "192.168.0.4" })
+    }
 }
 
 private final class FakePasteboard: PasteboardClient {
@@ -79,5 +95,21 @@ private final class FakePasteboard: PasteboardClient {
 
     func writeImageData(_ data: Data) {
         lastImageData = data
+    }
+}
+
+private final class InMemoryPairKeyStorage: PairKeyStorage, @unchecked Sendable {
+    private var keys: [UUID: SymmetricKey] = [:]
+
+    func storeKey(_ key: SymmetricKey, for deviceId: UUID) throws {
+        keys[deviceId] = key
+    }
+
+    func getKey(for deviceId: UUID) throws -> SymmetricKey? {
+        keys[deviceId]
+    }
+
+    func deleteKey(for deviceId: UUID) throws {
+        keys[deviceId] = nil
     }
 }

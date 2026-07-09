@@ -21,8 +21,15 @@ final class AppModel: ObservableObject {
     @Published var launchAtLoginEnabled: Bool
     @Published var showCoachMarks: Bool
     @Published var currentCoachMarkIndex = 0
+    @Published var showDevices = false
+    @Published var joinInProgress = false
+    @Published private(set) var pairedDevices: [PairedDevice] = []
 
     let store: ClipStore
+    let pairingCoordinator: PairingCoordinator
+    let peerBrowser: PeerBrowser
+    private let clipSender: ClipSender
+    private let clipServer: ClipServer
     nonisolated static let coachMarksCompletedDefaultsKey = "hasCompletedCoachMarks"
     nonisolated static let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
     nonisolated static let coachMarkStepCount = CoachMarkStep.steps.count
@@ -32,6 +39,7 @@ final class AppModel: ObservableObject {
     private let screenTextCaptureService: ScreenTextCaptureService
     private let launchAtLogin: LaunchAtLoginControlling
     private let pasteboard: PasteboardClient
+    private var lastBroadcastClipID: UUID?
     var onClipboardShortcutChanged: ((KeyboardShortcut) -> Void)?
     var onScreenshotShortcutChanged: ((KeyboardShortcut?) -> Void)?
     var onScreenTextShortcutChanged: ((KeyboardShortcut?) -> Void)?
@@ -47,7 +55,11 @@ final class AppModel: ObservableObject {
         ocrService: OCRService,
         screenTextCaptureService: ScreenTextCaptureService = ScreenTextCaptureService(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
-        pasteboard: PasteboardClient
+        pasteboard: PasteboardClient,
+        pairingCoordinator: PairingCoordinator,
+        peerBrowser: PeerBrowser,
+        clipSender: ClipSender,
+        clipServer: ClipServer
     ) {
         self.store = store
         self.writer = writer
@@ -56,6 +68,10 @@ final class AppModel: ObservableObject {
         self.screenTextCaptureService = screenTextCaptureService
         self.launchAtLogin = launchAtLogin
         self.pasteboard = pasteboard
+        self.pairingCoordinator = pairingCoordinator
+        self.peerBrowser = peerBrowser
+        self.clipSender = clipSender
+        self.clipServer = clipServer
         self.clips = store.items
         self.clipboardShortcut = .savedClipboardShortcut
         self.screenshotShortcut = .savedScreenshotShortcut
@@ -66,6 +82,37 @@ final class AppModel: ObservableObject {
         self.showCoachMarks = forceCoachMarks || !UserDefaults.standard.bool(forKey: Self.coachMarksCompletedDefaultsKey)
         self.clipboardHasImage = pasteboard.readSnapshot().imageData != nil
         applyLaunchAtLoginPreference()
+    }
+
+    /// Starts the local clip server and peer discovery, and keeps `pairedDevices`
+    /// in sync with the paired-device store (including devices that pair us while
+    /// this app is the target of an incoming request).
+    func startNetworking() {
+        pairingCoordinator.onPairedDevicesChanged = { [weak self] in
+            Task { @MainActor in await self?.refreshPairedDevices() }
+        }
+        clipServer.start()
+        peerBrowser.start()
+        Task { await refreshPairedDevices() }
+    }
+
+    func refreshPairedDevices() async {
+        pairedDevices = await pairingCoordinator.pairedStore.devices
+    }
+
+    func unpairDevice(_ id: UUID) {
+        Task {
+            do {
+                try await pairingCoordinator.pairedStore.removeDevice(id: id)
+                await refreshPairedDevices()
+            } catch {
+                lastError = error.localizedDescription
+            }
+        }
+    }
+
+    func requestDevices() {
+        showDevices = true
     }
 
     var filteredClips: [ClipItem] {
@@ -81,8 +128,96 @@ final class AppModel: ObservableObject {
     }
 
     func refresh() {
+        let previousLatestID = clips.first?.id
         clips = store.items
         clipboardHasImage = pasteboard.readSnapshot().imageData != nil
+        guard let latest = clips.first, latest.id != previousLatestID, latest.id != lastBroadcastClipID else {
+            return
+        }
+        lastBroadcastClipID = latest.id
+        Task { await broadcast(clip: latest) }
+    }
+
+    func showPairingCode() -> String {
+        pairingCoordinator.startHosting()
+    }
+
+    func stopHostingCode() {
+        pairingCoordinator.stopHosting()
+    }
+
+    func joinWithCode(_ code: String) {
+        guard code.count == 6, code.allSatisfy(\.isNumber) else {
+            lastError = "Enter a 6-digit pairing code."
+            return
+        }
+
+        joinInProgress = true
+        lastError = nil
+
+        Task {
+            defer { joinInProgress = false }
+
+            let mdnsCandidates = peerBrowser.peers
+            if await tryPairing(with: mdnsCandidates, code: code) {
+                return
+            }
+
+            let sweptCandidates = Self.composeJoinCandidates(
+                mdnsPeers: mdnsCandidates,
+                sweptPeers: await SubnetSweeper.sweep()
+            )
+            if await tryPairing(with: sweptCandidates, code: code) {
+                return
+            }
+
+            lastError = "No device accepted that code. Make sure the other device is showing a code on the same Wi-Fi."
+        }
+    }
+
+    nonisolated static func composeSendTargets(mdnsPeers: [Peer], pairedDevices: [PairedDevice]) -> [Peer] {
+        var byId: [UUID: Peer] = [:]
+        for device in pairedDevices {
+            if let host = device.host {
+                byId[device.id] = Peer(id: device.id, name: device.name, host: host, port: 51888)
+            }
+        }
+        for peer in mdnsPeers {
+            byId[peer.id] = peer
+        }
+        return Array(byId.values)
+    }
+
+    nonisolated static func composeJoinCandidates(mdnsPeers: [Peer], sweptPeers: [Peer]) -> [Peer] {
+        var seen: Set<UUID> = []
+        var result: [Peer] = []
+        for peer in mdnsPeers + sweptPeers {
+            guard seen.insert(peer.id).inserted else { continue }
+            result.append(peer)
+        }
+        return result
+    }
+
+    private func broadcast(clip: ClipItem) async {
+        let targets = Self.composeSendTargets(mdnsPeers: peerBrowser.peers, pairedDevices: pairedDevices)
+        do {
+            _ = try await clipSender.broadcast(clip: clip, to: targets)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func tryPairing(with candidates: [Peer], code: String) async -> Bool {
+        for peer in candidates {
+            do {
+                try await pairingCoordinator.startPairing(with: peer, code: code)
+                await refreshPairedDevices()
+                return true
+            } catch {
+                continue
+            }
+        }
+        return false
     }
 
     func cleanupExpiredClips() throws {
