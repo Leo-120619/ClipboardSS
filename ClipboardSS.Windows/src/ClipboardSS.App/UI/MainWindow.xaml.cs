@@ -204,6 +204,24 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     }
 
     private void Devices_OnClick(object sender, RoutedEventArgs args) => DevicesRequested?.Invoke(this, EventArgs.Empty);
+    private void Window_OnDragOver(object sender, DragEventArgs args)
+    {
+        args.Effects = args.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+        args.Handled = true;
+    }
+
+    private async void Window_OnDrop(object sender, DragEventArgs args)
+    {
+        if (args.Data.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } paths || !File.Exists(paths[0])) return;
+        var devices = _model.PairedDevices.Where(device => !string.IsNullOrWhiteSpace(device.Host)).ToArray();
+        if (devices.Length != 1)
+        {
+            _model.ReportError(devices.Length == 0 ? "Pair a reachable device before sending a file." : "Choose Send file next to a device in Devices.");
+            if (devices.Length > 1) DevicesRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+        await _model.SendFileAsync(paths[0], devices[0].Id);
+    }
     private void ScreenText_OnClick(object sender, RoutedEventArgs args) => ScreenTextRequested?.Invoke(this, EventArgs.Empty);
     private void Screenshot_OnClick(object sender, RoutedEventArgs args) => ScreenshotRequested?.Invoke(this, EventArgs.Empty);
     private void Preferences_OnClick(object sender, RoutedEventArgs args) => PreferencesRequested?.Invoke(this, EventArgs.Empty);

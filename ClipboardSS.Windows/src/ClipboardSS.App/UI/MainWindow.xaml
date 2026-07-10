@@ -8,7 +8,8 @@
         Topmost="True" ShowInTaskbar="False"
         ExtendsContentIntoTitleBar="True"
         WindowBackdropType="Mica"
-        Background="{DynamicResource ApplicationBackgroundBrush}">
+        Background="{DynamicResource ApplicationBackgroundBrush}"
+        AllowDrop="True" DragOver="Window_OnDragOver" Drop="Window_OnDrop">
     <ui:FluentWindow.Resources>
         <Style x:Key="SegmentButton" TargetType="RadioButton" BasedOn="{StaticResource {x:Type ToggleButton}}">
             <Setter Property="Height" Value="34" />

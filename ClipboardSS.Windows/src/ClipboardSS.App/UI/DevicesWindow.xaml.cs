@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using Microsoft.Win32;
 
 namespace ClipboardSS.App.UI;
 
@@ -65,7 +66,22 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         Refresh();
     }
 
-    private void Refresh() => PairedList.ItemsSource = _model.PairedDevices.ToArray();
+    private void CancelTransfer_OnClick(object sender, RoutedEventArgs args)
+    {
+        if (sender is Button { Tag: string id }) _model.CancelTransfer(id);
+    }
+
+    private async void SendFile_OnClick(object sender, RoutedEventArgs args)
+    {
+        if (sender is not Button { Tag: Guid id }) return;
+        var picker = new OpenFileDialog { Title = "Send a file", CheckFileExists = true };
+        if (picker.ShowDialog(this) != true) return;
+        ErrorText.Text = string.Empty;
+        try { await _model.SendFileAsync(picker.FileName, id); }
+        catch (Exception exception) { ErrorText.Text = exception.Message; }
+    }
+
+    private void Refresh() { PairedList.ItemsSource = _model.PairedDevices.ToArray(); TransferList.ItemsSource = _model.Transfers.ToArray(); }
 
     private void OnClosing(object? sender, CancelEventArgs args)
     {

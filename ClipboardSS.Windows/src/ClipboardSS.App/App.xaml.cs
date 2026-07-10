@@ -103,7 +103,10 @@ public partial class App : System.Windows.Application
         var mdns = new MdnsService(identity);
         var sweeper = new SubnetSweeper();
         var sender = new ClipSender(identity, pairedStore, transport, _settings.StorageDirectory);
-        _model = new AppModel(store, _clipboard, pairing, sender, mdns, sweeper);
+        var fileSender = new FileSender(identity, pairedStore, transport);
+        var fileReceiver = new FileReceiver(Path.Combine(_settings.StorageDirectory, "Transfers"),
+            () => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
+        _model = new AppModel(store, _clipboard, pairing, sender, mdns, sweeper, fileSender, fileReceiver);
         _server = new TcpClipServer(new ClipServerRouter(identity, _model));
         _hotKeys = new HotKeyManager();
         _pasteInjector = new PasteInjector();

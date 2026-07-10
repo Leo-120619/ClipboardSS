@@ -15,6 +15,14 @@ public interface IClipServerBackend
 {
     byte[]? GetPairKey(Guid deviceId);
     ReceiveResult Receive(ClipPayload payload);
+    Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, CancellationToken cancellationToken) =>
+        Task.FromResult(new FileReceiveResult(404, "unsupported"));
+    Task<FileReceiveResult> HandleFileChunkAsync(string transferId, int chunkIndex, byte[] body, CancellationToken cancellationToken) =>
+        Task.FromResult(new FileReceiveResult(404, "unsupported"));
+    Task<FileReceiveResult> HandleFileFinishAsync(string transferId, CancellationToken cancellationToken) =>
+        Task.FromResult(new FileReceiveResult(404, "unsupported"));
+    Task<FileReceiveResult> HandleFileCancelAsync(string transferId, CancellationToken cancellationToken) =>
+        Task.FromResult(new FileReceiveResult(404, "unsupported"));
     Task<PairStartResponse> HandlePairStartAsync(
         PairStartRequest request,
         string remoteHost,
@@ -63,6 +71,35 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
             {
                 return TextResponse(400, "Bad Request");
             }
+        }
+
+        if (request.Path == "/v1/file/chunk")
+        {
+            if (!request.Headers.TryGetValue("x-transfer-id", out var transferId) ||
+                !request.Headers.TryGetValue("x-chunk-index", out var indexText) ||
+                !int.TryParse(indexText, out var index)) return TextResponse(400, "Bad Request");
+            var result = await backend.HandleFileChunkAsync(transferId, index, request.Body, cancellationToken);
+            return FileResponse(result);
+        }
+
+        if (request.Path is "/v1/file/offer" or "/v1/file/finish" or "/v1/file/cancel")
+        {
+            try
+            {
+                var envelope = JsonSerializer.Deserialize<ClipEnvelope>(request.Body, WireJson.Options)
+                    ?? throw new JsonException("Missing envelope.");
+                var key = backend.GetPairKey(envelope.SourceDeviceId);
+                if (key is null) return TextResponse(401, "Unauthorized");
+                FileReceiveResult result;
+                if (request.Path == "/v1/file/offer")
+                    result = await backend.HandleFileOfferAsync(EnvelopeCrypto.OpenJson<FileOfferPayload>(envelope, key), key, cancellationToken);
+                else if (request.Path == "/v1/file/finish")
+                    result = await backend.HandleFileFinishAsync(EnvelopeCrypto.OpenJson<FileFinishPayload>(envelope, key).TransferId, cancellationToken);
+                else
+                    result = await backend.HandleFileCancelAsync(EnvelopeCrypto.OpenJson<FileCancelPayload>(envelope, key).TransferId, cancellationToken);
+                return FileResponse(result);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested) { return TextResponse(400, "Bad Request"); }
         }
 
         if (request.Path == "/v1/pair/start")
@@ -115,4 +152,11 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
 
     private static HttpResponse TextResponse(int statusCode, string body) =>
         new(statusCode, new Dictionary<string, string>(), Encoding.UTF8.GetBytes(body));
+
+    private static HttpResponse FileResponse(FileReceiveResult result)
+    {
+        var body = new Dictionary<string, object> { ["status"] = result.Status };
+        if (result.Received is int received) body["received"] = received;
+        return JsonResponse(result.StatusCode, JsonSerializer.SerializeToUtf8Bytes(body, WireJson.Options));
+    }
 }

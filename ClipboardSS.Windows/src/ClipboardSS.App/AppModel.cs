@@ -18,6 +18,10 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private readonly ClipboardWriter _writer;
     private readonly ClipReceiver _receiver;
     private readonly ClipSender _sender;
+    private readonly FileSender _fileSender;
+    private readonly FileReceiver _fileReceiver;
+    private readonly Dictionary<string, CancellationTokenSource> _fileCancellations = [];
+    private readonly List<FileTransferProgress> _transfers = [];
     private readonly MdnsService _mdns;
     private readonly SubnetSweeper _sweeper;
     private CancellationTokenSource? _clipboardDebounce;
@@ -33,7 +37,9 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         PairingCoordinator pairingCoordinator,
         ClipSender sender,
         MdnsService mdns,
-        SubnetSweeper sweeper)
+        SubnetSweeper sweeper,
+        FileSender fileSender,
+        FileReceiver fileReceiver)
     {
         Store = store;
         PairingCoordinator = pairingCoordinator;
@@ -43,6 +49,9 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _sender = sender;
         _mdns = mdns;
         _sweeper = sweeper;
+        _fileSender = fileSender;
+        _fileReceiver = fileReceiver;
+        _fileReceiver.TransferChanged += UpdateTransfer;
         _clipboard.Changed += ClipboardChanged;
         _mdns.PeersChanged += (_, _) => OnPropertyChanged(nameof(VisiblePeers));
         PairingCoordinator.PairedDevicesChanged += (_, _) =>
@@ -60,6 +69,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     public IReadOnlyList<ClipItem> Clips => Store.Items;
     public IReadOnlyList<Peer> VisiblePeers => _mdns.Peers;
     public IReadOnlyList<PairedDevice> PairedDevices => PairingCoordinator.PairedStore.Devices;
+    public IReadOnlyList<FileTransferProgress> Transfers => _transfers;
 
     public string? LastError
     {
@@ -185,6 +195,25 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public async Task SendFileAsync(string path, Guid deviceId)
+    {
+        var peer = ComposeSendTargets(VisiblePeers, PairedDevices).FirstOrDefault(item => item.Id == deviceId)
+            ?? throw new InvalidOperationException("The device is not currently reachable.");
+        var cancellation = new CancellationTokenSource();
+        var transferId = Guid.NewGuid().ToString("D").ToLowerInvariant();
+        _fileCancellations[transferId] = cancellation;
+        var progress = new Progress<FileTransferProgress>(UpdateTransfer);
+        try { await _fileSender.SendAsync(path, peer, progress, cancellation.Token, transferId); }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { LastError = $"File transfer failed: {exception.Message}"; }
+        finally { _fileCancellations.Remove(transferId); cancellation.Dispose(); }
+    }
+
+    public void CancelTransfer(string transferId)
+    {
+        if (_fileCancellations.Remove(transferId, out var cancellation)) cancellation.Cancel();
+    }
+
     public byte[]? GetPairKey(Guid deviceId) => PairingCoordinator.PairedStore.GetKey(deviceId);
 
     public ReceiveResult Receive(ClipPayload payload)
@@ -204,6 +233,15 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
             return result;
         });
     }
+
+    public Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, CancellationToken cancellationToken) =>
+        _fileReceiver.OfferAsync(offer, pairKey, cancellationToken);
+    public Task<FileReceiveResult> HandleFileChunkAsync(string transferId, int chunkIndex, byte[] body, CancellationToken cancellationToken) =>
+        _fileReceiver.ChunkAsync(transferId, chunkIndex, body, cancellationToken);
+    public Task<FileReceiveResult> HandleFileFinishAsync(string transferId, CancellationToken cancellationToken) =>
+        _fileReceiver.FinishAsync(transferId, cancellationToken);
+    public Task<FileReceiveResult> HandleFileCancelAsync(string transferId, CancellationToken cancellationToken) =>
+        _fileReceiver.CancelAsync(transferId, cancellationToken);
 
     public Task<PairStartResponse> HandlePairStartAsync(
         PairStartRequest request,
@@ -243,6 +281,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _clipboardDebounce?.Cancel();
         _clipboardDebounce?.Dispose();
         _mdns.Dispose();
+        _fileReceiver.Dispose();
     }
 
     private void ClipboardChanged(object? sender, EventArgs args)
@@ -341,6 +380,17 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+    private void UpdateTransfer(FileTransferProgress progress)
+    {
+        void Apply()
+        {
+            var index = _transfers.FindIndex(item => item.TransferId == progress.TransferId);
+            if (index >= 0) _transfers[index] = progress; else _transfers.Insert(0, progress);
+            OnPropertyChanged(nameof(Transfers)); StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        if (Application.Current.Dispatcher.CheckAccess()) Apply(); else Application.Current.Dispatcher.Invoke(Apply);
+    }
 }
 
 public enum PasteMode

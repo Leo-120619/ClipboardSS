@@ -12,6 +12,9 @@ public sealed class EnvelopeCryptoException(string message, Exception? innerExce
 public static class EnvelopeCrypto
 {
     public static ClipEnvelope Seal(ClipPayload payload, Guid sourceDeviceId, ReadOnlySpan<byte> pairKey)
+        => SealJson(payload, sourceDeviceId, pairKey);
+
+    public static ClipEnvelope SealJson<T>(T payload, Guid sourceDeviceId, ReadOnlySpan<byte> pairKey)
     {
         var nonce = new byte[12];
         new SecureRandom().NextBytes(nonce);
@@ -26,6 +29,9 @@ public static class EnvelopeCrypto
     }
 
     public static ClipPayload Open(ClipEnvelope envelope, ReadOnlySpan<byte> pairKey)
+        => OpenJson<ClipPayload>(envelope, pairKey);
+
+    public static T OpenJson<T>(ClipEnvelope envelope, ReadOnlySpan<byte> pairKey)
     {
         try
         {
@@ -37,7 +43,7 @@ public static class EnvelopeCrypto
             }
 
             var plaintext = ChaCha20Poly1305Cipher.Decrypt(pairKey, nonce, ciphertext);
-            return JsonSerializer.Deserialize<ClipPayload>(plaintext, WireJson.Options)
+            return JsonSerializer.Deserialize<T>(plaintext, WireJson.Options)
                 ?? throw new EnvelopeCryptoException("The envelope payload is empty.");
         }
         catch (Exception exception) when (

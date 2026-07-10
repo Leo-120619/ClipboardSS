@@ -7,6 +7,21 @@ namespace ClipboardSS.Core.Tests;
 public sealed class CryptoParityTests
 {
     [Fact]
+    public async Task FileTransferVectorsMatchWireProtocol()
+    {
+        await using var stream = new MemoryStream([1, 2, 3]);
+        Assert.Equal("53d35d037113cb046848c134d774023f716d41879185bb35b942a0472bcd70fe",
+            await ContentHasher.FileHashAsync(stream, TestContext.Current.CancellationToken));
+        var pairKey = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        var key = FileTransferCrypto.DeriveFileKey(pairKey, "6f9619ff-8b86-d011-b42d-00c04fc964ff");
+        Assert.Equal("2b3f780b885ee8149fe062a00b2bb4ecc9b4326c058ad858b23009f3397a4554", Convert.ToHexString(key).ToLowerInvariant());
+        Assert.Equal("878b3fd3c6494ba0be8976ec7543362243af08", Convert.ToHexString(FileTransferCrypto.SealChunk(key, 0, [1, 2, 3])).ToLowerInvariant());
+        Assert.Equal("fc5bf0de6da51d44d7e16d35ec05ed598dd1cf", Convert.ToHexString(FileTransferCrypto.SealChunk(key, 1, [1, 2, 3])).ToLowerInvariant());
+        Assert.ThrowsAny<Exception>(() => FileTransferCrypto.OpenChunk(key, 1, FileTransferCrypto.SealChunk(key, 0, [1, 2, 3])));
+        var wrongKey = key.ToArray(); wrongKey[0] ^= 1;
+        Assert.ThrowsAny<Exception>(() => FileTransferCrypto.OpenChunk(wrongKey, 0, FileTransferCrypto.SealChunk(key, 0, [1, 2, 3])));
+    }
+    [Fact]
     public void ContentHasherMatchesWireProtocolVectors()
     {
         Assert.Equal(
