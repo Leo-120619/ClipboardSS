@@ -59,6 +59,52 @@ public struct ClipEnvelope: Codable, Equatable, Sendable {
         )
     }
 
+    /// Seals any `Encodable` inner payload into an envelope, matching the ClipPayload
+    /// path exactly (ISO-8601 dates, ChaCha20-Poly1305, ciphertext||tag base64). Used by
+    /// the file-transfer control messages (offer / finish / cancel).
+    public static func seal<T: Encodable>(
+        payload: T,
+        sourceDeviceId: UUID,
+        pairKey: SymmetricKey
+    ) throws -> ClipEnvelope {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let plaintext = try encoder.encode(payload)
+
+        let sealedBox = try ChaChaPoly.seal(plaintext, using: pairKey)
+        let combinedCiphertext = sealedBox.ciphertext + sealedBox.tag
+
+        return ClipEnvelope(
+            v: 1,
+            sourceDeviceId: sourceDeviceId,
+            nonce: Data(sealedBox.nonce).base64EncodedString(),
+            ciphertext: combinedCiphertext.base64EncodedString()
+        )
+    }
+
+    /// Opens an envelope into an arbitrary `Decodable` inner payload.
+    public func open<T: Decodable>(_ type: T.Type, pairKey: SymmetricKey) throws -> T {
+        guard let nonceData = Data(base64Encoded: nonce),
+              let nonceObj = try? ChaChaPoly.Nonce(data: nonceData),
+              let combinedData = Data(base64Encoded: ciphertext),
+              combinedData.count >= 16 else {
+            throw EnvelopeError.decryptionFailed
+        }
+        do {
+            let sealedBox = try ChaChaPoly.SealedBox(
+                nonce: nonceObj,
+                ciphertext: combinedData.dropLast(16),
+                tag: combinedData.suffix(16)
+            )
+            let plaintext = try ChaChaPoly.open(sealedBox, using: pairKey)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(T.self, from: plaintext)
+        } catch {
+            throw EnvelopeError.decryptionFailed
+        }
+    }
+
     public func open(pairKey: SymmetricKey) throws -> ClipPayload {
         logToFile("ClipEnvelope.open: starting decryption")
         guard let nonceData = Data(base64Encoded: nonce) else {
