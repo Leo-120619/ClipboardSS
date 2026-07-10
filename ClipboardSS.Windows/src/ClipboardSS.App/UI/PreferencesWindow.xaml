@@ -1,61 +1,74 @@
-<Window x:Class="ClipboardSS.App.UI.PreferencesWindow"
+<ui:FluentWindow x:Class="ClipboardSS.App.UI.PreferencesWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:ui="clr-namespace:ClipboardSS.App.UI"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        xmlns:app="clr-namespace:ClipboardSS.App.UI"
         Title="ClipboardSS Preferences" Width="570" Height="530" MinWidth="520" MinHeight="480"
-        WindowStartupLocation="CenterOwner">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="24">
-            <TextBlock FontSize="24" FontWeight="SemiBold" Text="Preferences" />
+        WindowStartupLocation="CenterOwner"
+        ExtendsContentIntoTitleBar="True"
+        WindowBackdropType="Mica"
+        Background="{DynamicResource ApplicationBackgroundBrush}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
 
-            <TextBlock Margin="0,22,0,0" FontSize="16" FontWeight="SemiBold" Text="Keyboard shortcuts" />
-            <TextBlock Margin="0,4,0,14" Foreground="{DynamicResource SecondaryTextBrush}"
-                       Text="Activate a field, then press a key combination. Press Escape to cancel recording."
-                       TextWrapping="Wrap" />
+        <ui:TitleBar Grid.Row="0" Title="ClipboardSS Preferences" />
 
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="150" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="70" />
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <TextBlock VerticalAlignment="Center" Text="Open ClipboardSS" />
-                <ui:ShortcutRecorderControl x:Name="ClipboardRecorder" Grid.Column="1"
-                                            ShortcutRecorded="ClipboardShortcut_OnRecorded" />
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="24">
+                <TextBlock FontSize="24" FontWeight="SemiBold" Text="Preferences" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
 
-                <TextBlock Grid.Row="1" Margin="0,10,0,0" VerticalAlignment="Center" Text="Screenshot" />
-                <ui:ShortcutRecorderControl x:Name="ScreenshotRecorder" Grid.Row="1" Grid.Column="1" Margin="0,10,0,0"
-                                            ShortcutRecorded="ScreenshotShortcut_OnRecorded" />
-                <Button Grid.Row="1" Grid.Column="2" Margin="10,10,0,0" Height="44" Content="Clear"
-                        ToolTip="Clear screenshot shortcut" Click="ClearScreenshot_OnClick" />
+                <TextBlock Margin="0,22,0,0" FontSize="16" FontWeight="SemiBold" Text="Keyboard shortcuts" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <TextBlock Margin="0,4,0,14" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Text="Activate a field, then press a key combination. Press Escape to cancel recording."
+                           TextWrapping="Wrap" />
 
-                <TextBlock Grid.Row="2" Margin="0,10,0,0" VerticalAlignment="Center" Text="Screen Text OCR" />
-                <ui:ShortcutRecorderControl x:Name="ScreenTextRecorder" Grid.Row="2" Grid.Column="1" Margin="0,10,0,0"
-                                            ShortcutRecorded="ScreenTextShortcut_OnRecorded" />
-                <Button Grid.Row="2" Grid.Column="2" Margin="10,10,0,0" Height="44" Content="Clear"
-                        ToolTip="Clear screen text shortcut" Click="ClearScreenText_OnClick" />
-            </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="70" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock VerticalAlignment="Center" Text="Open ClipboardSS" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <app:ShortcutRecorderControl x:Name="ClipboardRecorder" Grid.Column="1"
+                                                ShortcutRecorded="ClipboardShortcut_OnRecorded" />
 
-            <Border x:Name="ShortcutErrorBorder" Margin="0,12,0,0" Padding="10,8" CornerRadius="6"
-                    Background="#FFFFE8E6" Visibility="Collapsed">
-                <TextBlock x:Name="ShortcutErrorText" Foreground="{DynamicResource DangerBrush}"
+                    <TextBlock Grid.Row="1" Margin="0,10,0,0" VerticalAlignment="Center" Text="Screenshot" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <app:ShortcutRecorderControl x:Name="ScreenshotRecorder" Grid.Row="1" Grid.Column="1" Margin="0,10,0,0"
+                                                ShortcutRecorded="ScreenshotShortcut_OnRecorded" />
+                    <ui:Button Grid.Row="1" Grid.Column="2" Margin="10,10,0,0" Height="34" Content="Clear"
+                            ToolTip="Clear screenshot shortcut" Click="ClearScreenshot_OnClick" />
+
+                    <TextBlock Grid.Row="2" Margin="0,10,0,0" VerticalAlignment="Center" Text="Screen Text OCR" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <app:ShortcutRecorderControl x:Name="ScreenTextRecorder" Grid.Row="2" Grid.Column="1" Margin="0,10,0,0"
+                                                ShortcutRecorded="ScreenTextShortcut_OnRecorded" />
+                    <ui:Button Grid.Row="2" Grid.Column="2" Margin="10,10,0,0" Height="34" Content="Clear"
+                            ToolTip="Clear screen text shortcut" Click="ClearScreenText_OnClick" />
+                </Grid>
+
+                <Border x:Name="ShortcutErrorBorder" Margin="0,12,0,0" Padding="10,8" CornerRadius="6"
+                        Background="{DynamicResource SystemFillColorCriticalBackgroundBrush}" Visibility="Collapsed">
+                    <TextBlock x:Name="ShortcutErrorText" Foreground="{DynamicResource SystemFillColorCriticalBrush}"
+                               TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
+                </Border>
+
+                <Separator Margin="0,22,0,18" Background="{DynamicResource DividerStrokeColorDefaultBrush}" />
+                <CheckBox x:Name="LaunchAtLoginCheck" Height="44" VerticalContentAlignment="Center"
+                          Content="Start ClipboardSS when I sign in" Click="LaunchAtLogin_OnClick" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+
+                <TextBlock Margin="0,18,0,4" FontWeight="SemiBold" Text="Storage folder" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <ui:TextBox x:Name="StoragePathText" IsReadOnly="True" Padding="8" TextWrapping="Wrap"
+                         AutomationProperties.Name="ClipboardSS storage folder" />
+                <TextBlock x:Name="ErrorText" Margin="0,12,0,0" Foreground="{DynamicResource SystemFillColorCriticalBrush}"
                            TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
-            </Border>
-
-            <Separator Margin="0,22,0,18" />
-            <CheckBox x:Name="LaunchAtLoginCheck" Height="44" VerticalContentAlignment="Center"
-                      Content="Start ClipboardSS when I sign in" Click="LaunchAtLogin_OnClick" />
-
-            <TextBlock Margin="0,18,0,4" FontWeight="SemiBold" Text="Storage folder" />
-            <TextBox x:Name="StoragePathText" IsReadOnly="True" Padding="8" TextWrapping="Wrap"
-                     AutomationProperties.Name="ClipboardSS storage folder" />
-            <TextBlock x:Name="ErrorText" Margin="0,12,0,0" Foreground="{DynamicResource DangerBrush}"
-                       TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
-        </StackPanel>
-    </ScrollViewer>
-</Window>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</ui:FluentWindow>

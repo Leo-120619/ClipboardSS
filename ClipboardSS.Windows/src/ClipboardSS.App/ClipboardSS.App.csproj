@@ -9,10 +9,11 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon />
+    <ApplicationIcon>..\..\Packaging\Assets\ClipboardSS.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="WPF-UI" Version="3.0.4" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../ClipboardSS.Core/ClipboardSS.Core.csproj" />

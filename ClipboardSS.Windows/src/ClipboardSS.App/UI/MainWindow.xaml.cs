@@ -11,7 +11,7 @@ using ClipboardSS.Core.Models;
 
 namespace ClipboardSS.App.UI;
 
-public partial class MainWindow : Window
+public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 {
     private readonly AppModel _model;
     private readonly SettingsStore _settings;

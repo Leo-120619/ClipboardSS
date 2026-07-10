@@ -105,7 +105,7 @@ public sealed class MdnsService : IDisposable
             Callback = _registerCallback,
             QueryContext = IntPtr.Zero,
             Credentials = IntPtr.Zero,
-            UnicastEnabled = 0,
+            UnicastEnabled = false,
         };
         _registerRequest = Allocate(request);
         return DnsServiceRegister(_registerRequest, IntPtr.Zero) == DnsRequestPending;
@@ -331,7 +331,7 @@ public sealed class MdnsService : IDisposable
         [MarshalAs(UnmanagedType.FunctionPtr)] public RegisterCallback Callback;
         public IntPtr QueryContext;
         public IntPtr Credentials;
-        [MarshalAs(UnmanagedType.Bool)] public int UnicastEnabled;
+        [MarshalAs(UnmanagedType.Bool)] public bool UnicastEnabled;
     }
 
     [StructLayout(LayoutKind.Sequential)]

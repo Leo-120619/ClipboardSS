@@ -39,7 +39,7 @@ public sealed class TrayController : IDisposable
         _icon = new Forms.NotifyIcon
         {
             Text = "ClipboardSS",
-            Icon = SystemIcons.Application,
+            Icon = LoadTrayIcon(),
             ContextMenuStrip = _menu,
             Visible = true,
         };
@@ -90,13 +90,21 @@ public sealed class TrayController : IDisposable
         return item;
     }
 
-    private void ToggleStartup(object? sender, EventArgs args)
+    private async void ToggleStartup(object? sender, EventArgs args)
     {
         var enabled = !_settings.Current.LaunchAtLogin;
         try
         {
-            StartupRegistration.SetEnabled(enabled);
-            _settings.Update(current => current with { LaunchAtLogin = enabled });
+            var result = await StartupRegistration.SetEnabledAsync(enabled);
+            _settings.Update(current => current with { LaunchAtLogin = result.IsEnabled });
+            if (result.WasDeniedByUser)
+            {
+                _icon.ShowBalloonTip(
+                    4000,
+                    "ClipboardSS",
+                    "Windows denied the request to start ClipboardSS at sign-in. Change it in Windows Startup Apps settings.",
+                    Forms.ToolTipIcon.Warning);
+            }
         }
         catch (Exception exception)
         {
@@ -110,5 +118,13 @@ public sealed class TrayController : IDisposable
         var text = clip.PreviewText.ReplaceLineEndings(" ").Trim();
         if (text.Length > 48) text = $"{text[..47]}…";
         return prefix + text;
+    }
+
+    private static Icon LoadTrayIcon()
+    {
+        var executablePath = Environment.ProcessPath;
+        return executablePath is null
+            ? SystemIcons.Application
+            : Icon.ExtractAssociatedIcon(executablePath) ?? SystemIcons.Application;
     }
 }

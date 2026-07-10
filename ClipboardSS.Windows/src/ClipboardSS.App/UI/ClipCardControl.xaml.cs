@@ -74,12 +74,12 @@ public partial class ClipCardControl : UserControl
     {
         if (Item is null) return;
         CardBorder.Background = (Brush)FindResource(
-            IsProminent ? "ProminentSurfaceBrush" : "SubtleSurfaceBrush");
+            IsProminent ? "ControlFillColorSecondaryBrush" : "CardBackgroundFillColorDefaultBrush");
         PreviewText.Text = Item.PreviewText;
         PreviewText.FontSize = IsProminent ? 16 : 14;
         PreviewText.FontWeight = IsProminent ? FontWeights.SemiBold : FontWeights.Normal;
         PreviewText.MaxHeight = IsProminent ? 80 : 42;
-        TypeGlyph.Text = Item.Type == ClipType.Text ? "\uE8A5" : "\uEB9F";
+        TypeGlyph.Symbol = Item.Type == ClipType.Text ? Wpf.Ui.Controls.SymbolRegular.TextT24 : Wpf.Ui.Controls.SymbolRegular.Image24;
         PinnedBadge.Visibility = Item.IsPinned ? Visibility.Visible : Visibility.Collapsed;
         PinButton.Content = Item.IsPinned ? "Unpin" : "Pin";
         PinButton.ToolTip = Item.IsPinned ? "Unpin clip" : "Pin clip";

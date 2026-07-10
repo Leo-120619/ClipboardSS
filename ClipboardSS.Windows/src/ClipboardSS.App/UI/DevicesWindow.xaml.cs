@@ -4,7 +4,7 @@ using System.Windows.Controls;
 
 namespace ClipboardSS.App.UI;
 
-public partial class DevicesWindow : Window
+public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
 {
     private readonly AppModel _model;
     private bool _allowClose;

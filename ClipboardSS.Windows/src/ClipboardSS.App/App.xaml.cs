@@ -47,6 +47,8 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        Wpf.Ui.Appearance.ApplicationThemeManager.ApplySystemTheme();
+
         try
         {
             ComposeAndStart();
@@ -137,7 +139,7 @@ public partial class App : System.Windows.Application
 
         try
         {
-            StartupRegistration.SetEnabled(_settings.Current.LaunchAtLogin);
+            _ = SynchronizeStartupRegistrationAsync(_settings.Current.LaunchAtLogin);
         }
         catch (Exception exception)
         {
@@ -180,6 +182,31 @@ public partial class App : System.Windows.Application
     {
         _ = _pasteInjector?.RememberForegroundWindow();
         _mainWindow?.ShowFromTray();
+    }
+
+    private async Task SynchronizeStartupRegistrationAsync(bool requested)
+    {
+        try
+        {
+            var result = await StartupRegistration.SetEnabledAsync(requested);
+            _settings?.Update(current => current with { LaunchAtLogin = result.IsEnabled });
+            if (result.WasDeniedByUser)
+            {
+                MessageBox.Show(
+                    "Windows denied ClipboardSS permission to start at sign-in. You can change this in Windows Startup Apps settings.",
+                    "ClipboardSS start at login",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                $"ClipboardSS started, but could not update Start at login.\n\n{exception.Message}",
+                "ClipboardSS",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
     }
 
     private async Task PerformPasteAsync(PasteRequest request)

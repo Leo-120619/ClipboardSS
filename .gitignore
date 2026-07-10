@@ -19,6 +19,17 @@
 build/
 DerivedData/
 
+# Windows .NET build and MSIX signing output
+ClipboardSS.Windows/bin/
+ClipboardSS.Windows/obj/
+ClipboardSS.Windows/.dotnet/
+ClipboardSS.Windows/artifacts/
+ClipboardSS.Windows/.msix-staging/
+*.msix
+*.msixbundle
+*.pfx
+*.cer
+
 # Xcode local user files (if user opens the folder in Xcode)
 *.xcodeproj/*
 !*.xcodeproj/project.pbxproj

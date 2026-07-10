@@ -8,7 +8,7 @@ using ClipboardSS.Core.Selection;
 
 namespace ClipboardSS.App.UI;
 
-public partial class ScreenshotReviewWindow : Window
+public partial class ScreenshotReviewWindow : Wpf.Ui.Controls.FluentWindow
 {
     private readonly AppModel _model;
     private readonly OcrSelectionState _selection;

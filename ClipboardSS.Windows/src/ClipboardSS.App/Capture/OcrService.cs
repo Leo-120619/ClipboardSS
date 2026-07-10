@@ -13,7 +13,7 @@ public sealed record OcrWordBlock(string Id, string Text, RectD Bounds);
 public sealed class OcrUnavailableException : InvalidOperationException
 {
     public OcrUnavailableException()
-        : base("Windows OCR is unavailable. Install an OCR language in Settings > Time & language > Language & region, then run ClipboardSS from its MSIX package.")
+        : base("Windows OCR is unavailable. Install an OCR language in Settings > Time & language > Language & region, then try again.")
     {
     }
 }
@@ -55,6 +55,7 @@ public sealed class OcrService
             writer.WriteBytes(prepared.Data);
             await writer.StoreAsync();
             await writer.FlushAsync();
+            writer.DetachStream();
         }
 
         stream.Seek(0);

@@ -5,7 +5,7 @@ using ClipboardSS.App.Win32;
 
 namespace ClipboardSS.App.UI;
 
-public partial class PreferencesWindow : Window
+public partial class PreferencesWindow : Wpf.Ui.Controls.FluentWindow
 {
     private readonly SettingsStore _settings;
     private readonly HotKeyManager _hotKeys;
@@ -102,19 +102,27 @@ public partial class PreferencesWindow : Window
         }
     }
 
-    private void LaunchAtLogin_OnClick(object sender, RoutedEventArgs args)
+    private async void LaunchAtLogin_OnClick(object sender, RoutedEventArgs args)
     {
         var enabled = LaunchAtLoginCheck.IsChecked == true;
         try
         {
-            StartupRegistration.SetEnabled(enabled);
-            _settings.Update(current => current with { LaunchAtLogin = enabled });
-            ErrorText.Text = string.Empty;
+            LaunchAtLoginCheck.IsEnabled = false;
+            var result = await StartupRegistration.SetEnabledAsync(enabled);
+            _settings.Update(current => current with { LaunchAtLogin = result.IsEnabled });
+            LaunchAtLoginCheck.IsChecked = result.IsEnabled;
+            ErrorText.Text = result.WasDeniedByUser
+                ? "Windows denied the request to start ClipboardSS at sign-in. You can change this in Windows Startup Apps settings."
+                : string.Empty;
         }
         catch (Exception exception)
         {
             ErrorText.Text = exception.Message;
-            LaunchAtLoginCheck.IsChecked = !enabled;
+            LaunchAtLoginCheck.IsChecked = _settings.Current.LaunchAtLogin;
+        }
+        finally
+        {
+            LaunchAtLoginCheck.IsEnabled = true;
         }
     }
 
