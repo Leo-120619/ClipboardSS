@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_router/shelf_router.dart';
@@ -9,12 +10,15 @@ import 'models.dart';
 import 'pairing_coordinator.dart';
 import 'paired_device_store.dart';
 import 'crypto_utils.dart';
+import 'file_receiver.dart';
+import 'file_transfer_models.dart';
 
 class ClipServer {
   final DeviceIdentity identity;
   final PairingCoordinator pairingCoordinator;
   final PairedDeviceStore pairedStore;
   final Function(ClipPayload) onClipReceived;
+  final FileReceiver? fileReceiver;
 
   HttpServer? _server;
   int get port => _server?.port ?? 0;
@@ -24,12 +28,15 @@ class ClipServer {
     required this.pairingCoordinator,
     required this.pairedStore,
     required this.onClipReceived,
+    this.fileReceiver,
   });
 
   static String identityBody(String deviceId, String deviceName) =>
       jsonEncode({'deviceId': deviceId, 'deviceName': deviceName, 'v': 1});
 
-  Future<void> start() async {
+  /// Builds the request handler (routes + pipeline). Exposed for testing without binding
+  /// a socket.
+  Handler buildHandler() {
     final router = Router();
 
     router.get('/v1/id', (Request request) {
@@ -41,10 +48,18 @@ class ClipServer {
     router.post('/v1/pair/start', _handlePairStart);
     router.post('/v1/pair/confirm', _handlePairConfirm);
     router.post('/v1/clip', _handleClip);
+    router.post('/v1/file/offer', _handleFileOffer);
+    router.post('/v1/file/chunk', _handleFileChunk);
+    router.post('/v1/file/finish', _handleFileFinish);
+    router.post('/v1/file/cancel', _handleFileCancel);
 
-    final handler = const Pipeline()
+    return const Pipeline()
         .addMiddleware(logRequests())
         .addHandler(router.call);
+  }
+
+  Future<void> start() async {
+    final handler = buildHandler();
 
     try {
       _server = await io.serve(handler, InternetAddress.anyIPv4, 51888);
@@ -133,5 +148,72 @@ class ClipServer {
       developer.log('Clip handle error: $e', name: 'ClipServer');
       return Response(400, body: e.toString());
     }
+  }
+
+  // MARK: - File transfer
+
+  Response _fileResponse(FileTransferResponse result) => Response(
+        result.statusCode,
+        body: jsonEncode(result.body),
+        headers: {'Content-Type': 'application/json'},
+      );
+
+  Future<Response> _handleFileOffer(Request request) async {
+    final receiver = fileReceiver;
+    if (receiver == null) return Response.notFound('Not Found');
+    try {
+      final envelope = ClipEnvelope.fromJson(jsonDecode(await request.readAsString()));
+      return _fileResponse(await receiver.handleOffer(envelope));
+    } catch (e) {
+      return Response(400, body: jsonEncode({'status': 'error'}));
+    }
+  }
+
+  Future<Response> _handleFileChunk(Request request) async {
+    final receiver = fileReceiver;
+    if (receiver == null) return Response.notFound('Not Found');
+    // Codecs lowercase header keys.
+    final transferId = request.headers[FileTransferConstants.transferIdHeader.toLowerCase()] ?? '';
+    final index = int.tryParse(
+            request.headers[FileTransferConstants.chunkIndexHeader.toLowerCase()] ?? '') ??
+        -1;
+    // shelf has no body cap; enforce one manually (chunk plaintext + tag + slack).
+    final body = await _readRawBody(request, FileTransferConstants.chunkSize + 4096);
+    if (body == null) {
+      return _fileResponse(FileTransferResponse(400, {'status': 'tooLarge'}));
+    }
+    return _fileResponse(await receiver.handleChunk(transferId, index, body));
+  }
+
+  Future<Response> _handleFileFinish(Request request) async {
+    final receiver = fileReceiver;
+    if (receiver == null) return Response.notFound('Not Found');
+    try {
+      final envelope = ClipEnvelope.fromJson(jsonDecode(await request.readAsString()));
+      return _fileResponse(await receiver.handleFinish(envelope));
+    } catch (e) {
+      return Response(400, body: jsonEncode({'status': 'error'}));
+    }
+  }
+
+  Future<Response> _handleFileCancel(Request request) async {
+    final receiver = fileReceiver;
+    if (receiver == null) return Response.notFound('Not Found');
+    try {
+      final envelope = ClipEnvelope.fromJson(jsonDecode(await request.readAsString()));
+      return _fileResponse(await receiver.handleCancel(envelope));
+    } catch (e) {
+      return Response(400, body: jsonEncode({'status': 'error'}));
+    }
+  }
+
+  /// Reads the raw request body, returning null if it exceeds [maxBytes].
+  Future<List<int>?> _readRawBody(Request request, int maxBytes) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in request.read()) {
+      builder.add(chunk);
+      if (builder.length > maxBytes) return null;
+    }
+    return builder.takeBytes();
   }
 }

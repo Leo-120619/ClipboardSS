@@ -126,4 +126,32 @@ class CryptoEnvelopeUtils {
     final jsonStr = utf8.decode(plaintext);
     return ClipPayload.fromJson(jsonDecode(jsonStr));
   }
+
+  /// Seals an arbitrary JSON map into an envelope — used by the file-transfer control
+  /// messages (offer / finish / cancel). Same construction as [seal].
+  static Future<ClipEnvelope> sealJson(
+      Map<String, dynamic> json, String sourceDeviceId, SecretKey pairKey) async {
+    final plaintext = utf8.encode(jsonEncode(json));
+    final secretBox = await _chacha.encrypt(plaintext, secretKey: pairKey);
+    final combinedCiphertext =
+        Uint8List.fromList([...secretBox.cipherText, ...secretBox.mac.bytes]);
+    return ClipEnvelope(
+      v: 1,
+      sourceDeviceId: sourceDeviceId,
+      nonce: base64Encode(secretBox.nonce),
+      ciphertext: base64Encode(combinedCiphertext),
+    );
+  }
+
+  /// Opens an envelope into an arbitrary JSON map.
+  static Future<Map<String, dynamic>> openJson(ClipEnvelope envelope, SecretKey pairKey) async {
+    final nonce = base64Decode(envelope.nonce);
+    final combinedData = base64Decode(envelope.ciphertext);
+    if (combinedData.length < 16) throw Exception('Invalid ciphertext length');
+    final ciphertext = combinedData.sublist(0, combinedData.length - 16);
+    final macBytes = combinedData.sublist(combinedData.length - 16);
+    final secretBox = SecretBox(ciphertext, nonce: nonce, mac: Mac(macBytes));
+    final plaintext = await _chacha.decrypt(secretBox, secretKey: pairKey);
+    return jsonDecode(utf8.decode(plaintext)) as Map<String, dynamic>;
+  }
 }
