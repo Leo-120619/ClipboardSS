@@ -1,0 +1,15 @@
+<Application x:Class="ClipboardSS.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <Application.Resources>
+        <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFDFDFE" />
+        <SolidColorBrush x:Key="SubtleSurfaceBrush" Color="#FFF3F5F8" />
+        <SolidColorBrush x:Key="ProminentSurfaceBrush" Color="#FFE8F2FF" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#FFD5DAE2" />
+        <SolidColorBrush x:Key="SecondaryTextBrush" Color="#FF596273" />
+        <SolidColorBrush x:Key="AccentBrush" Color="#FF1769E0" />
+        <SolidColorBrush x:Key="DangerBrush" Color="#FFB42318" />
+        <SolidColorBrush x:Key="PinnedBrush" Color="#FF9A5700" />
+    </Application.Resources>
+</Application>

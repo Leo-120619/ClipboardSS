@@ -1,0 +1,44 @@
+<Window x:Class="ClipboardSS.App.UI.DevicesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ClipboardSS Devices" Width="480" Height="520"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock FontSize="24" FontWeight="SemiBold" Text="Devices" />
+        <StackPanel Grid.Row="1" Margin="0,18,0,0" Orientation="Horizontal">
+            <Button Width="120" Content="Show Code" Click="ShowCode_OnClick" />
+            <TextBlock x:Name="HostCodeText" Margin="18,3,0,0" FontSize="22" FontWeight="Bold" />
+        </StackPanel>
+        <StackPanel Grid.Row="2" Margin="0,18,0,0" Orientation="Horizontal">
+            <TextBox x:Name="JoinCodeText" Width="160" MaxLength="6" FontSize="18" />
+            <Button x:Name="JoinButton" Margin="10,0,0,0" Width="100" Content="Enter Code"
+                    Click="Join_OnClick" />
+        </StackPanel>
+        <TextBlock x:Name="ErrorText" Grid.Row="3" Margin="0,10,0,10" Foreground="#B00020"
+                   TextWrapping="Wrap" />
+        <ListBox x:Name="PairedList" Grid.Row="4">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <DockPanel Margin="4">
+                        <Button DockPanel.Dock="Right" Content="Unpair" Tag="{Binding Id}"
+                                Click="Unpair_OnClick" />
+                        <StackPanel>
+                            <TextBlock FontWeight="SemiBold" Text="{Binding Name}" />
+                            <TextBlock Foreground="#666" Text="{Binding Host}" />
+                        </StackPanel>
+                    </DockPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+        <TextBlock Grid.Row="5" Margin="0,14,0,0" Foreground="#666" TextWrapping="Wrap"
+                   Text="Pairing codes expire after 180 seconds. If discovery misses a device, ClipboardSS automatically scans the local /24 subnet." />
+    </Grid>
+</Window>

@@ -1,0 +1,20 @@
+<Window x:Class="ClipboardSS.App.Capture.RegionSelectWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True"
+        Background="Transparent" ShowInTaskbar="False" Topmost="True"
+        Focusable="True" Cursor="Cross">
+    <Grid x:Name="Root" Background="#78000000"
+          PreviewKeyDown="Root_OnPreviewKeyDown"
+          PreviewMouseLeftButtonDown="Root_OnPreviewMouseLeftButtonDown"
+          PreviewMouseMove="Root_OnPreviewMouseMove"
+          PreviewMouseLeftButtonUp="Root_OnPreviewMouseLeftButtonUp">
+        <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False">
+            <Border x:Name="SelectionBorder" Visibility="Collapsed"
+                    BorderBrush="#FF58A6FF" BorderThickness="2" Background="#2058A6FF" />
+        </Canvas>
+        <TextBlock Margin="24" HorizontalAlignment="Center" VerticalAlignment="Top"
+                   Padding="12,7" Background="#D8202020" Foreground="White"
+                   Text="Drag to capture a region · Esc to cancel" FontSize="14" />
+    </Grid>
+</Window>

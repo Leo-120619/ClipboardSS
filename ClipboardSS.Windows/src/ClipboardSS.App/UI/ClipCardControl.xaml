@@ -1,0 +1,72 @@
+<UserControl x:Class="ClipboardSS.App.UI.ClipCardControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore"
+             Focusable="False">
+    <Border x:Name="CardBorder" Margin="0,0,0,10" Padding="12"
+            CornerRadius="9" BorderThickness="1"
+            BorderBrush="{DynamicResource BorderBrush}"
+            Background="{DynamicResource SubtleSurfaceBrush}">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="42" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Border Width="34" Height="34" CornerRadius="7" VerticalAlignment="Top"
+                    Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1">
+                <TextBlock x:Name="TypeGlyph" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontFamily="Segoe MDL2 Assets" FontSize="16" />
+            </Border>
+
+            <Grid x:Name="ContentHitArea" Grid.Column="1" Margin="8,0,12,0"
+                  Focusable="True" Cursor="Hand"
+                  MouseLeftButtonUp="Content_OnMouseLeftButtonUp"
+                  KeyDown="Content_OnKeyDown"
+                  automation:AutomationProperties.HelpText="Press Enter to copy this clip">
+                <Grid.Style>
+                    <Style TargetType="Grid">
+                        <Setter Property="Background" Value="Transparent" />
+                        <Style.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter Property="Background" Value="#181769E0" />
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Grid.Style>
+                <StackPanel>
+                    <DockPanel LastChildFill="True">
+                        <Border x:Name="PinnedBadge" DockPanel.Dock="Right" Margin="8,0,0,0"
+                                Padding="7,3" CornerRadius="9" Background="#FFFFE8C2" Visibility="Collapsed">
+                            <TextBlock Text="Pinned" FontSize="11" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource PinnedBrush}" />
+                        </Border>
+                        <TextBlock x:Name="PreviewText" TextWrapping="Wrap" ClipToBounds="True"
+                                   Foreground="#FF171A21" LineHeight="20" />
+                    </DockPanel>
+                    <Border x:Name="ImageContainer" Margin="0,10,0,0" MaxHeight="150"
+                            CornerRadius="7" ClipToBounds="True" Visibility="Collapsed"
+                            Background="{DynamicResource SurfaceBrush}">
+                        <Image x:Name="ThumbnailImage" Stretch="Uniform" MaxHeight="150"
+                               automation:AutomationProperties.Name="Clipboard image preview" />
+                    </Border>
+                    <TextBlock x:Name="MetadataText" Margin="0,8,0,0" FontSize="12"
+                               Foreground="{DynamicResource SecondaryTextBrush}" />
+                </StackPanel>
+            </Grid>
+
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top">
+                <Button Width="48" Height="44" Margin="0,0,6,0" Content="Copy"
+                        ToolTip="Copy clip" Click="Copy_OnClick"
+                        automation:AutomationProperties.Name="Copy clip" />
+                <Button x:Name="PinButton" Width="48" Height="44" Margin="0,0,6,0" Content="Pin"
+                        ToolTip="Pin clip" Click="Pin_OnClick"
+                        automation:AutomationProperties.Name="Pin clip" />
+                <Button Width="56" Height="44" Content="Delete" Foreground="{DynamicResource DangerBrush}"
+                        ToolTip="Delete clip" Click="Delete_OnClick"
+                        automation:AutomationProperties.Name="Delete clip" />
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>
