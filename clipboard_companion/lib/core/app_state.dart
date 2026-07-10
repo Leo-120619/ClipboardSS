@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:uuid/uuid.dart';
 import 'dart:async';
 import 'dart:io';
@@ -12,6 +14,9 @@ import 'peer_browser.dart';
 import 'pairing_coordinator.dart';
 import 'clip_server.dart';
 import 'clip_sender.dart';
+import 'file_receiver.dart';
+import 'file_sender.dart';
+import 'file_transfer_ui.dart';
 import 'subnet_sweeper.dart';
 
 List<Peer> composeSendTargets(
@@ -59,9 +64,18 @@ class AppState extends ChangeNotifier {
   late PairingCoordinator pairingCoordinator;
   late ClipServer clipServer;
   late ClipSender clipSender;
+  late FileSender fileSender;
+  late FileReceiver fileReceiver;
   late SharedPreferences _prefs;
   bool _coreNetworkingStarted = false;
   bool _discoveryRunning = false;
+
+  StreamSubscription<FileTransferReceiveEvent>? _transferSub;
+  Timer? _transferGcTimer;
+  final Map<String, TransferCancelToken> _sendTokens = {};
+
+  /// In-flight and finished transfers (both directions), newest first.
+  final List<FileTransferUiState> transfers = [];
 
   static const _clipsKey = 'saved_clips';
 
@@ -151,6 +165,21 @@ class AppState extends ChangeNotifier {
         pairedStore: pairedStore,
       );
       clipSender = ClipSender(identity: identity, pairedStore: pairedStore);
+      fileSender = FileSender(identity: identity, pairedStore: pairedStore);
+
+      final tempDir = await getTemporaryDirectory();
+      final transfersDir = Directory('${tempDir.path}/Transfers');
+      final destinationDir = await _resolveDestinationDir();
+      fileReceiver = FileReceiver(
+        pairedStore: pairedStore,
+        transfersDirectory: transfersDir,
+        destinationProvider: () => destinationDir,
+      );
+      _transferSub = fileReceiver.events.listen(_onReceiveEvent);
+      _transferGcTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => fileReceiver.garbageCollect(),
+      );
 
       clipServer = ClipServer(
         identity: identity,
@@ -162,6 +191,7 @@ class AppState extends ChangeNotifier {
           notifyListeners();
           onClipReceived?.call(payload);
         },
+        fileReceiver: fileReceiver,
       );
 
       await clipServer.start();
@@ -261,6 +291,183 @@ class AppState extends ChangeNotifier {
     return clipSender.broadcast(clip, targets);
   }
 
+  // MARK: - File transfer
+
+  /// Resolves the reachable [Peer] for a paired device (mDNS first, then stored host).
+  Peer? resolvePeer(String deviceId) {
+    final canonical = canonicalDeviceId(deviceId);
+    final targets = composeSendTargets(peerBrowser.peers, pairedStore.devices);
+    for (final peer in targets) {
+      if (peer.id == canonical) return peer;
+    }
+    return null;
+  }
+
+  List<PairedDevice> get reachablePairedDevices =>
+      pairedStore.devices.where((d) => resolvePeer(d.id) != null).toList();
+
+  Future<void> sendFileTo(File file, String deviceId) async {
+    final peer = resolvePeer(deviceId);
+    if (peer == null) {
+      lastError = 'That device is not reachable right now.';
+      notifyListeners();
+      return;
+    }
+
+    final uiId = const Uuid().v4();
+    final token = TransferCancelToken();
+    _sendTokens[uiId] = token;
+    transfers.insert(
+      0,
+      FileTransferUiState(
+        id: uiId,
+        key: uiId,
+        fileName: _basename(file.path),
+        direction: TransferDirection.sending,
+      ),
+    );
+    _syncWakelock();
+    notifyListeners();
+
+    try {
+      await fileSender.sendFile(
+        file: file,
+        peer: peer,
+        mimeType: _mimeType(file.path),
+        onProgress: (p) => _updateSendProgress(uiId, p),
+        isCancelled: () => token.cancelled,
+      );
+      _completeSend(uiId, TransferStatus.completed);
+    } on FileSendCancelledException {
+      _completeSend(uiId, TransferStatus.cancelled);
+    } catch (e) {
+      _completeSend(uiId, TransferStatus.failed, reason: e.toString());
+    }
+  }
+
+  void cancelTransfer(String uiId) {
+    _sendTokens[uiId]?.cancel();
+  }
+
+  void clearFinishedTransfers() {
+    transfers.removeWhere((t) => !t.isActive);
+    notifyListeners();
+  }
+
+  /// Keeps the screen awake while any transfer is active (mobile only; foreground
+  /// transfers can die if the device sleeps). Best-effort.
+  void _syncWakelock() {
+    if (!(Platform.isIOS || Platform.isAndroid)) return;
+    final anyActive = transfers.any((t) => t.isActive);
+    WakelockPlus.toggle(enable: anyActive).catchError((_) {});
+  }
+
+  void _updateSendProgress(String uiId, double progress) {
+    final t = transfers.firstWhere((t) => t.id == uiId, orElse: () => _missing);
+    if (identical(t, _missing) || !t.isActive) return;
+    t.progress = progress;
+    notifyListeners();
+  }
+
+  void _completeSend(String uiId, TransferStatus status, {String? reason}) {
+    _sendTokens.remove(uiId);
+    final t = transfers.firstWhere((t) => t.id == uiId, orElse: () => _missing);
+    if (identical(t, _missing)) return;
+    if (status == TransferStatus.completed) t.progress = 1.0;
+    t.status = status;
+    t.reason = reason;
+    _syncWakelock();
+    notifyListeners();
+  }
+
+  void _onReceiveEvent(FileTransferReceiveEvent event) {
+    FileTransferUiState? existing;
+    for (final t in transfers) {
+      if (t.key == event.transferId && t.direction == TransferDirection.receiving) {
+        existing = t;
+        break;
+      }
+    }
+
+    switch (event.type) {
+      case 'started':
+        if (existing == null) {
+          transfers.insert(
+            0,
+            FileTransferUiState(
+              id: const Uuid().v4(),
+              key: event.transferId,
+              fileName: event.fileName ?? 'file',
+              direction: TransferDirection.receiving,
+            ),
+          );
+        }
+        break;
+      case 'progress':
+        if (existing != null && event.total > 0) {
+          existing.progress = event.received / event.total;
+        }
+        break;
+      case 'completed':
+        if (existing != null) {
+          existing.progress = 1.0;
+          existing.status = TransferStatus.completed;
+          existing.path = event.path;
+        }
+        break;
+      case 'failed':
+        existing?.status = TransferStatus.failed;
+        existing?.reason = event.reason;
+        break;
+      case 'cancelled':
+        existing?.status = TransferStatus.cancelled;
+        break;
+    }
+    _syncWakelock();
+    notifyListeners();
+  }
+
+  /// Save location: Android app-scoped external files dir (no SAF), iOS Documents
+  /// dir (Files-visible via Info.plist keys), fallback to app support elsewhere.
+  Future<Directory> _resolveDestinationDir() async {
+    Directory base;
+    if (Platform.isAndroid) {
+      base = (await getExternalStorageDirectory()) ?? await getApplicationSupportDirectory();
+    } else if (Platform.isIOS) {
+      base = await getApplicationDocumentsDirectory();
+    } else {
+      base = await getApplicationDocumentsDirectory();
+    }
+    final dir = Directory('${base.path}/Received');
+    await dir.create(recursive: true);
+    return dir;
+  }
+
+  static final FileTransferUiState _missing = FileTransferUiState(
+    id: '__missing__',
+    key: '__missing__',
+    fileName: '',
+    direction: TransferDirection.sending,
+  );
+
+  String _basename(String path) => path.split('/').last.split('\\').last;
+
+  String _mimeType(String path) {
+    final ext = path.contains('.') ? path.split('.').last.toLowerCase() : '';
+    const map = {
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'png': 'image/png',
+      'gif': 'image/gif',
+      'pdf': 'application/pdf',
+      'mp4': 'video/mp4',
+      'mov': 'video/quicktime',
+      'zip': 'application/zip',
+      'txt': 'text/plain',
+    };
+    return map[ext] ?? 'application/octet-stream';
+  }
+
   Future<void> deleteClip(String id) async {
     final initialCount = clips.length;
     clips.removeWhere((clip) => clip.id == id);
@@ -311,10 +518,13 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _transferGcTimer?.cancel();
+    unawaited(_transferSub?.cancel());
     if (_coreNetworkingStarted) {
       unawaited(peerBrowser.stop());
       unawaited(peerAdvertiser.stop());
       unawaited(clipServer.stop());
+      unawaited(fileReceiver.dispose());
     }
     super.dispose();
   }

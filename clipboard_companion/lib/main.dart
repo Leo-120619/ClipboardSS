@@ -9,10 +9,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'core/app_state.dart';
 import 'core/clip_sender.dart';
 import 'core/content_hasher.dart';
+import 'core/file_transfer_ui.dart';
 import 'core/models.dart';
 import 'desktop/clipboard_sync_service.dart';
 import 'desktop/desktop_shell.dart';
@@ -1182,9 +1185,21 @@ class _DevicesScreenState extends State<DevicesScreen> {
             await state.pairedStore.removeDevice(id);
             if (mounted) setState(() {});
           },
+          onSendFile: (id) => _pickAndSend(context, state, id),
         ),
+        if (state.transfers.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          _TransfersCard(transfers: state.transfers, state: state),
+        ],
       ],
     );
+  }
+
+  Future<void> _pickAndSend(BuildContext context, AppState state, String deviceId) async {
+    final result = await FilePicker.platform.pickFiles(withData: false);
+    final path = result?.files.single.path;
+    if (path == null) return;
+    await state.sendFileTo(File(path), deviceId);
   }
 }
 
@@ -1325,8 +1340,13 @@ class _PairingCodeCardState extends State<_PairingCodeCard> {
 class _PairedDevicesCard extends StatelessWidget {
   final List<PairedDevice> devices;
   final Future<void> Function(String id) onUnpair;
+  final Future<void> Function(String id)? onSendFile;
 
-  const _PairedDevicesCard({required this.devices, required this.onUnpair});
+  const _PairedDevicesCard({
+    required this.devices,
+    required this.onUnpair,
+    this.onSendFile,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1395,6 +1415,13 @@ class _PairedDevicesCard extends StatelessWidget {
                           ],
                         ),
                       ),
+                      if (onSendFile != null)
+                        IconButton(
+                          tooltip: 'Send file',
+                          icon: const Icon(Icons.attach_file_rounded),
+                          color: theme.colorScheme.primary,
+                          onPressed: () => onSendFile!(device.id),
+                        ),
                       TextButton(
                         onPressed: () => onUnpair(device.id),
                         style: TextButton.styleFrom(
@@ -1411,6 +1438,121 @@ class _PairedDevicesCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _TransfersCard extends StatelessWidget {
+  final List<FileTransferUiState> transfers;
+  final AppState state;
+
+  const _TransfersCard({required this.transfers, required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Transfers',
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                TextButton(
+                  onPressed: state.clearFinishedTransfers,
+                  child: const Text('Clear finished'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            for (final transfer in transfers) ...[
+              _TransferRow(transfer: transfer, state: state),
+              if (transfer != transfers.last) const Divider(height: 1),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TransferRow extends StatelessWidget {
+  final FileTransferUiState transfer;
+  final AppState state;
+
+  const _TransferRow({required this.transfer, required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isSending = transfer.direction == TransferDirection.sending;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(
+                isSending ? Icons.upload_rounded : Icons.download_rounded,
+                size: 20,
+                color: theme.colorScheme.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  transfer.fileName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyMedium,
+                ),
+              ),
+              _trailing(context),
+            ],
+          ),
+          if (transfer.isActive) ...[
+            const SizedBox(height: 6),
+            LinearProgressIndicator(value: transfer.progress),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _trailing(BuildContext context) {
+    switch (transfer.status) {
+      case TransferStatus.inProgress:
+        if (transfer.direction == TransferDirection.sending) {
+          return TextButton(
+            onPressed: () => state.cancelTransfer(transfer.id),
+            child: const Text('Cancel'),
+          );
+        }
+        return Text('${(transfer.progress * 100).round()}%',
+            style: Theme.of(context).textTheme.bodySmall);
+      case TransferStatus.completed:
+        if (transfer.path != null) {
+          return TextButton(
+            onPressed: () => Share.shareXFiles([XFile(transfer.path!)]),
+            child: const Text('Open'),
+          );
+        }
+        return const Icon(Icons.check_circle, color: Colors.green, size: 20);
+      case TransferStatus.failed:
+        return Tooltip(
+          message: transfer.reason ?? 'Failed',
+          child: const Icon(Icons.error_outline, color: Colors.red, size: 20),
+        );
+      case TransferStatus.cancelled:
+        return Text('Cancelled', style: Theme.of(context).textTheme.bodySmall);
+    }
   }
 }
 
