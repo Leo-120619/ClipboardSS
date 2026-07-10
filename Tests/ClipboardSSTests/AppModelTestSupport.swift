@@ -33,6 +33,17 @@ func makeTestAppModel(
         transport: transport,
         storageDirectory: store.storageDirectory
     )
+    let fileSender = FileSender(
+        identity: identity,
+        pairedStore: pairedStore,
+        transport: transport
+    )
+    let downloadsDir = store.storageDirectory.appendingPathComponent("Downloads", isDirectory: true)
+    let fileReceiver = FileReceiver(
+        pairedStore: pairedStore,
+        transfersDirectory: store.storageDirectory.appendingPathComponent("Transfers", isDirectory: true),
+        destinationProvider: { downloadsDir }
+    )
 
     return AppModel(
         store: store,
@@ -44,7 +55,9 @@ func makeTestAppModel(
         pairingCoordinator: pairingCoordinator,
         peerBrowser: peerBrowser,
         clipSender: clipSender,
-        clipServer: clipServer
+        clipServer: clipServer,
+        fileSender: fileSender,
+        fileReceiver: fileReceiver
     )
 }
 

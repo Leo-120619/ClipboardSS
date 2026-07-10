@@ -7,11 +7,13 @@ public final class ClipServer: @unchecked Sendable {
     private let receiver: ClipReceiver
     private let pairingCoordinator: PairingCoordinator
     private let identity: DeviceIdentity
-    
-    public init(identity: DeviceIdentity, receiver: ClipReceiver, pairingCoordinator: PairingCoordinator) throws {
+    private let fileReceiver: FileReceiver?
+
+    public init(identity: DeviceIdentity, receiver: ClipReceiver, pairingCoordinator: PairingCoordinator, fileReceiver: FileReceiver? = nil) throws {
         self.identity = identity
         self.receiver = receiver
         self.pairingCoordinator = pairingCoordinator
+        self.fileReceiver = fileReceiver
         
         let parameters = NWParameters.tcp
         self.listener = try NWListener(using: parameters, on: 51888)
@@ -183,11 +185,58 @@ public final class ClipServer: @unchecked Sendable {
                     self.sendResponse(resp, on: connection)
                 }
             }
+        } else if request.path.hasPrefix("/v1/file/") {
+            handleFileRequest(request, on: connection)
         } else {
             logToFile("ClipServer: 404 Not Found path: \(request.path)")
             let resp = HTTPResponse(statusCode: 404, headers: [:], body: Data("Not Found".utf8))
             self.sendResponse(resp, on: connection)
         }
+    }
+
+    private func handleFileRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        guard let fileReceiver = fileReceiver else {
+            self.sendResponse(HTTPResponse(statusCode: 404, headers: [:], body: Data("Not Found".utf8)), on: connection)
+            return
+        }
+
+        Task {
+            let result: FileTransferResponse
+            switch request.path {
+            case "/v1/file/offer":
+                if let envelope = Self.decodeEnvelope(request.body) {
+                    result = await fileReceiver.handleOffer(envelope: envelope)
+                } else {
+                    result = FileTransferResponse(statusCode: 400, body: Data("{}".utf8))
+                }
+            case "/v1/file/chunk":
+                let transferId = request.headers["x-transfer-id"] ?? ""
+                let index = Int(request.headers["x-chunk-index"] ?? "") ?? -1
+                result = await fileReceiver.handleChunk(transferId: transferId, chunkIndex: index, body: request.body)
+            case "/v1/file/finish":
+                if let envelope = Self.decodeEnvelope(request.body) {
+                    result = await fileReceiver.handleFinish(envelope: envelope)
+                } else {
+                    result = FileTransferResponse(statusCode: 400, body: Data("{}".utf8))
+                }
+            case "/v1/file/cancel":
+                if let envelope = Self.decodeEnvelope(request.body) {
+                    result = await fileReceiver.handleCancel(envelope: envelope)
+                } else {
+                    result = FileTransferResponse(statusCode: 400, body: Data("{}".utf8))
+                }
+            default:
+                result = FileTransferResponse(statusCode: 404, body: Data("{}".utf8))
+            }
+            self.sendResponse(
+                HTTPResponse(statusCode: result.statusCode, headers: ["Content-Type": "application/json"], body: result.body),
+                on: connection
+            )
+        }
+    }
+
+    static func decodeEnvelope(_ body: Data) -> ClipEnvelope? {
+        try? JSONDecoder().decode(ClipEnvelope.self, from: body)
     }
     
     /// Some Android mDNS/NsdManager stacks silently fail to resolve services whose

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ClipboardCore
 
 struct DevicesView: View {
@@ -78,6 +79,17 @@ struct DevicesView: View {
                     }
                 }
 
+                if !model.transfers.isEmpty {
+                    Section("Transfers") {
+                        ForEach(model.transfers) { transfer in
+                            TransferRow(transfer: transfer, model: model)
+                        }
+                        Button("Clear finished") {
+                            model.clearFinishedTransfers()
+                        }
+                    }
+                }
+
                 if let error = model.lastError {
                     Section {
                         Text(error)
@@ -149,10 +161,80 @@ struct PairedDeviceRow: View {
                 }
             }
             Spacer()
+            Button("Send File…") {
+                presentOpenPanel()
+            }
+            .disabled(model.resolvePeer(for: device.id) == nil)
             Button("Unpair") {
                 model.unpairDevice(device.id)
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func presentOpenPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Send"
+        if panel.runModal() == .OK, let url = panel.url {
+            model.sendFile(url: url, to: device.id)
+        }
+    }
+}
+
+struct TransferRow: View {
+    let transfer: FileTransferState
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: transfer.direction == .sending ? "arrow.up.circle" : "arrow.down.circle")
+                    .foregroundStyle(.secondary)
+                Text(transfer.fileName)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                statusView
+            }
+            if transfer.isActive {
+                ProgressView(value: transfer.progress)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private var statusView: some View {
+        switch transfer.status {
+        case .inProgress:
+            if transfer.direction == .sending {
+                Button("Cancel") { model.cancelTransfer(id: transfer.id) }
+                    .buttonStyle(.borderless)
+            } else {
+                Text("\(Int(transfer.progress * 100))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .completed:
+            HStack(spacing: 8) {
+                Text("Done").font(.caption).foregroundStyle(.green)
+                if let url = transfer.destinationURL {
+                    Button("Reveal") { model.revealInFinder(url) }
+                        .buttonStyle(.borderless)
+                }
+            }
+        case let .failed(reason):
+            Text("Failed")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .help(reason)
+        case .cancelled:
+            Text("Cancelled")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }

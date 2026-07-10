@@ -1,6 +1,7 @@
 import AppKit
 import ClipboardCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -24,12 +25,17 @@ final class AppModel: ObservableObject {
     @Published var showDevices = false
     @Published var joinInProgress = false
     @Published private(set) var pairedDevices: [PairedDevice] = []
+    @Published private(set) var transfers: [FileTransferState] = []
+    @Published var pendingSend: PendingSend?
 
     let store: ClipStore
     let pairingCoordinator: PairingCoordinator
     let peerBrowser: PeerBrowser
     private let clipSender: ClipSender
     private let clipServer: ClipServer
+    private let fileSender: FileSender
+    private let fileReceiver: FileReceiver
+    private var sendTokens: [UUID: CancellationToken] = [:]
     nonisolated static let coachMarksCompletedDefaultsKey = "hasCompletedCoachMarks"
     nonisolated static let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
     nonisolated static let coachMarkStepCount = CoachMarkStep.steps.count
@@ -59,7 +65,9 @@ final class AppModel: ObservableObject {
         pairingCoordinator: PairingCoordinator,
         peerBrowser: PeerBrowser,
         clipSender: ClipSender,
-        clipServer: ClipServer
+        clipServer: ClipServer,
+        fileSender: FileSender,
+        fileReceiver: FileReceiver
     ) {
         self.store = store
         self.writer = writer
@@ -72,6 +80,8 @@ final class AppModel: ObservableObject {
         self.peerBrowser = peerBrowser
         self.clipSender = clipSender
         self.clipServer = clipServer
+        self.fileSender = fileSender
+        self.fileReceiver = fileReceiver
         self.clips = store.items
         self.clipboardShortcut = .savedClipboardShortcut
         self.screenshotShortcut = .savedScreenshotShortcut
@@ -205,6 +215,168 @@ final class AppModel: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    // MARK: - File transfer
+
+    /// Resolves the reachable `Peer` for a paired device (mDNS first, then stored host).
+    func resolvePeer(for deviceId: UUID) -> Peer? {
+        Self.composeSendTargets(mdnsPeers: peerBrowser.peers, pairedDevices: pairedDevices)
+            .first { $0.id == deviceId }
+    }
+
+    /// Sends a file to a paired device. If the device is a single paired peer this is what
+    /// drag-and-drop calls; the Devices view calls it per row.
+    func sendFile(url: URL, to deviceId: UUID) {
+        guard let peer = resolvePeer(for: deviceId) else {
+            lastError = "That device is not reachable right now."
+            return
+        }
+
+        let uiId = UUID()
+        let token = CancellationToken()
+        sendTokens[uiId] = token
+        transfers.insert(
+            FileTransferState(
+                id: uiId,
+                key: uiId.uuidString,
+                fileName: url.lastPathComponent,
+                direction: .sending,
+                progress: 0,
+                status: .inProgress,
+                destinationURL: nil
+            ),
+            at: 0
+        )
+
+        let sender = fileSender
+        let mime = Self.mimeType(for: url)
+        Task.detached { [weak self] in
+            do {
+                try await sender.sendFile(
+                    at: url,
+                    to: peer,
+                    mimeType: mime,
+                    progress: { p in Task { @MainActor in self?.setTransferProgress(uiId: uiId, progress: p) } },
+                    isCancelled: { token.isCancelled }
+                )
+                await MainActor.run { self?.completeSend(uiId: uiId, status: .completed) }
+            } catch is CancellationError {
+                await MainActor.run { self?.completeSend(uiId: uiId, status: .cancelled) }
+            } catch let error as FileSendError where error == .cancelled {
+                await MainActor.run { self?.completeSend(uiId: uiId, status: .cancelled) }
+            } catch {
+                await MainActor.run { self?.completeSend(uiId: uiId, status: .failed(error.localizedDescription)) }
+            }
+        }
+    }
+
+    /// Cancels an in-flight send (receiver-side transfers finish on their own in v1).
+    func cancelTransfer(id: UUID) {
+        sendTokens[id]?.cancel()
+    }
+
+    /// Routes dropped files: send straight to the sole reachable paired device, or present
+    /// a picker when several are reachable.
+    func handleDroppedFiles(_ urls: [URL]) {
+        let files = urls.filter { !$0.hasDirectoryPath }
+        guard !files.isEmpty else { return }
+
+        let reachable = pairedDevices.filter { resolvePeer(for: $0.id) != nil }
+        switch reachable.count {
+        case 0:
+            lastError = "No reachable paired device to send to."
+        case 1:
+            for url in files { sendFile(url: url, to: reachable[0].id) }
+        default:
+            pendingSend = PendingSend(files: files)
+        }
+    }
+
+    func completePendingSend(to deviceId: UUID) {
+        let files = pendingSend?.files ?? []
+        pendingSend = nil
+        for url in files { sendFile(url: url, to: deviceId) }
+    }
+
+    var reachablePairedDevices: [PairedDevice] {
+        pairedDevices.filter { resolvePeer(for: $0.id) != nil }
+    }
+
+    /// Applies an event emitted by the `FileReceiver` (already hopped to the main actor).
+    func handleReceiveEvent(_ event: FileTransferReceiveEvent) {
+        switch event {
+        case let .started(transferId, fileName, _):
+            if index(ofKey: transferId) == nil {
+                transfers.insert(
+                    FileTransferState(
+                        id: UUID(),
+                        key: transferId,
+                        fileName: fileName,
+                        direction: .receiving,
+                        progress: 0,
+                        status: .inProgress,
+                        destinationURL: nil
+                    ),
+                    at: 0
+                )
+            }
+        case let .progress(transferId, received, total):
+            if let i = index(ofKey: transferId), total > 0 {
+                transfers[i].progress = Double(received) / Double(total)
+            }
+        case let .completed(transferId, url):
+            if let i = index(ofKey: transferId) {
+                transfers[i].progress = 1.0
+                transfers[i].status = .completed
+                transfers[i].destinationURL = url
+            }
+        case let .failed(transferId, reason):
+            if let i = index(ofKey: transferId) {
+                transfers[i].status = .failed(reason)
+            }
+        case let .cancelled(transferId):
+            if let i = index(ofKey: transferId) {
+                transfers[i].status = .cancelled
+            }
+        }
+    }
+
+    func clearFinishedTransfers() {
+        transfers.removeAll { !$0.isActive }
+    }
+
+    func revealInFinder(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// Periodically reaps idle receiver sessions; wired to the app's poll timer.
+    func collectTransferGarbage() {
+        Task { await fileReceiver.garbageCollect() }
+    }
+
+    private func index(ofKey key: String) -> Int? {
+        transfers.firstIndex { $0.key == key }
+    }
+
+    private func setTransferProgress(uiId: UUID, progress: Double) {
+        if let i = transfers.firstIndex(where: { $0.id == uiId }), transfers[i].isActive {
+            transfers[i].progress = progress
+        }
+    }
+
+    private func completeSend(uiId: UUID, status: FileTransferState.Status) {
+        sendTokens[uiId] = nil
+        guard let i = transfers.firstIndex(where: { $0.id == uiId }) else { return }
+        if status == .completed { transfers[i].progress = 1.0 }
+        transfers[i].status = status
+    }
+
+    static func mimeType(for url: URL) -> String {
+        if let type = UTType(filenameExtension: url.pathExtension), let mime = type.preferredMIMEType {
+            return mime
+        }
+        return "application/octet-stream"
     }
 
     private func tryPairing(with candidates: [Peer], code: String) async -> Bool {

@@ -37,10 +37,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 transport: transport
             )
             let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard)
+
+            let transferEventSink = FileTransferEventSink()
+            let fileReceiver = FileReceiver(
+                pairedStore: pairedStore,
+                transfersDirectory: store.storageDirectory.appendingPathComponent("Transfers", isDirectory: true),
+                destinationProvider: { Self.downloadsDirectory() },
+                onEvent: { [transferEventSink] event in transferEventSink.emit(event) }
+            )
+
             let clipServer = try ClipServer(
                 identity: identity,
                 receiver: clipReceiver,
-                pairingCoordinator: pairingCoordinator
+                pairingCoordinator: pairingCoordinator,
+                fileReceiver: fileReceiver
             )
             let peerBrowser = PeerBrowser(identityId: identity.id)
             let clipSender = ClipSender(
@@ -48,6 +58,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 pairedStore: pairedStore,
                 transport: transport,
                 storageDirectory: store.storageDirectory
+            )
+            let fileSender = FileSender(
+                identity: identity,
+                pairedStore: pairedStore,
+                transport: transport
             )
 
             let model = AppModel(
@@ -60,8 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 pairingCoordinator: pairingCoordinator,
                 peerBrowser: peerBrowser,
                 clipSender: clipSender,
-                clipServer: clipServer
+                clipServer: clipServer,
+                fileSender: fileSender,
+                fileReceiver: fileReceiver
             )
+            transferEventSink.setHandler { [weak model] event in
+                Task { @MainActor in model?.handleReceiveEvent(event) }
+            }
             let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
             let windowController = ClipboardWindowController(model: model)
             let hotKeyManager = HotKeyManager()
@@ -130,6 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try clipboardMonitor?.poll()
             try model?.cleanupExpiredClips()
+            model?.collectTransferGarbage()
             model?.refresh()
         } catch {
             print("Background clipboard polling failed: \(error.localizedDescription)")
@@ -183,6 +204,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let newId = UUID()
         defaults.set(newId.uuidString.lowercased(), forKey: "deviceId")
         return newId
+    }
+
+    static func downloadsDirectory() -> URL {
+        if let url = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first {
+            return url
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
     }
 
     private static func defaultStorageDirectory() throws -> URL {

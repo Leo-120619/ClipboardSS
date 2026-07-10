@@ -1,8 +1,24 @@
 import ClipboardCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ClipboardRootView: View {
     @ObservedObject var model: AppModel
+
+    private func loadDroppedURLs(_ providers: [NSItemProvider]) {
+        let collector = DroppedURLCollector()
+        let group = DispatchGroup()
+        for provider in providers where provider.canLoadObject(ofClass: URL.self) {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url, url.isFileURL { collector.append(url) }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            model.handleDroppedFiles(collector.snapshot())
+        }
+    }
 
     var body: some View {
         ZStack {
@@ -72,6 +88,13 @@ struct ClipboardRootView: View {
         }
         .sheet(isPresented: $model.showDevices) {
             DevicesView(model: model)
+        }
+        .sheet(item: $model.pendingSend) { pending in
+            DropDevicePicker(model: model, pending: pending)
+        }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            loadDroppedURLs(providers)
+            return true
         }
         .alert("ClipboardSS", isPresented: Binding(
             get: { model.lastError != nil },
@@ -200,4 +223,53 @@ private struct EmptyStateView: View {
 struct IdentifiableImage: Identifiable {
     let id = UUID()
     let image: NSImage
+}
+
+/// Thread-safe accumulator for file URLs resolved from dropped `NSItemProvider`s
+/// (completions fire on arbitrary queues).
+final class DroppedURLCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var urls: [URL] = []
+    func append(_ url: URL) { lock.lock(); urls.append(url); lock.unlock() }
+    func snapshot() -> [URL] { lock.lock(); defer { lock.unlock() }; return urls }
+}
+
+/// Presented when files are dropped and more than one paired device is reachable.
+struct DropDevicePicker: View {
+    @ObservedObject var model: AppModel
+    let pending: PendingSend
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Send \(pending.files.count) file\(pending.files.count == 1 ? "" : "s") to…")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") {
+                    model.pendingSend = nil
+                    dismiss()
+                }
+            }
+            .padding()
+
+            Divider()
+
+            List(model.reachablePairedDevices, id: \.id) { device in
+                Button {
+                    model.completePendingSend(to: device.id)
+                    dismiss()
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.up.circle")
+                        Text(device.name)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(width: 340, height: 320)
+    }
 }
