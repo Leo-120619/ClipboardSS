@@ -35,6 +35,7 @@ final class AppModel: ObservableObject {
     private let clipServer: ClipServer
     private let fileSender: FileSender
     private let fileReceiver: FileReceiver
+    private var notifiedReceiveIds: Set<String> = []
     private var sendTokens: [UUID: CancellationToken] = [:]
     nonisolated static let coachMarksCompletedDefaultsKey = "hasCompletedCoachMarks"
     nonisolated static let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
@@ -53,6 +54,7 @@ final class AppModel: ObservableObject {
     var onPreferencesRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
     var onScreenTextSelectionReady: ((ScreenTextCapture) -> Void)?
+    var onReceivedFileCompleted: ((URL) -> Void)?
 
     init(
         store: ClipStore,
@@ -341,6 +343,10 @@ final class AppModel: ObservableObject {
                 transfers[i].status = .completed
                 transfers[i].destinationURL = url
                 postProcessReceivedFile(at: i)
+                if let finalURL = transfers[i].destinationURL,
+                   notifiedReceiveIds.insert(transferId).inserted {
+                    onReceivedFileCompleted?(finalURL)
+                }
             }
         case let .failed(transferId, reason):
             if let i = index(ofKey: transferId) {

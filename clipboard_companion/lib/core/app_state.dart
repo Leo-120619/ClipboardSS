@@ -17,7 +17,10 @@ import 'clip_sender.dart';
 import 'file_receiver.dart';
 import 'file_sender.dart';
 import 'file_transfer_ui.dart';
+import 'incoming_share.dart';
+import 'android_downloads.dart';
 import 'subnet_sweeper.dart';
+import 'received_file_notifications.dart';
 
 List<Peer> composeSendTargets(
   List<Peer> mdnsPeers,
@@ -58,6 +61,21 @@ class AppState extends ChangeNotifier {
   static const MethodChannel _permissionsChannel = MethodChannel(
     'clipboard_companion/permissions',
   );
+  static const MethodChannel _shareChannel = MethodChannel(
+    'clipboard_companion/incoming_share',
+  );
+  final AndroidDownloads _androidDownloads;
+  late final ReceivedFileNotifications _receivedFileNotifications;
+  final Set<String> _notifiedReceiveIds = <String>{};
+
+  AppState({
+    AndroidDownloads? androidDownloads,
+    ReceivedFileNotifications? receivedFileNotifications,
+  }) : _androidDownloads = androidDownloads ?? AndroidDownloads() {
+    _receivedFileNotifications =
+        receivedFileNotifications ??
+        LocalReceivedFileNotifications(openMobileDownloads: openDownloads);
+  }
 
   late DeviceIdentity identity;
   late PairedDeviceStore pairedStore;
@@ -75,22 +93,15 @@ class AppState extends ChangeNotifier {
   StreamSubscription<FileTransferReceiveEvent>? _transferSub;
   Timer? _transferGcTimer;
   final Map<String, TransferCancelToken> _sendTokens = {};
+  final Set<String> _consumedShareBatchIds = {};
+  IncomingShareBatch? pendingShareBatch;
+  bool isSendingBatch = false;
 
   /// In-flight and finished transfers (both directions), newest first.
   final List<FileTransferUiState> transfers = [];
 
   static const _clipsKey = 'saved_clips';
-  static const _receiveDestinationModeKey = 'receive_dest_mode';
-  static const _receiveDestinationPathKey = 'receive_dest_path';
-  static const _defaultDestinationMode = 'default';
-  static const _askDestinationMode = 'ask';
-  String _receiveDestinationMode = '';
-  String? _receiveDestinationPath;
-  String? pendingDestinationChoicePath;
-  String? pendingAskDestinationPath;
-
-  String get receiveDestinationMode => _receiveDestinationMode;
-
+  static const _maxPersistedClipBytes = 4 * 1024 * 1024;
   List<ClipPayload> clips = [];
 
   /// Invoked after an incoming clip is stored. Desktop uses this to write
@@ -109,6 +120,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> init(SharedPreferences prefs) async {
     _prefs = prefs;
+    await _receivedFileNotifications.initialize();
     // 1. Setup identity
     String? id = prefs.getString('device_id');
     if (id == null) {
@@ -124,10 +136,78 @@ class AppState extends ChangeNotifier {
 
     // 2. Setup stores
     pairedStore = PairedDeviceStore(prefs);
-    _receiveDestinationMode = prefs.getString(_receiveDestinationModeKey) ?? '';
-    _receiveDestinationPath = prefs.getString(_receiveDestinationPathKey);
     _loadClips();
+    if (Platform.isAndroid || Platform.isIOS) {
+      _shareChannel.setMethodCallHandler(_handleShareMethod);
+      final initial = await _shareChannel.invokeMapMethod<Object?, Object?>(
+        'getInitialShare',
+      );
+      if (initial != null) _stageIncomingShare(initial);
+    }
     notifyListeners();
+  }
+
+  Future<Object?> _handleShareMethod(MethodCall call) async {
+    if (call.method == 'incomingShare' && call.arguments is Map) {
+      _stageIncomingShare(Map<Object?, Object?>.from(call.arguments as Map));
+    }
+    return null;
+  }
+
+  void _stageIncomingShare(Map<Object?, Object?> value) {
+    final batch = IncomingShareBatch.fromMap(value);
+    if (batch.attachments.isEmpty ||
+        _consumedShareBatchIds.contains(batch.id) ||
+        pendingShareBatch?.id == batch.id) {
+      return;
+    }
+    pendingShareBatch = batch;
+    notifyListeners();
+  }
+
+  Future<void> dismissPendingShare() async {
+    final batch = pendingShareBatch;
+    if (batch == null) return;
+    pendingShareBatch = null;
+    _consumedShareBatchIds.add(batch.id);
+    notifyListeners();
+    await _shareChannel.invokeMethod<void>('completeShare', {'id': batch.id});
+  }
+
+  Future<void> sendPendingShareTo(String deviceId) async {
+    final batch = pendingShareBatch;
+    if (batch == null || isSendingBatch) return;
+    isSendingBatch = true;
+    notifyListeners();
+    try {
+      var allSucceeded = true;
+      for (final attachment in batch.attachments) {
+        if (!attachment.file.existsSync()) {
+          allSucceeded = false;
+          continue;
+        }
+        allSucceeded =
+            await sendFileTo(attachment.file, deviceId) && allSucceeded;
+      }
+      if (allSucceeded) await dismissPendingShare();
+    } finally {
+      isSendingBatch = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> sendFilesTo(List<File> files, String deviceId) async {
+    if (isSendingBatch || files.isEmpty) return;
+    isSendingBatch = true;
+    notifyListeners();
+    try {
+      for (final file in files) {
+        await sendFileTo(file, deviceId);
+      }
+    } finally {
+      isSendingBatch = false;
+      notifyListeners();
+    }
   }
 
   Future<void> startSyncServices() async {
@@ -189,7 +269,7 @@ class AppState extends ChangeNotifier {
         transfersDirectory: transfersDir,
         destinationProvider: () => destinationDir,
       );
-      _transferSub = fileReceiver.events.listen(_onReceiveEvent);
+      _transferSub = fileReceiver.events.listen(handleReceiveEvent);
       _transferGcTimer = Timer.periodic(
         const Duration(seconds: 30),
         (_) => fileReceiver.garbageCollect(),
@@ -325,12 +405,12 @@ class AppState extends ChangeNotifier {
   List<PairedDevice> get reachablePairedDevices =>
       pairedStore.devices.where((d) => resolvePeer(d.id) != null).toList();
 
-  Future<void> sendFileTo(File file, String deviceId) async {
+  Future<bool> sendFileTo(File file, String deviceId) async {
     final peer = resolvePeer(deviceId);
     if (peer == null) {
       lastError = 'That device is not reachable right now.';
       notifyListeners();
-      return;
+      return false;
     }
 
     final uiId = const Uuid().v4();
@@ -357,10 +437,13 @@ class AppState extends ChangeNotifier {
         isCancelled: () => token.cancelled,
       );
       _completeSend(uiId, TransferStatus.completed);
+      return true;
     } on FileSendCancelledException {
       _completeSend(uiId, TransferStatus.cancelled);
+      return false;
     } catch (e) {
       _completeSend(uiId, TransferStatus.failed, reason: e.toString());
+      return false;
     }
   }
 
@@ -399,7 +482,8 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _onReceiveEvent(FileTransferReceiveEvent event) {
+  @visibleForTesting
+  void handleReceiveEvent(FileTransferReceiveEvent event) {
     FileTransferUiState? existing;
     for (final t in transfers) {
       if (t.key == event.transferId &&
@@ -431,10 +515,17 @@ class AppState extends ChangeNotifier {
       case 'completed':
         if (existing != null) {
           existing.progress = 1.0;
-          existing.status = TransferStatus.completed;
           existing.path = event.path;
-          if (event.path != null)
-            unawaited(_postProcessCompletedTransfer(existing, event.path!));
+          if (event.path == null || !Platform.isAndroid) {
+            existing.status = TransferStatus.completed;
+            _notifyReceivedFile(
+              event.transferId,
+              existing.fileName,
+              event.path,
+            );
+          } else {
+            unawaited(_publishCompletedAndroidTransfer(existing, event.path!));
+          }
         }
         break;
       case 'failed':
@@ -449,90 +540,56 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _postProcessCompletedTransfer(
+  Future<void> _publishCompletedAndroidTransfer(
     FileTransferUiState transfer,
     String path,
   ) async {
-    // iOS keeps files in Documents/Received, which is visible in Files. Android uses
-    // its app-scoped directory as a reliable staging area before a user-selected copy.
-    if (!Platform.isAndroid) return;
-    if (_receiveDestinationMode.isEmpty) {
-      pendingDestinationChoicePath = path;
-      notifyListeners();
-      return;
-    }
-    if (_receiveDestinationMode == _askDestinationMode) {
-      pendingAskDestinationPath = path;
-      notifyListeners();
-      return;
-    }
-    if (_receiveDestinationMode == _defaultDestinationMode &&
-        _receiveDestinationPath != null) {
-      await _copyReceivedFile(transfer, path, _receiveDestinationPath!);
-    }
-  }
-
-  Future<void> setReceiveDestinationDefault(String directory) async {
-    _receiveDestinationMode = _defaultDestinationMode;
-    _receiveDestinationPath = directory;
-    pendingDestinationChoicePath = null;
-    await _prefs.setString(_receiveDestinationModeKey, _receiveDestinationMode);
-    await _prefs.setString(_receiveDestinationPathKey, directory);
-    notifyListeners();
-  }
-
-  Future<void> setReceiveDestinationAskEveryTime() async {
-    _receiveDestinationMode = _askDestinationMode;
-    pendingDestinationChoicePath = null;
-    await _prefs.setString(_receiveDestinationModeKey, _receiveDestinationMode);
-    await _prefs.remove(_receiveDestinationPathKey);
-    notifyListeners();
-  }
-
-  Future<void> keepDefaultReceiveDestination() async {
-    await setReceiveDestinationDefault((await _resolveDestinationDir()).path);
-  }
-
-  Future<void> movePendingReceivedFileTo(String directory) async {
-    final path = pendingAskDestinationPath ?? pendingDestinationChoicePath;
-    if (path == null) return;
-    final transfer = transfers.where((t) => t.path == path).firstOrNull;
-    if (transfer != null) await _copyReceivedFile(transfer, path, directory);
-    pendingAskDestinationPath = null;
-    notifyListeners();
-  }
-
-  Future<void> _copyReceivedFile(
-    FileTransferUiState transfer,
-    String sourcePath,
-    String directory,
-  ) async {
     try {
-      final destinationDirectory = Directory(directory);
-      await destinationDirectory.create(recursive: true);
-      final source = File(sourcePath);
-      var destination = File('$directory/${_basename(sourcePath)}');
-      var suffix = 1;
-      while (await destination.exists()) {
-        destination = File('$directory/${suffix++}_${_basename(sourcePath)}');
-      }
-      await source.copy(destination.path);
-      transfer.path = destination.path;
-      notifyListeners();
-    } catch (e) {
-      lastError = 'Could not copy received file: $e';
+      await _androidDownloads.publish(
+        sourcePath: path,
+        fileName: transfer.fileName,
+        mimeType: _mimeType(transfer.fileName),
+      );
+      transfer.status = TransferStatus.completed;
+      _notifyReceivedFile(transfer.key, transfer.fileName, null);
+    } catch (_) {
+      transfer.status = TransferStatus.failed;
+      transfer.reason = 'Could not save this file to Downloads.';
+    } finally {
+      try {
+        await File(path).delete();
+      } catch (_) {}
+      transfer.path = null;
       notifyListeners();
     }
   }
 
-  /// Save location: Android app-scoped external files dir (no SAF), iOS Documents
-  /// dir (Files-visible via Info.plist keys), fallback to app support elsewhere.
+  Future<bool> openDownloads() async {
+    if (!Platform.isAndroid) return false;
+    try {
+      return await _androidDownloads.openDownloads();
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  void _notifyReceivedFile(String transferId, String fileName, String? path) {
+    if (!_notifiedReceiveIds.add(transferId)) return;
+    unawaited(
+      _receivedFileNotifications.showReceivedFile(
+        transferId: transferId,
+        fileName: fileName,
+        savedPath: path,
+      ),
+    );
+  }
+
+  /// Android uses an app-private staging directory before MediaStore publishes to
+  /// Downloads. iOS keeps completed files in its Files-visible Documents folder.
   Future<Directory> _resolveDestinationDir() async {
     Directory base;
     if (Platform.isAndroid) {
-      base =
-          (await getExternalStorageDirectory()) ??
-          await getApplicationSupportDirectory();
+      base = await getApplicationSupportDirectory();
     } else if (Platform.isIOS) {
       base = await getApplicationDocumentsDirectory();
     } else {
@@ -612,7 +669,17 @@ class AppState extends ChangeNotifier {
   Future<void> _saveClips() async {
     final now = DateTime.now();
     clips.removeWhere((clip) => now.difference(clip.createdAt).inDays >= 7);
-    final clipsJson = jsonEncode(clips.map((e) => e.toJson()).toList());
+    final persisted = <Map<String, dynamic>>[];
+    var persistedBytes = 2;
+    for (final clip in clips) {
+      final encoded = jsonEncode(clip.toJson());
+      if (persistedBytes + encoded.length > _maxPersistedClipBytes) {
+        continue;
+      }
+      persisted.add(clip.toJson());
+      persistedBytes += encoded.length + 1;
+    }
+    final clipsJson = jsonEncode(persisted);
     await _prefs.setString(_clipsKey, clipsJson);
   }
 

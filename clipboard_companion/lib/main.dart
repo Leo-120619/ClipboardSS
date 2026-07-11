@@ -10,7 +10,6 @@ import 'package:uuid/uuid.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:share_plus/share_plus.dart';
 
 import 'core/app_state.dart';
 import 'core/clip_sender.dart';
@@ -165,6 +164,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   );
   final TextEditingController _searchController = TextEditingController();
   MobileClipFilter _selectedFilter = MobileClipFilter.all;
+  bool _openingSharedFiles = false;
 
   @override
   void initState() {
@@ -205,6 +205,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    if (state.pendingShareBatch != null && !_openingSharedFiles) {
+      _openingSharedFiles = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        await Navigator.of(
+          context,
+        ).push(MaterialPageRoute(builder: (_) => const DevicesScreen()));
+        _openingSharedFiles = false;
+      });
+    }
 
     return Scaffold(
       body: SafeArea(
@@ -1146,6 +1156,7 @@ class DevicesScreen extends StatefulWidget {
 
 class _DevicesScreenState extends State<DevicesScreen> {
   final TextEditingController _codeController = TextEditingController();
+  bool _sharePromptVisible = false;
 
   @override
   void dispose() {
@@ -1157,7 +1168,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
 
-    _showReceiveDestinationPromptIfNeeded(context, state);
+    _showIncomingShareIfNeeded(context, state);
     return Scaffold(
       appBar: AppBar(
         title: const Text('Devices'),
@@ -1187,6 +1198,19 @@ class _DevicesScreenState extends State<DevicesScreen> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        FilledButton.icon(
+          onPressed: state.isSendingBatch
+              ? null
+              : () => _pickFilesAndChooseDevice(context, state),
+          icon: state.isSendingBatch
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.upload_file_rounded),
+          label: const Text('Send File'),
+        ),
+        const SizedBox(height: 16),
         _PairingCodeCard(codeController: _codeController),
         const SizedBox(height: 16),
         _PairedDevicesCard(
@@ -1211,61 +1235,116 @@ class _DevicesScreenState extends State<DevicesScreen> {
     AppState state,
     String deviceId,
   ) async {
-    final result = await FilePicker.pickFiles(withData: false);
-    final path = result?.files.single.path;
-    if (path == null) return;
-    await state.sendFileTo(File(path), deviceId);
+    if (!_ensureReachable(context, state, deviceId: deviceId)) return;
+    final result = await FilePicker.pickFiles(
+      allowMultiple: true,
+      withData: false,
+    );
+    final files =
+        result?.files
+            .map((entry) => entry.path)
+            .whereType<String>()
+            .map(File.new)
+            .toList() ??
+        const <File>[];
+    await state.sendFilesTo(files, deviceId);
   }
 
-  void _showReceiveDestinationPromptIfNeeded(
+  Future<void> _pickFilesAndChooseDevice(
     BuildContext context,
     AppState state,
-  ) {
-    if (state.pendingDestinationChoicePath == null &&
-        state.pendingAskDestinationPath == null)
-      return;
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted ||
-          (state.pendingDestinationChoicePath == null &&
-              state.pendingAskDestinationPath == null))
-        return;
-      final firstRun = state.pendingDestinationChoicePath != null;
-      final action = await showDialog<String>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(firstRun ? 'Save received files' : 'Choose a folder'),
-          content: Text(
-            firstRun
-                ? 'Choose where future received files should be saved.'
-                : 'Choose where to copy this received file.',
-          ),
-          actions: [
-            if (firstRun)
-              TextButton(
-                onPressed: () => Navigator.pop(context, 'keep'),
-                child: const Text('Keep default'),
-              ),
-            if (firstRun)
-              TextButton(
-                onPressed: () => Navigator.pop(context, 'ask'),
-                child: const Text('Ask every time'),
-              ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, 'choose'),
-              child: const Text('Choose folder…'),
+  ) async {
+    if (!_ensureReachable(context, state)) return;
+    final result = await FilePicker.pickFiles(
+      allowMultiple: true,
+      withData: false,
+    );
+    final files =
+        result?.files
+            .map((entry) => entry.path)
+            .whereType<String>()
+            .map(File.new)
+            .toList() ??
+        const <File>[];
+    if (files.isEmpty || !context.mounted) return;
+    final deviceId = await _chooseReachableDevice(
+      context,
+      state,
+      title: files.length == 1
+          ? 'Send ${files.first.path.split(Platform.pathSeparator).last}'
+          : 'Send ${files.length} files',
+    );
+    if (deviceId != null) await state.sendFilesTo(files, deviceId);
+  }
+
+  bool _ensureReachable(
+    BuildContext context,
+    AppState state, {
+    String? deviceId,
+  }) {
+    final reachable = deviceId == null
+        ? state.reachablePairedDevices.isNotEmpty
+        : state.resolvePeer(deviceId) != null;
+    if (reachable) return true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Pair a device and make sure it is online, then try again.',
+        ),
+      ),
+    );
+    return false;
+  }
+
+  Future<String?> _chooseReachableDevice(
+    BuildContext context,
+    AppState state, {
+    required String title,
+  }) {
+    return showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(title),
+              subtitle: const Text('Choose a nearby paired device'),
             ),
+            for (final device in state.reachablePairedDevices)
+              ListTile(
+                leading: const Icon(Icons.devices_rounded),
+                title: Text(device.name),
+                subtitle: device.host == null ? null : Text(device.host!),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => Navigator.pop(context, device.id),
+              ),
           ],
         ),
-      );
-      if (action == 'keep') await state.keepDefaultReceiveDestination();
-      if (action == 'ask') await state.setReceiveDestinationAskEveryTime();
-      if (action == 'choose') {
-        final directory = await FilePicker.getDirectoryPath();
-        if (directory != null) {
-          if (firstRun) await state.setReceiveDestinationDefault(directory);
-          await state.movePendingReceivedFileTo(directory);
-        }
+      ),
+    );
+  }
+
+  void _showIncomingShareIfNeeded(BuildContext context, AppState state) {
+    final batch = state.pendingShareBatch;
+    if (batch == null || !state.isReady || _sharePromptVisible) return;
+    _sharePromptVisible = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      if (!_ensureReachable(context, state)) {
+        _sharePromptVisible = false;
+        return;
       }
+      final deviceId = await _chooseReachableDevice(
+        context,
+        state,
+        title: batch.attachments.length == 1
+            ? 'Send ${batch.attachments.first.name}'
+            : 'Send ${batch.attachments.length} shared files',
+      );
+      if (deviceId != null) await state.sendPendingShareTo(deviceId);
+      _sharePromptVisible = false;
     });
   }
 
@@ -1274,26 +1353,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Received files'),
-        content: Text(
-          state.receiveDestinationMode == 'ask'
-              ? 'Ask every time'
-              : 'Files are saved to the app’s Received folder unless you choose another folder.',
-        ),
+        content: const Text('Received Android files are saved to Downloads.'),
         actions: [
           TextButton(
-            onPressed: () async {
-              await state.setReceiveDestinationAskEveryTime();
-              if (context.mounted) Navigator.pop(context);
-            },
-            child: const Text('Ask every time'),
-          ),
-          TextButton(
-            onPressed: () async {
-              final dir = await FilePicker.getDirectoryPath();
-              if (dir != null) await state.setReceiveDestinationDefault(dir);
-              if (context.mounted) Navigator.pop(context);
-            },
-            child: const Text('Choose folder…'),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
           ),
         ],
       ),
@@ -1476,68 +1540,83 @@ class _PairedDevicesCard extends StatelessWidget {
               for (final device in devices) ...[
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Container(
-                        width: 44,
-                        height: 44,
-                        decoration: const BoxDecoration(
-                          color: Color(0xFFE8F1F4),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          Icons.laptop_mac_rounded,
-                          color: theme.colorScheme.primary,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              device.name,
-                              style: theme.textTheme.bodyLarge?.copyWith(
-                                fontWeight: FontWeight.w600,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                      Row(
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFE8F1F4),
+                              shape: BoxShape.circle,
                             ),
-                            if (device.host != null)
-                              Text(
-                                device.host!,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: const Color(
-                                    0xFF134E4A,
-                                  ).withValues(alpha: 0.65),
+                            child: Icon(
+                              Icons.laptop_mac_rounded,
+                              color: theme.colorScheme.primary,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  device.name,
+                                  style: theme.textTheme.bodyLarge?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
+                                if (device.host != null)
+                                  Text(
+                                    device.host!,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: const Color(
+                                        0xFF134E4A,
+                                      ).withValues(alpha: 0.65),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: [
+                          if (onSendFile != null)
+                            TextButton.icon(
+                              onPressed: () => onSendFile!(device.id),
+                              icon: const Icon(
+                                Icons.upload_file_rounded,
+                                size: 18,
                               ),
-                          ],
-                        ),
-                      ),
-                      if (onSendFile != null)
-                        IconButton(
-                          tooltip: 'Send file',
-                          icon: const Icon(Icons.attach_file_rounded),
-                          color: theme.colorScheme.primary,
-                          onPressed: () => onSendFile!(device.id),
-                        ),
-                      TextButton(
-                        onPressed: () =>
-                            onSetConnected(device.id, !device.connected),
-                        style: TextButton.styleFrom(
-                          foregroundColor: theme.colorScheme.primary,
-                        ),
-                        child: Text(
-                          device.connected ? 'Disconnect' : 'Connect',
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () => onUnpair(device.id),
-                        style: TextButton.styleFrom(
-                          foregroundColor: theme.colorScheme.error,
-                        ),
-                        child: const Text('Unpair'),
+                              label: const Text('Send file'),
+                            ),
+                          TextButton(
+                            onPressed: () =>
+                                onSetConnected(device.id, !device.connected),
+                            style: TextButton.styleFrom(
+                              foregroundColor: theme.colorScheme.primary,
+                            ),
+                            child: Text(
+                              device.connected ? 'Disconnect' : 'Connect',
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => onUnpair(device.id),
+                            style: TextButton.styleFrom(
+                              foregroundColor: theme.colorScheme.error,
+                            ),
+                            child: const Text('Unpair'),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -1651,10 +1730,18 @@ class _TransferRow extends StatelessWidget {
           style: Theme.of(context).textTheme.bodySmall,
         );
       case TransferStatus.completed:
-        if (transfer.path != null) {
+        if (transfer.direction == TransferDirection.receiving &&
+            Platform.isAndroid) {
           return TextButton(
-            onPressed: () => Share.shareXFiles([XFile(transfer.path!)]),
-            child: const Text('Open location'),
+            onPressed: () async {
+              final opened = await state.openDownloads();
+              if (!opened && context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Could not open Downloads.')),
+                );
+              }
+            },
+            child: const Text('Open Downloads'),
           );
         }
         return const Icon(Icons.check_circle, color: Colors.green, size: 20);

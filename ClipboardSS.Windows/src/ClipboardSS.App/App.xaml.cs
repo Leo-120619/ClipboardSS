@@ -1,6 +1,7 @@
 using System.Windows;
 using ClipboardSS.App.Capture;
 using ClipboardSS.App.Net;
+using ClipboardSS.App.Notifications;
 using ClipboardSS.App.Pairing;
 using ClipboardSS.App.Security;
 using ClipboardSS.App.Settings;
@@ -35,6 +36,7 @@ public partial class App : System.Windows.Application
     private DevicesWindow? _devicesWindow;
     private PreferencesWindow? _preferencesWindow;
     private ShareActivationCoordinator? _shareCoordinator;
+    private ReceivedFileNotificationService? _receivedFileNotifications;
 
     protected override async void OnStartup(StartupEventArgs args)
     {
@@ -94,6 +96,7 @@ public partial class App : System.Windows.Application
         _screenTextOverlay?.Dispose();
         _hotKeys?.Dispose();
         _model?.Dispose();
+        _receivedFileNotifications?.Dispose();
         if (_server is not null) _server.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _clipboard?.Dispose();
         if (_primaryInstance is not null) _primaryInstance.Activated -= PrimaryInstance_OnActivated;
@@ -126,7 +129,9 @@ public partial class App : System.Windows.Application
         var fileSender = new FileSender(identity, pairedStore, transport);
         var fileReceiver = new FileReceiver(Path.Combine(_settings.StorageDirectory, "Transfers"),
             () => ResolveReceiveDirectory(_settings.Current));
-        _model = new AppModel(store, _clipboard, pairing, sender, mdns, sweeper, fileSender, fileReceiver, _settings);
+        _receivedFileNotifications = new ReceivedFileNotificationService();
+        _receivedFileNotifications.Initialize();
+        _model = new AppModel(store, _clipboard, pairing, sender, mdns, sweeper, fileSender, fileReceiver, _settings, _receivedFileNotifications);
         _shareCoordinator = new ShareActivationCoordinator(
             _model,
             () => _mainWindow,

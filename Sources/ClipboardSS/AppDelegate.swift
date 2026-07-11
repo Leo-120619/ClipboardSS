@@ -12,10 +12,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitorTimer: Timer?
     private var clipboardMonitor: ClipboardMonitor?
     private var shareStagingDirectory: URL?
+    private var receivedFileNotifications: ReceivedFileNotificationService?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.applicationIconImage = ClipboardSSLogo.image(size: NSSize(width: 128, height: 128))
+        let receivedFileNotifications = ReceivedFileNotificationService()
+        receivedFileNotifications.initialize()
+        self.receivedFileNotifications = receivedFileNotifications
 
         // Foreground activations from the share extension arrive as GetURL apple events.
         NSAppleEventManager.shared().setEventHandler(
@@ -118,6 +122,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             model.onCloseRequested = { [weak windowController] in
                 windowController?.hide()
+            }
+            model.onReceivedFileCompleted = { [weak receivedFileNotifications] url in
+                receivedFileNotifications?.showReceivedFile(at: url)
             }
             model.onScreenTextSelectionReady = { [weak model, weak screenTextOverlayController] capture in
                 screenTextOverlayController?.present(capture: capture) { text in

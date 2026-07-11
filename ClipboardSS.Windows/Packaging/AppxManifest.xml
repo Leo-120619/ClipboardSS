@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+         xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         IgnorableNamespaces="uap desktop rescap">
+         IgnorableNamespaces="uap desktop com rescap">
   <Identity Name="ClipboardSS" Publisher="CN=ClipboardSS Development" Version="1.0.0.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>ClipboardSS</DisplayName>
@@ -29,6 +30,16 @@
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square310x310Logo="Assets\Square310x310Logo.png" />
       </uap:VisualElements>
       <Extensions>
+        <desktop:Extension Category="windows.toastNotificationActivation">
+          <desktop:ToastNotificationActivation ToastActivatorCLSID="4D1F882E-254F-4FA7-B793-9F26AD623A83" />
+        </desktop:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer Executable="ClipboardSS.App.exe" Arguments="----AppNotificationActivated:" DisplayName="ClipboardSS">
+              <com:Class Id="4D1F882E-254F-4FA7-B793-9F26AD623A83" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
         <uap:Extension Category="windows.shareTarget">
           <uap:ShareTarget Description="Send files with ClipboardSS">
             <uap:SupportedFileTypes>

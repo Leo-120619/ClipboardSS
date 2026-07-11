@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using ClipboardSS.App.Net;
+using ClipboardSS.App.Notifications;
 using ClipboardSS.App.Pairing;
 using ClipboardSS.App.Settings;
 using ClipboardSS.App.Win32;
@@ -22,6 +23,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private readonly FileSender _fileSender;
     private readonly FileReceiver _fileReceiver;
     private readonly SettingsStore _settings;
+    private readonly IReceivedFileNotificationService _receivedFileNotifications;
+    private readonly HashSet<string> _notifiedReceiveIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CancellationTokenSource> _fileCancellations = [];
     private readonly List<FileTransferProgress> _transfers = [];
     private readonly MdnsService _mdns;
@@ -42,7 +45,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         SubnetSweeper sweeper,
         FileSender fileSender,
         FileReceiver fileReceiver,
-        SettingsStore settings)
+        SettingsStore settings,
+        IReceivedFileNotificationService receivedFileNotifications)
     {
         Store = store;
         PairingCoordinator = pairingCoordinator;
@@ -55,6 +59,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _fileSender = fileSender;
         _fileReceiver = fileReceiver;
         _settings = settings;
+        _receivedFileNotifications = receivedFileNotifications;
         _fileReceiver.TransferChanged += UpdateTransfer;
         _clipboard.Changed += ClipboardChanged;
         _mdns.PeersChanged += (_, _) => OnPropertyChanged(nameof(VisiblePeers));
@@ -470,6 +475,10 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
         if (_settings.Current.ReceiveDestinationMode == ReceiveDestinationMode.Ask)
             MoveReceivedFileAfterPrompt(progress);
+
+        var finalProgress = _transfers.FirstOrDefault(item => item.TransferId == progress.TransferId) ?? progress;
+        if (_notifiedReceiveIds.Add(progress.TransferId) && !string.IsNullOrWhiteSpace(finalProgress.SavedPath))
+            _receivedFileNotifications.ShowReceivedFile(finalProgress.SavedPath);
     }
 
     private void ChooseReceiveFolder()

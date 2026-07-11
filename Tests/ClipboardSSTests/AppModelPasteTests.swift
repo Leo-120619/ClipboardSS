@@ -91,6 +91,23 @@ struct AppModelPasteTests {
         #expect(targets[0].host == "192.168.0.10")
         #expect(targets[1].host == "192.168.0.20")
     }
+
+    @Test("completed receive notifies exactly once with the final path")
+    func completedReceiveNotificationIsDeduplicated() throws {
+        let fixture = try AppModelFixture()
+        let previousMode = ReceiveSettings.mode
+        defer { ReceiveSettings.mode = previousMode }
+        ReceiveSettings.mode = .defaultFolder
+        let url = fixture.store.storageDirectory.appendingPathComponent("résumé final (2).pdf")
+        var notifiedURLs: [URL] = []
+        fixture.model.onReceivedFileCompleted = { notifiedURLs.append($0) }
+
+        fixture.model.handleReceiveEvent(.started(transferId: "transfer-1", fileName: url.lastPathComponent, chunkCount: 1))
+        fixture.model.handleReceiveEvent(.completed(transferId: "transfer-1", url: url))
+        fixture.model.handleReceiveEvent(.completed(transferId: "transfer-1", url: url))
+
+        #expect(notifiedURLs == [url])
+    }
 }
 
 @MainActor

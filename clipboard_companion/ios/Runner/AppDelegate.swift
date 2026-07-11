@@ -4,6 +4,9 @@ import UIKit
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let imagesChannelName = "clipboard_companion/images"
+  private let shareChannelName = "clipboard_companion/incoming_share"
+  private let appGroup = "group.com.leolml.clipboardCompanion"
+  private var shareChannel: FlutterMethodChannel?
 
   override func application(
     _ application: UIApplication,
@@ -31,6 +34,55 @@ import UIKit
       default:
         result(FlutterMethodNotImplemented)
       }
+    }
+    let channel = FlutterMethodChannel(
+      name: shareChannelName,
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    shareChannel = channel
+    channel.setMethodCallHandler { [weak self] call, result in
+      switch call.method {
+      case "getInitialShare": result(self?.pendingShare())
+      case "completeShare":
+        let id = (call.arguments as? [String: Any])?["id"] as? String
+        self?.completeShare(id: id)
+        result(nil)
+      default: result(FlutterMethodNotImplemented)
+      }
+    }
+    if let share = pendingShare() { channel.invokeMethod("incomingShare", arguments: share) }
+  }
+
+  override func application(
+    _ app: UIApplication,
+    open url: URL,
+    options: [UIApplication.OpenURLOptionsKey: Any] = [:]
+  ) -> Bool {
+    if url.scheme == "clipboardcompanion", let share = pendingShare() {
+      shareChannel?.invokeMethod("incomingShare", arguments: share)
+      return true
+    }
+    return super.application(app, open: url, options: options)
+  }
+
+  private func pendingShare() -> [String: Any]? {
+    guard let defaults = UserDefaults(suiteName: appGroup),
+          let id = defaults.string(forKey: "pendingShareBatchID"),
+          let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup),
+          let data = try? Data(contentsOf: root.appendingPathComponent("IncomingShares/\(id)/manifest.json")),
+          let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    return value
+  }
+
+  private func completeShare(id: String?) {
+    guard let id,
+          let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
+    else { return }
+    try? FileManager.default.removeItem(at: root.appendingPathComponent("IncomingShares/\(id)"))
+    let defaults = UserDefaults(suiteName: appGroup)
+    if defaults?.string(forKey: "pendingShareBatchID") == id {
+      defaults?.removeObject(forKey: "pendingShareBatchID")
     }
   }
 
