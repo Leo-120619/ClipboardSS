@@ -25,7 +25,7 @@ public sealed class FileTransferTests
         using var receiver = new FileReceiver(Path.Combine(temp.Path, "parts"), () => downloads);
         var pairKey = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
         var bytes = new byte[] { 1, 2, 3 };
-        var offer = Offer("ABCDEF", bytes.Length, ContentHasherFor(bytes));
+        var offer = Offer("abcdef", bytes.Length, ContentHasherFor(bytes));
         Assert.Equal(200, (await receiver.OfferAsync(offer, pairKey)).StatusCode);
         Assert.Equal(409, (await receiver.FinishAsync("abcdef")).StatusCode);
         var key = FileTransferCrypto.DeriveFileKey(pairKey, "abcdef");
@@ -64,6 +64,29 @@ public sealed class FileTransferTests
         await receiver.OfferAsync(Offer("idle", 3, ContentHasherFor([1, 2, 3])), pairKey);
         now += TimeSpan.FromSeconds(61); await receiver.CleanupExpiredAsync();
         Assert.Equal(404, (await receiver.ChunkAsync("idle", 0, [])).StatusCode);
+    }
+
+    [Fact]
+    public async Task ReceiverTracksBytesReceivedForSmallMultipartTransfer()
+    {
+        using var temp = new TemporaryDirectory();
+        var bytes = Enumerable.Range(0, 11).Select(i => (byte)i).ToArray();
+        const int chunkSize = 4;
+        var offer = new FileOfferPayload("small-parts", "test.bin", bytes.Length, "application/octet-stream",
+            ContentHasherFor(bytes), chunkSize, 3, DateTimeOffset.UtcNow, "Mac");
+        using var receiver = new FileReceiver(Path.Combine(temp.Path, "parts"), () => Path.Combine(temp.Path, "downloads"));
+        long bytesReceived = 0;
+        receiver.TransferChanged += progress => bytesReceived = progress.BytesTransferred;
+        var pairKey = new byte[32];
+        Assert.Equal(200, (await receiver.OfferAsync(offer, pairKey)).StatusCode);
+        var key = FileTransferCrypto.DeriveFileKey(pairKey, "small-parts");
+        for (var index = 0; index < offer.ChunkCount; index++)
+        {
+            var offset = index * chunkSize;
+            var length = Math.Min(chunkSize, bytes.Length - offset);
+            await receiver.ChunkAsync("small-parts", index, FileTransferCrypto.SealChunk(key, index, bytes.AsSpan(offset, length)));
+        }
+        Assert.Equal(bytes.Length, bytesReceived);
     }
 
     private static FileOfferPayload Offer(string id, long size, string hash) => new(id, "test.bin", size,

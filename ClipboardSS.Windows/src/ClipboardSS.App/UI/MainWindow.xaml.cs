@@ -33,6 +33,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         Closing += OnClosing;
         PreviewKeyDown += OnPreviewKeyDown;
         _model.StateChanged += (_, _) => Dispatcher.Invoke(RefreshView);
+        _model.DevicesRequested += (_, _) => DevicesRequested?.Invoke(this, EventArgs.Empty);
         _model.PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(AppModel.LastError)) Dispatcher.Invoke(RefreshError);
@@ -212,15 +213,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private async void Window_OnDrop(object sender, DragEventArgs args)
     {
-        if (args.Data.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } paths || !File.Exists(paths[0])) return;
-        var devices = _model.PairedDevices.Where(device => !string.IsNullOrWhiteSpace(device.Host)).ToArray();
-        if (devices.Length != 1)
-        {
-            _model.ReportError(devices.Length == 0 ? "Pair a reachable device before sending a file." : "Choose Send file next to a device in Devices.");
-            if (devices.Length > 1) DevicesRequested?.Invoke(this, EventArgs.Empty);
-            return;
-        }
-        await _model.SendFileAsync(paths[0], devices[0].Id);
+        if (args.Data.GetData(DataFormats.FileDrop) is not string[] paths) return;
+        await _model.HandleDroppedFilesAsync(paths);
     }
     private void ScreenText_OnClick(object sender, RoutedEventArgs args) => ScreenTextRequested?.Invoke(this, EventArgs.Empty);
     private void Screenshot_OnClick(object sender, RoutedEventArgs args) => ScreenshotRequested?.Invoke(this, EventArgs.Empty);

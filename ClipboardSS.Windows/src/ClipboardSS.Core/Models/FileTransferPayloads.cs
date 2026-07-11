@@ -3,6 +3,7 @@ namespace ClipboardSS.Core.Models;
 public static class FileTransferConstants
 {
     public const int ChunkSize = 4 * 1024 * 1024;
+    public const int MaxChunkSize = 4 * 1024 * 1024;
     public static readonly TimeSpan SessionIdleTimeout = TimeSpan.FromSeconds(60);
 }
 

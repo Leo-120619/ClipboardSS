@@ -63,6 +63,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler? StateChanged;
+    public event EventHandler? DevicesRequested;
     public event Action<PasteRequest>? PasteRequested;
     public ClipStore Store { get; }
     public PairingCoordinator PairingCoordinator { get; }
@@ -207,6 +208,25 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         catch (OperationCanceledException) { }
         catch (Exception exception) { LastError = $"File transfer failed: {exception.Message}"; }
         finally { _fileCancellations.Remove(transferId); cancellation.Dispose(); }
+    }
+
+    public async Task HandleDroppedFilesAsync(string[] paths)
+    {
+        var validPaths = paths.Where(File.Exists).ToArray();
+        if (validPaths.Length == 0) return;
+        var targets = ComposeSendTargets(VisiblePeers, PairedDevices);
+        if (targets.Count == 0)
+        {
+            ReportError("Pair a reachable device before sending a file.");
+            return;
+        }
+        if (targets.Count > 1)
+        {
+            ReportError("Choose Send file next to a device in Devices.");
+            DevicesRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+        foreach (var path in validPaths) await SendFileAsync(path, targets[0].Id);
     }
 
     public void CancelTransfer(string transferId)

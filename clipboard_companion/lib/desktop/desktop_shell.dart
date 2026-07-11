@@ -184,4 +184,11 @@ class DesktopShell with TrayListener, WindowListener {
   void onWindowClose() {
     unawaited(windowManager.hide());
   }
+
+  @override
+  void onWindowMinimize() {
+    // Keep clipboard sync running, but remove the window completely instead of
+    // leaving Windows' compact minimized title bar on the desktop.
+    unawaited(windowManager.hide());
+  }
 }

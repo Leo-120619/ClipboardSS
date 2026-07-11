@@ -1,5 +1,6 @@
 using ClipboardSS.Core.Crypto;
 using ClipboardSS.Core.Models;
+using System.Text.RegularExpressions;
 
 namespace ClipboardSS.Core.Sync;
 
@@ -7,14 +8,17 @@ public sealed record FileReceiveResult(int StatusCode, string Status, int? Recei
 
 public sealed class FileReceiver : IDisposable
 {
-    private sealed class Session(FileOfferPayload offer, byte[] key, string path, DateTimeOffset now)
+    private sealed class Session(FileOfferPayload offer, byte[] key, string path, FileStream stream, DateTimeOffset now)
     {
         public FileOfferPayload Offer { get; } = offer;
         public byte[] Key { get; } = key;
         public string Path { get; } = path;
+        public FileStream Stream { get; } = stream;
         public HashSet<int> Received { get; } = [];
+        public long BytesReceived { get; set; }
         public DateTimeOffset LastActivity { get; set; } = now;
     }
+    private static readonly Regex TransferIdPattern = new("^[a-z0-9-]{1,64}$", RegexOptions.CultureInvariant);
     private readonly string _tempDirectory;
     private readonly Func<string> _downloadsDirectory;
     private readonly Func<DateTimeOffset> _clock;
@@ -31,15 +35,16 @@ public sealed class FileReceiver : IDisposable
         await _gate.WaitAsync(token); try
         {
             CleanupExpiredLocked();
+            if (!TransferIdPattern.IsMatch(offer.TransferId)) return new(400, "invalidId");
             var id = Normalize(offer.TransferId);
             if (_sessions.ContainsKey(id)) return new(409, "duplicate");
-            if (offer.ChunkSize != FileTransferConstants.ChunkSize || offer.FileSize < 0 || offer.ChunkCount < 0 ||
-                offer.ChunkCount != (offer.FileSize + offer.ChunkSize - 1) / offer.ChunkSize) return new(400, "invalidOffer");
+            if (offer.ChunkSize <= 0 || offer.ChunkSize > FileTransferConstants.MaxChunkSize || offer.FileSize < 0 || offer.ChunkCount < 0 ||
+                offer.ChunkCount != offer.FileSize / offer.ChunkSize + (offer.FileSize % offer.ChunkSize == 0 ? 0 : 1)) return new(400, "invalidOffer");
             var path = Path.Combine(_tempDirectory, id + ".part");
-            await using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 1, FileOptions.Asynchronous))
-                file.SetLength(offer.FileSize);
+            var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.RandomAccess);
+            stream.SetLength(offer.FileSize);
             _cancelled.Remove(id);
-            _sessions[id] = new(offer with { TransferId = id }, FileTransferCrypto.DeriveFileKey(pairKey, id), path, _clock());
+            _sessions[id] = new(offer with { TransferId = id }, FileTransferCrypto.DeriveFileKey(pairKey, id), path, stream, _clock());
             TransferChanged?.Invoke(new(id, offer.FileName, 0, offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Active));
             return new(200, "ready");
         } finally { _gate.Release(); }
@@ -58,16 +63,14 @@ public sealed class FileReceiver : IDisposable
             var expected = index == session.Offer.ChunkCount - 1
                 ? checked((int)(session.Offer.FileSize - (long)index * session.Offer.ChunkSize)) : session.Offer.ChunkSize;
             if (plaintext.Length != expected) return FailLocked(id, session, 400, "badSize");
-            if (!session.Received.Contains(index))
+            if (session.Received.Add(index))
             {
-                await using var file = new FileStream(session.Path, FileMode.Open, FileAccess.Write, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.RandomAccess);
-                file.Position = (long)index * session.Offer.ChunkSize;
-                await file.WriteAsync(plaintext, token);
-                session.Received.Add(index);
+                session.Stream.Position = (long)index * session.Offer.ChunkSize;
+                await session.Stream.WriteAsync(plaintext, token);
+                session.BytesReceived += expected;
             }
             session.LastActivity = _clock();
-            var bytes = session.Received.Sum(i => i == session.Offer.ChunkCount - 1 ? expected : session.Offer.ChunkSize);
-            TransferChanged?.Invoke(new(id, session.Offer.FileName, bytes, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Active));
+            TransferChanged?.Invoke(new(id, session.Offer.FileName, session.BytesReceived, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Active));
             return new(200, "ok", session.Received.Count);
         } finally { _gate.Release(); }
     }
@@ -79,6 +82,7 @@ public sealed class FileReceiver : IDisposable
             CleanupExpiredLocked(); var id = Normalize(transferId);
             if (!_sessions.TryGetValue(id, out var session)) return new(404, "unknown");
             if (session.Received.Count != session.Offer.ChunkCount) return new(409, "incomplete");
+            session.Stream.Dispose();
             string hash;
             await using (var file = new FileStream(session.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
                 hash = await ContentHasher.FileHashAsync(file, token);
@@ -97,16 +101,16 @@ public sealed class FileReceiver : IDisposable
         await _gate.WaitAsync(token); try
         {
             var id = Normalize(transferId); _cancelled.Add(id);
-            if (_sessions.Remove(id, out var session)) { TryDelete(session.Path); TransferChanged?.Invoke(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Cancelled)); }
+            if (_sessions.Remove(id, out var session)) { session.Stream.Dispose(); TryDelete(session.Path); TransferChanged?.Invoke(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Cancelled)); }
             return new(200, "cancelled");
         } finally { _gate.Release(); }
     }
 
     public async Task CleanupExpiredAsync(CancellationToken token = default) { await _gate.WaitAsync(token); try { CleanupExpiredLocked(); } finally { _gate.Release(); } }
-    private void CleanupExpiredLocked() { foreach (var pair in _sessions.Where(p => _clock() - p.Value.LastActivity >= FileTransferConstants.SessionIdleTimeout).ToArray()) { TryDelete(pair.Value.Path); _sessions.Remove(pair.Key); } }
-    private FileReceiveResult FailLocked(string id, Session session, int code, string status) { TryDelete(session.Path); _sessions.Remove(id); TransferChanged?.Invoke(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Failed, Error: status)); return new(code, status); }
+    private void CleanupExpiredLocked() { foreach (var pair in _sessions.Where(p => _clock() - p.Value.LastActivity >= FileTransferConstants.SessionIdleTimeout).ToArray()) { pair.Value.Stream.Dispose(); TryDelete(pair.Value.Path); _sessions.Remove(pair.Key); } }
+    private FileReceiveResult FailLocked(string id, Session session, int code, string status) { session.Stream.Dispose(); TryDelete(session.Path); _sessions.Remove(id); TransferChanged?.Invoke(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Failed, Error: status)); return new(code, status); }
     private static string Normalize(string id) => id.ToLowerInvariant();
     private static void TryDelete(string path) { try { File.Delete(path); } catch { } }
     private static string CollisionSafePath(string directory, string name) { name = Path.GetFileName(name); var path = Path.Combine(directory, name); for (var n = 2; File.Exists(path); n++) path = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(name)} ({n}){Path.GetExtension(name)}"); return path; }
-    public void Dispose() { foreach (var session in _sessions.Values) TryDelete(session.Path); _gate.Dispose(); }
+    public void Dispose() { foreach (var session in _sessions.Values) { session.Stream.Dispose(); TryDelete(session.Path); } _gate.Dispose(); }
 }
