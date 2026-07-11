@@ -1211,7 +1211,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
     AppState state,
     String deviceId,
   ) async {
-    final result = await FilePicker.platform.pickFiles(withData: false);
+    final result = await FilePicker.pickFiles(withData: false);
     final path = result?.files.single.path;
     if (path == null) return;
     await state.sendFileTo(File(path), deviceId);
@@ -1260,7 +1260,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
       if (action == 'keep') await state.keepDefaultReceiveDestination();
       if (action == 'ask') await state.setReceiveDestinationAskEveryTime();
       if (action == 'choose') {
-        final directory = await FilePicker.platform.getDirectoryPath();
+        final directory = await FilePicker.getDirectoryPath();
         if (directory != null) {
           if (firstRun) await state.setReceiveDestinationDefault(directory);
           await state.movePendingReceivedFileTo(directory);
@@ -1289,7 +1289,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
           ),
           TextButton(
             onPressed: () async {
-              final dir = await FilePicker.platform.getDirectoryPath();
+              final dir = await FilePicker.getDirectoryPath();
               if (dir != null) await state.setReceiveDestinationDefault(dir);
               if (context.mounted) Navigator.pop(context);
             },

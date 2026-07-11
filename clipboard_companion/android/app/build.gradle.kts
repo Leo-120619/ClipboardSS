@@ -6,7 +6,10 @@ plugins {
 
 android {
     namespace = "com.leolml.clipboard_companion"
-    compileSdk = flutter.compileSdkVersion
+    // flutter_plugin_android_lifecycle currently requires Android API 36.
+    // This only affects the APIs available at compile time; runtime behavior
+    // remains controlled by targetSdk below.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
