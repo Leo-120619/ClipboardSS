@@ -24,6 +24,7 @@
 		3B4ACCD9D6AB93888946A34C /* ClipServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 461DF30243890CBC60721C45 /* ClipServer.swift */; };
 		456FB0F66BA6B6B9A18668B1 /* libClipboardCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 95B8FC8A61F2B5ADD233582A /* libClipboardCore.a */; };
 		49A0E2849B04EB8E07B718C9 /* ShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A8A2FF3B6CF405BCFFCC1BA /* ShareInbox.swift */; };
+		4B0BCEE02A9F6D29DBCC32D7 /* ReceiveSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8408B934E71DE5F8A2090FE1 /* ReceiveSettings.swift */; };
 		4B67B1449D7B088E4294B106 /* ClipItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8196C8B6E02061D7C1D94AB9 /* ClipItem.swift */; };
 		4CE75BA08C8A703B597ED847 /* PairingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05EB26C97F57889DA50FF46 /* PairingSession.swift */; };
 		529657BEBE04E1C2D0DBE387 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA042486B9F28FC2A991BB5 /* DeviceIdentity.swift */; };
@@ -129,6 +130,7 @@
 		78321E5F0F5599FDFF88E16D /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		7D437C9C5891BD314C084DE2 /* HotKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKeyManager.swift; sourceTree = "<group>"; };
 		8196C8B6E02061D7C1D94AB9 /* ClipItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipItem.swift; sourceTree = "<group>"; };
+		8408B934E71DE5F8A2090FE1 /* ReceiveSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiveSettings.swift; sourceTree = "<group>"; };
 		8A8A2FF3B6CF405BCFFCC1BA /* ShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInbox.swift; sourceTree = "<group>"; };
 		8A9DF8AD904FC78534A2140D /* ClipPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipPayload.swift; sourceTree = "<group>"; };
 		95B8FC8A61F2B5ADD233582A /* libClipboardCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libClipboardCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -257,6 +259,7 @@
 				22D5ACAE3270EE78B3667EC6 /* PeerBrowser.swift */,
 				456CFF7F25EACF8D2E535219 /* PhotoEditorView.swift */,
 				40DD41FBDDCB707B8B0EFCD7 /* PreferencesView.swift */,
+				8408B934E71DE5F8A2090FE1 /* ReceiveSettings.swift */,
 				FA1FB3C5477C43ADBE471313 /* ScreenshotCaptureService.swift */,
 				F1E1C46DB19A8F7CF1957D56 /* ScreenshotReviewView.swift */,
 				346F9ECA9E7EBF2719BC9DFC /* ScreenTextCaptureService.swift */,
@@ -439,6 +442,7 @@
 				B299D7BE36E5B27EF02071A3 /* PeerBrowser.swift in Sources */,
 				F73FB48D306595D70DF5AC5E /* PhotoEditorView.swift in Sources */,
 				18C4ECABE234359995367AC3 /* PreferencesView.swift in Sources */,
+				4B0BCEE02A9F6D29DBCC32D7 /* ReceiveSettings.swift in Sources */,
 				1A63F11E5CF74B7B9A34BCD1 /* ScreenTextCaptureService.swift in Sources */,
 				BD1ED9B5901215FF8402D7D2 /* ScreenTextOverlayController.swift in Sources */,
 				242474FA05B76DBA34A5822D /* ScreenshotCaptureService.swift in Sources */,

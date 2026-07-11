@@ -116,7 +116,7 @@ final class ShareViewController: NSViewController {
             let ext = (name as NSString).pathExtension
             let stem = (name as NSString).deletingPathExtension
             let candidate = ext.isEmpty ? "\(stem)-\(counter)" : "\(stem)-\(counter).\(ext)"
-            dest = staging.appendingPathComponent(candidate)
+            dest = dropDirectory.appendingPathComponent(candidate)
             counter += 1
         }
         do {
