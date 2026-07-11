@@ -3,6 +3,9 @@ options:
   bundleIdPrefix: com.local
   deploymentTarget:
     macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
 targets:
   ClipboardSS:
     type: application
@@ -11,10 +14,12 @@ targets:
       - Sources/ClipboardSS
     dependencies:
       - target: ClipboardCore
+      - target: ShareExtension
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: ClipboardSS
+        CFBundleIconFile: clipboard
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
         NSHighResolutionCapable: true
@@ -22,14 +27,46 @@ targets:
         NSLocalNetworkUsageDescription: "This app needs local network access to pair with and sync clipboards with your companion devices."
         NSBonjourServices:
           - _clipboardss._tcp
+        CFBundleURLTypes:
+          - CFBundleURLName: com.local.ClipboardSS.share
+            CFBundleURLSchemes:
+              - clipboardss
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.local.ClipboardSS
       CODE_SIGN_STYLE: Manual
       CODE_SIGN_IDENTITY: "ClipboardSS Local Code Signing"
+      CODE_SIGN_ENTITLEMENTS: ClipboardSS.entitlements
       CODE_SIGNING_REQUIRED: YES
       ENABLE_DEBUG_DYLIB: NO
       ENABLE_HARDENED_RUNTIME: YES
-      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  ShareExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - Sources/ShareExtension
+    dependencies:
+      - target: ClipboardCore
+    info:
+      path: Sources/ShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: ClipboardSS
+        CFBundlePackageType: "XPC!"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsFileWithMaxCount: 20
+              NSExtensionActivationSupportsImageWithMaxCount: 20
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.local.ClipboardSS.ShareExtension
+      PRODUCT_MODULE_NAME: ShareExtension
+      CODE_SIGN_STYLE: Manual
+      CODE_SIGN_IDENTITY: "ClipboardSS Local Code Signing"
+      CODE_SIGN_ENTITLEMENTS: ShareExtension.entitlements
+      CODE_SIGNING_REQUIRED: YES
+      ENABLE_HARDENED_RUNTIME: YES
+      SKIP_INSTALL: YES
   ClipboardCore:
     type: library.static
     platform: macOS

@@ -13,6 +13,7 @@
 		159769C5F92CED3C98E867F2 /* DevicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E28B29116140529683733A79 /* DevicesView.swift */; };
 		18C4ECABE234359995367AC3 /* PreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40DD41FBDDCB707B8B0EFCD7 /* PreferencesView.swift */; };
 		1A63F11E5CF74B7B9A34BCD1 /* ScreenTextCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 346F9ECA9E7EBF2719BC9DFC /* ScreenTextCaptureService.swift */; };
+		1B73E4C603E72C038B843963 /* FileTransferPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EE1DF9F2F3021EA4B96D153 /* FileTransferPayload.swift */; };
 		2190300EAF4E4C952F8D1183 /* HotKeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D437C9C5891BD314C084DE2 /* HotKeyManager.swift */; };
 		23EA5158B57BA8EBA4315209 /* ContentHasher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A873B0C7D639F7A8115B7F7D /* ContentHasher.swift */; };
 		242474FA05B76DBA34A5822D /* ScreenshotCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1FB3C5477C43ADBE471313 /* ScreenshotCaptureService.swift */; };
@@ -21,6 +22,8 @@
 		3535A6C4456C0EC3FA8C0C80 /* ClipReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F553C8BFA01C56CE3FE90FB /* ClipReceiver.swift */; };
 		35C54D0573ADB3032261C50A /* PairedDeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F09A68A0F0C2FEE628876BC /* PairedDeviceStore.swift */; };
 		3B4ACCD9D6AB93888946A34C /* ClipServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 461DF30243890CBC60721C45 /* ClipServer.swift */; };
+		456FB0F66BA6B6B9A18668B1 /* libClipboardCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 95B8FC8A61F2B5ADD233582A /* libClipboardCore.a */; };
+		49A0E2849B04EB8E07B718C9 /* ShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A8A2FF3B6CF405BCFFCC1BA /* ShareInbox.swift */; };
 		4B67B1449D7B088E4294B106 /* ClipItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8196C8B6E02061D7C1D94AB9 /* ClipItem.swift */; };
 		4CE75BA08C8A703B597ED847 /* PairingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05EB26C97F57889DA50FF46 /* PairingSession.swift */; };
 		529657BEBE04E1C2D0DBE387 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA042486B9F28FC2A991BB5 /* DeviceIdentity.swift */; };
@@ -29,11 +32,15 @@
 		71DE8400C15FB2CC344B18A6 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B633F73072971B8CDD415480 /* main.swift */; };
 		78677A30353C05EB628A61EA /* OCRSelectionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ED7E85E62B3DF303C65A809 /* OCRSelectionState.swift */; };
 		7A8F78B388CDA84B8CADA509 /* ClipStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCB5F615BBE25F59BCC2DF85 /* ClipStore.swift */; };
+		811774C1181884A0EBC20084 /* FileReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C11D3B4155B034C9A150A66E /* FileReceiver.swift */; };
 		88C9A2B207ADD803EACE0873 /* ClipboardIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 342923953D31CE6ED37C7BA8 /* ClipboardIO.swift */; };
+		8A9598C4DF3B704B90FDA9F0 /* FileTransferCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 332F62CEF48FCA7C806A89E4 /* FileTransferCrypto.swift */; };
+		8EE2B7C6A1E94C32C1C95769 /* SubnetSweeper.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA85C1C9A89F36C23E2B0859 /* SubnetSweeper.swift */; };
 		92523E5672BBE0BB27B2F44F /* libClipboardCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 95B8FC8A61F2B5ADD233582A /* libClipboardCore.a */; };
 		9C0BB76600E907954CB2D9AD /* ScreenTextSelectionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE67DEABB709D1468DDDE059 /* ScreenTextSelectionState.swift */; };
 		9C419AEA7E4ACBAEA1CB62EC /* HTTPCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = D30542EEF6FE90988261AE73 /* HTTPCodec.swift */; };
 		A6B3B674B45CF98BD58E0574 /* NWPeerTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 138427018BB54F5F0C98FE04 /* NWPeerTransport.swift */; };
+		A82A673EDD03ED4AF3BD1E71 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78321E5F0F5599FDFF88E16D /* ShareViewController.swift */; };
 		AE31133AE6E008C84FAD006B /* ClipFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2E36C88BDE9E74FD1B9A188 /* ClipFilter.swift */; };
 		AFAA468F6AD10A220223D778 /* CoachMarkOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08ADC8D77A026F929F696A91 /* CoachMarkOverlay.swift */; };
 		B299D7BE36E5B27EF02071A3 /* PeerBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22D5ACAE3270EE78B3667EC6 /* PeerBrowser.swift */; };
@@ -41,8 +48,11 @@
 		B67DE6CA66590A7DF904A4D3 /* PairingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C33F77CE8F8A5FB9BC1826 /* PairingCoordinator.swift */; };
 		BD1ED9B5901215FF8402D7D2 /* ScreenTextOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CA83282D7974D858CFC7ADB /* ScreenTextOverlayController.swift */; };
 		BE6AF7E0D1720A9FB40C3ACD /* ClipboardWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE4C72AE22F808B408EF8ACE /* ClipboardWindowController.swift */; };
+		C136422D6A452B156CAF17D0 /* FileTransferState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21C5E1218BCBE0D706904164 /* FileTransferState.swift */; };
 		D126A0CAD676A7DA215AE662 /* ScreenshotReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E1C46DB19A8F7CF1957D56 /* ScreenshotReviewView.swift */; };
 		D1424DE0F094CBE01391C8EB /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F944F4408DEE4A25E9601802 /* AppModel.swift */; };
+		DFCFD9C4692C9B341EE3A14C /* FileSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = 636F2D8CAF716D18A4F5EEB7 /* FileSender.swift */; };
+		E1869C83EA3F25769113EED9 /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2E256214EC57087943FAF035 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		E282DAB90A642F849E364A15 /* ClipEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 617404615A0733214F622DF2 /* ClipEnvelope.swift */; };
 		E3F2B23CBD4B92136AFE14B1 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB07D3D15F5F6B37470252C2 /* AppDelegate.swift */; };
 		E92A89D2E7A9B664E567FB47 /* SystemPasteboardClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 418488DE1ED0293C0A2D8EDA /* SystemPasteboardClient.swift */; };
@@ -59,7 +69,35 @@
 			remoteGlobalIDString = E68B9C33A9E4A92D25FC8F04;
 			remoteInfo = ClipboardCore;
 		};
+		9A55FE5ED67508ACE201857B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C01056BAE0F824FC57A58DAA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E68B9C33A9E4A92D25FC8F04;
+			remoteInfo = ClipboardCore;
+		};
+		C05DDD3153A96BC846725DC6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C01056BAE0F824FC57A58DAA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8D1C65D7C537AB12E986B1C2;
+			remoteInfo = ShareExtension;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		EB77CBB2F9C8277764317F99 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				E1869C83EA3F25769113EED9 /* ShareExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		019B36DE17CEF5D5D0EC4469 /* ClipboardRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardRootView.swift; sourceTree = "<group>"; };
@@ -68,11 +106,15 @@
 		138427018BB54F5F0C98FE04 /* NWPeerTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWPeerTransport.swift; sourceTree = "<group>"; };
 		1F09A68A0F0C2FEE628876BC /* PairedDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairedDeviceStore.swift; sourceTree = "<group>"; };
 		1F553C8BFA01C56CE3FE90FB /* ClipReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipReceiver.swift; sourceTree = "<group>"; };
+		21C5E1218BCBE0D706904164 /* FileTransferState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferState.swift; sourceTree = "<group>"; };
 		22D5ACAE3270EE78B3667EC6 /* PeerBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerBrowser.swift; sourceTree = "<group>"; };
 		2DA042486B9F28FC2A991BB5 /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
+		2E256214EC57087943FAF035 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		332F62CEF48FCA7C806A89E4 /* FileTransferCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferCrypto.swift; sourceTree = "<group>"; };
 		342923953D31CE6ED37C7BA8 /* ClipboardIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardIO.swift; sourceTree = "<group>"; };
 		346F9ECA9E7EBF2719BC9DFC /* ScreenTextCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTextCaptureService.swift; sourceTree = "<group>"; };
 		3ED7E85E62B3DF303C65A809 /* OCRSelectionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRSelectionState.swift; sourceTree = "<group>"; };
+		3EE1DF9F2F3021EA4B96D153 /* FileTransferPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferPayload.swift; sourceTree = "<group>"; };
 		40DD41FBDDCB707B8B0EFCD7 /* PreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesView.swift; sourceTree = "<group>"; };
 		418488DE1ED0293C0A2D8EDA /* SystemPasteboardClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPasteboardClient.swift; sourceTree = "<group>"; };
 		456CFF7F25EACF8D2E535219 /* PhotoEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoEditorView.swift; sourceTree = "<group>"; };
@@ -81,10 +123,13 @@
 		4D938DBCD7B6812CE576F860 /* ClipboardSS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClipboardSS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5E7DE024C191BB3EA9536A0A /* ClipSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipSender.swift; sourceTree = "<group>"; };
 		617404615A0733214F622DF2 /* ClipEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipEnvelope.swift; sourceTree = "<group>"; };
+		636F2D8CAF716D18A4F5EEB7 /* FileSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSender.swift; sourceTree = "<group>"; };
 		64C33F77CE8F8A5FB9BC1826 /* PairingCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingCoordinator.swift; sourceTree = "<group>"; };
 		736D7200E55DDD962C564CCB /* KeychainPairKeyStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainPairKeyStorage.swift; sourceTree = "<group>"; };
+		78321E5F0F5599FDFF88E16D /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		7D437C9C5891BD314C084DE2 /* HotKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKeyManager.swift; sourceTree = "<group>"; };
 		8196C8B6E02061D7C1D94AB9 /* ClipItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipItem.swift; sourceTree = "<group>"; };
+		8A8A2FF3B6CF405BCFFCC1BA /* ShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInbox.swift; sourceTree = "<group>"; };
 		8A9DF8AD904FC78534A2140D /* ClipPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipPayload.swift; sourceTree = "<group>"; };
 		95B8FC8A61F2B5ADD233582A /* libClipboardCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libClipboardCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		9D442B0EFE2C18CEF0F7780A /* LaunchAtLoginController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLoginController.swift; sourceTree = "<group>"; };
@@ -92,12 +137,14 @@
 		AE67DEABB709D1468DDDE059 /* ScreenTextSelectionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTextSelectionState.swift; sourceTree = "<group>"; };
 		B633F73072971B8CDD415480 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		C05EB26C97F57889DA50FF46 /* PairingSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingSession.swift; sourceTree = "<group>"; };
+		C11D3B4155B034C9A150A66E /* FileReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileReceiver.swift; sourceTree = "<group>"; };
 		C859D053DC78587B277EF530 /* ClipboardSSLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardSSLogo.swift; sourceTree = "<group>"; };
 		D30542EEF6FE90988261AE73 /* HTTPCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPCodec.swift; sourceTree = "<group>"; };
 		D347E5B2CF5C3994850F1148 /* AppPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPermission.swift; sourceTree = "<group>"; };
 		DE4C72AE22F808B408EF8ACE /* ClipboardWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardWindowController.swift; sourceTree = "<group>"; };
 		E28B29116140529683733A79 /* DevicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesView.swift; sourceTree = "<group>"; };
 		E402BD00A36824726C5FD8A2 /* OCRService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRService.swift; sourceTree = "<group>"; };
+		EA85C1C9A89F36C23E2B0859 /* SubnetSweeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubnetSweeper.swift; sourceTree = "<group>"; };
 		EB07D3D15F5F6B37470252C2 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		EC946A8CB782158B26C87C35 /* ShortcutRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutRecorderView.swift; sourceTree = "<group>"; };
 		F1E1C46DB19A8F7CF1957D56 /* ScreenshotReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotReviewView.swift; sourceTree = "<group>"; };
@@ -105,6 +152,7 @@
 		F944F4408DEE4A25E9601802 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		FA1FB3C5477C43ADBE471313 /* ScreenshotCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotCaptureService.swift; sourceTree = "<group>"; };
 		FCB5F615BBE25F59BCC2DF85 /* ClipStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipStore.swift; sourceTree = "<group>"; };
+		FD2D88E81978D938CF468F1F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,6 +164,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B5EC28573C04FC2FC9F4F2EC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				456FB0F66BA6B6B9A18668B1 /* libClipboardCore.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -124,6 +180,7 @@
 			children = (
 				469A8F43A7785C2709ABB901 /* ClipboardCore */,
 				F84A2B6A53BC1E6EA0921055 /* ClipboardSS */,
+				53A91C607322DA9A983D8D09 /* ShareExtension */,
 				7E45C39BDA692E4BEB75F339 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -141,14 +198,29 @@
 				FCB5F615BBE25F59BCC2DF85 /* ClipStore.swift */,
 				A873B0C7D639F7A8115B7F7D /* ContentHasher.swift */,
 				2DA042486B9F28FC2A991BB5 /* DeviceIdentity.swift */,
+				C11D3B4155B034C9A150A66E /* FileReceiver.swift */,
+				636F2D8CAF716D18A4F5EEB7 /* FileSender.swift */,
+				332F62CEF48FCA7C806A89E4 /* FileTransferCrypto.swift */,
+				3EE1DF9F2F3021EA4B96D153 /* FileTransferPayload.swift */,
 				D30542EEF6FE90988261AE73 /* HTTPCodec.swift */,
 				3ED7E85E62B3DF303C65A809 /* OCRSelectionState.swift */,
 				1F09A68A0F0C2FEE628876BC /* PairedDeviceStore.swift */,
 				C05EB26C97F57889DA50FF46 /* PairingSession.swift */,
 				AE67DEABB709D1468DDDE059 /* ScreenTextSelectionState.swift */,
+				8A8A2FF3B6CF405BCFFCC1BA /* ShareInbox.swift */,
 			);
 			name = ClipboardCore;
 			path = Sources/ClipboardCore;
+			sourceTree = "<group>";
+		};
+		53A91C607322DA9A983D8D09 /* ShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				FD2D88E81978D938CF468F1F /* Info.plist */,
+				78321E5F0F5599FDFF88E16D /* ShareViewController.swift */,
+			);
+			name = ShareExtension;
+			path = Sources/ShareExtension;
 			sourceTree = "<group>";
 		};
 		7E45C39BDA692E4BEB75F339 /* Products */ = {
@@ -156,6 +228,7 @@
 			children = (
 				4D938DBCD7B6812CE576F860 /* ClipboardSS.app */,
 				95B8FC8A61F2B5ADD233582A /* libClipboardCore.a */,
+				2E256214EC57087943FAF035 /* ShareExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -173,6 +246,7 @@
 				461DF30243890CBC60721C45 /* ClipServer.swift */,
 				08ADC8D77A026F929F696A91 /* CoachMarkOverlay.swift */,
 				E28B29116140529683733A79 /* DevicesView.swift */,
+				21C5E1218BCBE0D706904164 /* FileTransferState.swift */,
 				7D437C9C5891BD314C084DE2 /* HotKeyManager.swift */,
 				736D7200E55DDD962C564CCB /* KeychainPairKeyStorage.swift */,
 				9D442B0EFE2C18CEF0F7780A /* LaunchAtLoginController.swift */,
@@ -188,6 +262,7 @@
 				346F9ECA9E7EBF2719BC9DFC /* ScreenTextCaptureService.swift */,
 				0CA83282D7974D858CFC7ADB /* ScreenTextOverlayController.swift */,
 				EC946A8CB782158B26C87C35 /* ShortcutRecorderView.swift */,
+				EA85C1C9A89F36C23E2B0859 /* SubnetSweeper.swift */,
 				418488DE1ED0293C0A2D8EDA /* SystemPasteboardClient.swift */,
 			);
 			name = ClipboardSS;
@@ -203,11 +278,13 @@
 			buildPhases = (
 				20BFE00CAF9D67176F89FAA2 /* Sources */,
 				81A941ED59148A8193E97B6D /* Frameworks */,
+				EB77CBB2F9C8277764317F99 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				9A3B258E7176BF1D4F5E89F1 /* PBXTargetDependency */,
+				57B8941031160AF934D54B53 /* PBXTargetDependency */,
 			);
 			name = ClipboardSS;
 			packageProductDependencies = (
@@ -215,6 +292,25 @@
 			productName = ClipboardSS;
 			productReference = 4D938DBCD7B6812CE576F860 /* ClipboardSS.app */;
 			productType = "com.apple.product-type.application";
+		};
+		8D1C65D7C537AB12E986B1C2 /* ShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4B64CC240F04FDDC48C9219C /* Build configuration list for PBXNativeTarget "ShareExtension" */;
+			buildPhases = (
+				FB0ADADA33C0E6B158EC60F5 /* Sources */,
+				B5EC28573C04FC2FC9F4F2EC /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				8A2A6A5648079FA565006BB8 /* PBXTargetDependency */,
+			);
+			name = ShareExtension;
+			packageProductDependencies = (
+			);
+			productName = ShareExtension;
+			productReference = 2E256214EC57087943FAF035 /* ShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		E68B9C33A9E4A92D25FC8F04 /* ClipboardCore */ = {
 			isa = PBXNativeTarget;
@@ -242,6 +338,14 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					1B4269F8823D0DDE0B0DFB59 = {
+						ProvisioningStyle = Manual;
+					};
+					8D1C65D7C537AB12E986B1C2 = {
+						ProvisioningStyle = Manual;
+					};
+				};
 			};
 			buildConfigurationList = B1E4DD250BA7C9AA83B17F0D /* Build configuration list for PBXProject "ClipboardSS" */;
 			developmentRegion = en;
@@ -259,6 +363,7 @@
 			targets = (
 				E68B9C33A9E4A92D25FC8F04 /* ClipboardCore */,
 				1B4269F8823D0DDE0B0DFB59 /* ClipboardSS */,
+				8D1C65D7C537AB12E986B1C2 /* ShareExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -297,11 +402,16 @@
 				88C9A2B207ADD803EACE0873 /* ClipboardIO.swift in Sources */,
 				23EA5158B57BA8EBA4315209 /* ContentHasher.swift in Sources */,
 				529657BEBE04E1C2D0DBE387 /* DeviceIdentity.swift in Sources */,
+				811774C1181884A0EBC20084 /* FileReceiver.swift in Sources */,
+				DFCFD9C4692C9B341EE3A14C /* FileSender.swift in Sources */,
+				8A9598C4DF3B704B90FDA9F0 /* FileTransferCrypto.swift in Sources */,
+				1B73E4C603E72C038B843963 /* FileTransferPayload.swift in Sources */,
 				9C419AEA7E4ACBAEA1CB62EC /* HTTPCodec.swift in Sources */,
 				78677A30353C05EB628A61EA /* OCRSelectionState.swift in Sources */,
 				35C54D0573ADB3032261C50A /* PairedDeviceStore.swift in Sources */,
 				4CE75BA08C8A703B597ED847 /* PairingSession.swift in Sources */,
 				9C0BB76600E907954CB2D9AD /* ScreenTextSelectionState.swift in Sources */,
+				49A0E2849B04EB8E07B718C9 /* ShareInbox.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -319,6 +429,7 @@
 				BE6AF7E0D1720A9FB40C3ACD /* ClipboardWindowController.swift in Sources */,
 				AFAA468F6AD10A220223D778 /* CoachMarkOverlay.swift in Sources */,
 				159769C5F92CED3C98E867F2 /* DevicesView.swift in Sources */,
+				C136422D6A452B156CAF17D0 /* FileTransferState.swift in Sources */,
 				2190300EAF4E4C952F8D1183 /* HotKeyManager.swift in Sources */,
 				EA86067F8F0CFBD67774FCD4 /* KeychainPairKeyStorage.swift in Sources */,
 				52AA331D4F9626A38E0F167A /* LaunchAtLoginController.swift in Sources */,
@@ -333,14 +444,33 @@
 				242474FA05B76DBA34A5822D /* ScreenshotCaptureService.swift in Sources */,
 				D126A0CAD676A7DA215AE662 /* ScreenshotReviewView.swift in Sources */,
 				B3B5B0C472F5939D53632A87 /* ShortcutRecorderView.swift in Sources */,
+				8EE2B7C6A1E94C32C1C95769 /* SubnetSweeper.swift in Sources */,
 				E92A89D2E7A9B664E567FB47 /* SystemPasteboardClient.swift in Sources */,
 				71DE8400C15FB2CC344B18A6 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FB0ADADA33C0E6B158EC60F5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A82A673EDD03ED4AF3BD1E71 /* ShareViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		57B8941031160AF934D54B53 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8D1C65D7C537AB12E986B1C2 /* ShareExtension */;
+			targetProxy = C05DDD3153A96BC846725DC6 /* PBXContainerItemProxy */;
+		};
+		8A2A6A5648079FA565006BB8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E68B9C33A9E4A92D25FC8F04 /* ClipboardCore */;
+			targetProxy = 9A55FE5ED67508ACE201857B /* PBXContainerItemProxy */;
+		};
 		9A3B258E7176BF1D4F5E89F1 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = E68B9C33A9E4A92D25FC8F04 /* ClipboardCore */;
@@ -349,6 +479,32 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		2D14EB30EA48E28B5CCF1DDD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_REQUIRED = YES;
+				CODE_SIGN_ENTITLEMENTS = ShareExtension.entitlements;
+				CODE_SIGN_IDENTITY = "ClipboardSS Local Code Signing";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = Sources/ShareExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.ClipboardSS.ShareExtension;
+				PRODUCT_MODULE_NAME = ShareExtension;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
 		645313A886437C58C6125DE6 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -401,7 +557,7 @@
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
@@ -464,7 +620,7 @@
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};
@@ -473,57 +629,73 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_REQUIRED = YES;
-				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = ClipboardSS.entitlements;
+				CODE_SIGN_IDENTITY = "ClipboardSS Local Code Signing";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				DEVELOPMENT_TEAM = H2GP3VABB6;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Clipboad SS";
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.local.ClipboardSS;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 			};
 			name = Release;
+		};
+		CAC419AEBA990765AC720389 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_REQUIRED = YES;
+				CODE_SIGN_ENTITLEMENTS = ShareExtension.entitlements;
+				CODE_SIGN_IDENTITY = "ClipboardSS Local Code Signing";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = Sources/ShareExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.ClipboardSS.ShareExtension;
+				PRODUCT_MODULE_NAME = ShareExtension;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
 		};
 		CBA1EA6E1C22CA1CA1E2E054 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_REQUIRED = YES;
-				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = ClipboardSS.entitlements;
+				CODE_SIGN_IDENTITY = "ClipboardSS Local Code Signing";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				DEVELOPMENT_TEAM = H2GP3VABB6;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Clipboad SS";
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.local.ClipboardSS;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -559,6 +731,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		4B64CC240F04FDDC48C9219C /* Build configuration list for PBXNativeTarget "ShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CAC419AEBA990765AC720389 /* Debug */,
+				2D14EB30EA48E28B5CCF1DDD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		B1E4DD250BA7C9AA83B17F0D /* Build configuration list for PBXProject "ClipboardSS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

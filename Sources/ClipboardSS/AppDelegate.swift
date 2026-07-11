@@ -11,10 +11,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyManager: HotKeyManager?
     private var monitorTimer: Timer?
     private var clipboardMonitor: ClipboardMonitor?
+    private var shareStagingDirectory: URL?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.applicationIconImage = ClipboardSSLogo.image(size: NSSize(width: 128, height: 128))
+
+        // Foreground activations from the share extension arrive as GetURL apple events.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
 
         do {
             let store = try ClipStore(storageDirectory: Self.defaultStorageDirectory())
@@ -116,6 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
+            let stagingDir = store.storageDirectory.appendingPathComponent("ShareStaging", isDirectory: true)
+            try? FileManager.default.removeItem(at: stagingDir)
+            try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+            self.shareStagingDirectory = stagingDir
+
             configureStatusItem()
             model.startNetworking()
             hotKeyManager.start {
@@ -131,6 +145,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.pollClipboard()
                 }
             }
+
+            processShareOutbox()
 
             if model.showCoachMarks {
                 windowController.show()
@@ -152,8 +168,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try model?.cleanupExpiredClips()
             model?.collectTransferGarbage()
             model?.refresh()
+            processShareOutbox()
         } catch {
             print("Background clipboard polling failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Handles a `clipboardss://` open triggered by the share extension. The payload is
+    /// irrelevant — any activation means "drain the share outbox".
+    @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent: NSAppleEventDescriptor) {
+        processShareOutbox()
+    }
+
+    /// Drains complete drops written by the share extension: stages each file locally,
+    /// removes the app-group drop folder, and hands the files to the normal send flow.
+    private func processShareOutbox() {
+        guard let model else { return }
+        let drops = ShareInbox.pendingDrops()
+        guard !drops.isEmpty else { return }
+
+        let staging = shareStagingDirectory ?? FileManager.default.temporaryDirectory
+        var stagedURLs: [URL] = []
+        for drop in drops {
+            for source in drop.fileURLs {
+                let destDir = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try? FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
+                let dest = destDir.appendingPathComponent(source.lastPathComponent)
+                do {
+                    try FileManager.default.copyItem(at: source, to: dest)
+                    stagedURLs.append(dest)
+                } catch {
+                    // Skip files we can't stage; keep going with the rest.
+                }
+            }
+            ShareInbox.remove(drop)
+        }
+        guard !stagedURLs.isEmpty else { return }
+
+        model.handleDroppedFiles(stagedURLs)
+        // Surface the window when the user must choose a device or when nothing is reachable.
+        if model.pendingSend != nil || model.lastError != nil {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            windowController?.show()
         }
     }
 
