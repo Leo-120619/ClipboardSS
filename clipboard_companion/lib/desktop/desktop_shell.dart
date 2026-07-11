@@ -104,12 +104,25 @@ class DesktopShell with TrayListener, WindowListener {
   }
 
   Future<void> _toggleWindow() async {
-    if (await windowManager.isVisible()) {
+    if (await windowManager.isMinimized()) {
+      await windowManager.restore();
+      await windowManager.focus();
+    } else if (await windowManager.isVisible()) {
       await windowManager.hide();
     } else {
-      await windowManager.show();
-      await windowManager.focus();
+      await _showAndFocus();
     }
+  }
+
+  Future<void> _showAndFocus() async {
+    if (await windowManager.isMinimized()) {
+      await windowManager.restore();
+    }
+    await windowManager.show();
+    await windowManager.focus();
+    // A hide/show cycle can drop taskbar registration on Windows, causing a
+    // later minimize to be parked on the desktop as a caption-only stub.
+    await windowManager.setSkipTaskbar(false);
   }
 
   @override
@@ -128,10 +141,7 @@ class DesktopShell with TrayListener, WindowListener {
     if (key == null) return;
     switch (key) {
       case 'show':
-        unawaited(() async {
-          await windowManager.show();
-          await windowManager.focus();
-        }());
+        unawaited(_showAndFocus());
       case 'pause':
         unawaited(_togglePause());
       case 'login':
@@ -182,13 +192,11 @@ class DesktopShell with TrayListener, WindowListener {
 
   @override
   void onWindowClose() {
-    unawaited(windowManager.hide());
-  }
-
-  @override
-  void onWindowMinimize() {
-    // Keep clipboard sync running, but remove the window completely instead of
-    // leaving Windows' compact minimized title bar on the desktop.
-    unawaited(windowManager.hide());
+    unawaited(() async {
+      if (await windowManager.isMinimized()) {
+        await windowManager.restore();
+      }
+      await windowManager.hide();
+    }());
   }
 }

@@ -55,7 +55,7 @@ foreach ($ridArchitecture in $Architecture) {
     Remove-Item -Recurse -Force -LiteralPath $publish, $stage -ErrorAction SilentlyContinue
 
     dotnet publish $project --configuration $Configuration --runtime "win-$ridArchitecture" --self-contained true --output $publish `
-        /p:PublishSingleFile=false /p:PublishTrimmed=false /p:PlatformTarget=$ridArchitecture
+        /p:PublishSingleFile=false /p:PublishTrimmed=false /p:PlatformTarget=$ridArchitecture /p:WindowsAppSDKSelfContained=true
     if ($LASTEXITCODE -ne 0) { throw "Publish failed for $ridArchitecture." }
 
     New-Item -ItemType Directory -Force -Path $stage | Out-Null

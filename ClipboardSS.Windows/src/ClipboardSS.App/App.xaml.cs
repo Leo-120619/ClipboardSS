@@ -11,12 +11,15 @@ using ClipboardSS.Core.Models;
 using ClipboardSS.Core.Protocol;
 using ClipboardSS.Core.Storage;
 using ClipboardSS.Core.Sync;
+using Microsoft.Windows.AppLifecycle;
+using Windows.ApplicationModel.Activation;
 
 namespace ClipboardSS.App;
 
 public partial class App : System.Windows.Application
 {
-    private Mutex? _singleInstance;
+    private AppInstance? _primaryInstance;
+    private Mutex? _fallbackMutex;
     private SettingsStore? _settings;
     private ClipboardInterop? _clipboard;
     private AppModel? _model;
@@ -31,20 +34,40 @@ public partial class App : System.Windows.Application
     private MainWindow? _mainWindow;
     private DevicesWindow? _devicesWindow;
     private PreferencesWindow? _preferencesWindow;
+    private ShareActivationCoordinator? _shareCoordinator;
 
-    protected override void OnStartup(StartupEventArgs args)
+    protected override async void OnStartup(StartupEventArgs args)
     {
         base.OnStartup(args);
-        _singleInstance = new Mutex(true, @"Local\ClipboardSS.Windows.Singleton", out var createdNew);
-        if (!createdNew)
+        AppActivationArguments? activation;
+        try
         {
-            MessageBox.Show(
-                "ClipboardSS is already running. Look for it in the system tray.",
-                "ClipboardSS",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            Shutdown();
-            return;
+            activation = AppInstance.GetCurrent().GetActivatedEventArgs();
+            var instance = AppInstance.FindOrRegisterForKey("ClipboardSS.Windows.Singleton");
+            if (!instance.IsCurrent)
+            {
+                await instance.RedirectActivationToAsync(activation);
+                Shutdown();
+                return;
+            }
+            _primaryInstance = instance;
+            _primaryInstance.Activated += PrimaryInstance_OnActivated;
+        }
+        catch
+        {
+            // Unpackaged development builds do not receive Share Target activation.
+            activation = null;
+            _fallbackMutex = new Mutex(true, @"Local\ClipboardSS.Windows.Singleton", out var createdNew);
+            if (!createdNew)
+            {
+                MessageBox.Show(
+                    "ClipboardSS is already running. Look for it in the system tray.",
+                    "ClipboardSS",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                Shutdown();
+                return;
+            }
         }
 
         Wpf.Ui.Appearance.ApplicationThemeManager.ApplySystemTheme();
@@ -52,6 +75,7 @@ public partial class App : System.Windows.Application
         try
         {
             ComposeAndStart();
+            await HandleActivationAsync(activation);
         }
         catch (Exception exception)
         {
@@ -72,16 +96,12 @@ public partial class App : System.Windows.Application
         _model?.Dispose();
         if (_server is not null) _server.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _clipboard?.Dispose();
-        if (_singleInstance is not null)
+        if (_primaryInstance is not null) _primaryInstance.Activated -= PrimaryInstance_OnActivated;
+        if (_fallbackMutex is not null)
         {
-            try
-            {
-                _singleInstance.ReleaseMutex();
-            }
-            catch (ApplicationException)
-            {
-            }
-            _singleInstance.Dispose();
+            try { _fallbackMutex.ReleaseMutex(); }
+            catch (ApplicationException) { }
+            _fallbackMutex.Dispose();
         }
         base.OnExit(args);
     }
@@ -107,6 +127,10 @@ public partial class App : System.Windows.Application
         var fileReceiver = new FileReceiver(Path.Combine(_settings.StorageDirectory, "Transfers"),
             () => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
         _model = new AppModel(store, _clipboard, pairing, sender, mdns, sweeper, fileSender, fileReceiver);
+        _shareCoordinator = new ShareActivationCoordinator(
+            _model,
+            () => _mainWindow,
+            () => _devicesWindow?.ShowFromTray(_mainWindow));
         _server = new TcpClipServer(new ClipServerRouter(identity, _model));
         _hotKeys = new HotKeyManager();
         _pasteInjector = new PasteInjector();
@@ -185,6 +209,23 @@ public partial class App : System.Windows.Application
     {
         _ = _pasteInjector?.RememberForegroundWindow();
         _mainWindow?.ShowFromTray();
+    }
+
+    private void PrimaryInstance_OnActivated(object? sender, AppActivationArguments args) =>
+        Dispatcher.InvokeAsync(() => HandleActivationAsync(args));
+
+    private async Task HandleActivationAsync(AppActivationArguments? args)
+    {
+        if (args is null) return;
+        if (args.Kind == ExtendedActivationKind.ShareTarget &&
+            args.Data is ShareTargetActivatedEventArgs shareArgs &&
+            _shareCoordinator is not null)
+        {
+            await _shareCoordinator.HandleAsync(shareArgs.ShareOperation);
+            return;
+        }
+        if (_mainWindow is not null && args.Kind != ExtendedActivationKind.Launch)
+            _mainWindow.ShowFromTray();
     }
 
     private async Task SynchronizeStartupRegistrationAsync(bool requested)

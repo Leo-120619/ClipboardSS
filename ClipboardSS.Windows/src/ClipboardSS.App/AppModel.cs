@@ -198,6 +198,28 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     public async Task SendFileAsync(string path, Guid deviceId)
     {
+        try { await SendFileCoreAsync(path, deviceId); }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { LastError = $"File transfer failed: {exception.Message}"; }
+    }
+
+    public async Task SendFilesAsync(IEnumerable<string> paths, Guid deviceId)
+    {
+        var validPaths = paths.Where(File.Exists).ToArray();
+        if (validPaths.Length == 0) throw new InvalidOperationException("No shared files are available to send.");
+        try
+        {
+            foreach (var path in validPaths) await SendFileCoreAsync(path, deviceId);
+        }
+        catch (Exception exception)
+        {
+            LastError = $"File transfer failed: {exception.Message}";
+            throw;
+        }
+    }
+
+    private async Task SendFileCoreAsync(string path, Guid deviceId)
+    {
         var peer = ComposeSendTargets(VisiblePeers, PairedDevices).FirstOrDefault(item => item.Id == deviceId)
             ?? throw new InvalidOperationException("The device is not currently reachable.");
         var cancellation = new CancellationTokenSource();
@@ -205,8 +227,6 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _fileCancellations[transferId] = cancellation;
         var progress = new Progress<FileTransferProgress>(UpdateTransfer);
         try { await _fileSender.SendAsync(path, peer, progress, cancellation.Token, transferId); }
-        catch (OperationCanceledException) { }
-        catch (Exception exception) { LastError = $"File transfer failed: {exception.Message}"; }
         finally { _fileCancellations.Remove(transferId); cancellation.Dispose(); }
     }
 

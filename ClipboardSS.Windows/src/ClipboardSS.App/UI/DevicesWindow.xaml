@@ -41,9 +41,9 @@
             <TextBlock x:Name="ErrorText" Grid.Row="3" Margin="0,10,0,10" Foreground="{DynamicResource SystemFillColorCriticalBrush}"
                     TextWrapping="Wrap" />
                     
-            <Grid Grid.Row="4">
-              <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-            <ListBox x:Name="PairedList" Grid.Row="0" Background="Transparent" BorderThickness="0">
+            <ScrollViewer Grid.Row="4" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <StackPanel>
+            <ListBox x:Name="PairedList" Background="Transparent" BorderThickness="0">
                 <ListBox.ItemContainerStyle>
                     <Style TargetType="ListBoxItem">
                         <Setter Property="Padding" Value="0" />
@@ -70,14 +70,15 @@
                     </DataTemplate>
                 </ListBox.ItemTemplate>
             </ListBox>
-              <TextBlock Grid.Row="1" Margin="0,8,0,6" Text="Transfers" FontWeight="SemiBold" />
-              <ListBox x:Name="TransferList" Grid.Row="2" MaxHeight="130" Background="Transparent" BorderThickness="0">
+              <TextBlock Margin="0,8,0,6" Text="Transfers" FontWeight="SemiBold" />
+              <ListBox x:Name="TransferList" MaxHeight="130" Background="Transparent" BorderThickness="0">
                 <ListBox.ItemTemplate><DataTemplate><DockPanel Margin="0,3">
                   <ui:Button DockPanel.Dock="Right" Content="Cancel" Tag="{Binding TransferId}" Click="CancelTransfer_OnClick" />
                   <StackPanel><TextBlock Text="{Binding FileName}" /><TextBlock FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"><Run Text="{Binding Status}" /><Run Text=" — " /><Run Text="{Binding BytesTransferred}" /><Run Text=" / " /><Run Text="{Binding TotalBytes}" /></TextBlock></StackPanel>
                 </DockPanel></DataTemplate></ListBox.ItemTemplate>
               </ListBox>
-            </Grid>
+              </StackPanel>
+            </ScrollViewer>
             
             <TextBlock Grid.Row="5" Margin="0,14,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
                     Text="Pairing codes expire after 180 seconds. If discovery misses a device, ClipboardSS automatically scans the local /24 subnet." />
