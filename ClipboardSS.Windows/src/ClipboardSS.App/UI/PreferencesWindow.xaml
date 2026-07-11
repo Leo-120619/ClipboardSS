@@ -66,6 +66,15 @@
                 <TextBlock Margin="0,18,0,4" FontWeight="SemiBold" Text="Storage folder" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                 <ui:TextBox x:Name="StoragePathText" IsReadOnly="True" Padding="8" TextWrapping="Wrap"
                          AutomationProperties.Name="ClipboardSS storage folder" />
+
+                <Separator Margin="0,22,0,18" Background="{DynamicResource DividerStrokeColorDefaultBrush}" />
+                <TextBlock FontSize="16" FontWeight="SemiBold" Text="Received files" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <TextBlock Margin="0,4,0,12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Text="Choose a default destination, or have ClipboardSS ask after each received file." TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal">
+                    <ui:TextBox x:Name="ReceivePathText" Width="360" IsReadOnly="True" Padding="8" />
+                    <ui:Button Margin="10,0,0,0" Content="Change…" Click="ChangeReceiveFolder_OnClick" />
+                </StackPanel>
+                <CheckBox x:Name="AskEveryTimeCheck" Margin="0,10,0,0" Content="Ask every time" Click="AskEveryTime_OnClick" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                 <TextBlock x:Name="ErrorText" Margin="0,12,0,0" Foreground="{DynamicResource SystemFillColorCriticalBrush}"
                            TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
             </StackPanel>

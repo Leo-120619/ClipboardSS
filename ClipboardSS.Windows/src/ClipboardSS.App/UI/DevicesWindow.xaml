@@ -58,6 +58,7 @@
                         <ui:Card Padding="12" Background="{DynamicResource ControlFillColorDefaultBrush}" BorderThickness="1" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
                             <DockPanel>
                                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                    <CheckBox Content="Connected" IsChecked="{Binding Connected}" Tag="{Binding Id}" Margin="0,5,10,0" Click="Connected_OnClick" />
                                     <ui:Button Content="Send file" Tag="{Binding Id}" Margin="0,0,8,0" Click="SendFile_OnClick" />
                                     <ui:Button Content="Unpair" Tag="{Binding Id}" Appearance="Danger" Click="Unpair_OnClick" />
                                 </StackPanel>
@@ -73,7 +74,19 @@
               <TextBlock Margin="0,8,0,6" Text="Transfers" FontWeight="SemiBold" />
               <ListBox x:Name="TransferList" MaxHeight="130" Background="Transparent" BorderThickness="0">
                 <ListBox.ItemTemplate><DataTemplate><DockPanel Margin="0,3">
-                  <ui:Button DockPanel.Dock="Right" Content="Cancel" Tag="{Binding TransferId}" Click="CancelTransfer_OnClick" />
+                  <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <ui:Button Content="Open location" Tag="{Binding SavedPath}" Margin="0,0,8,0" Click="OpenLocation_OnClick">
+                      <ui:Button.Style>
+                        <Style TargetType="ui:Button">
+                          <Setter Property="Visibility" Value="Collapsed" />
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding Status}" Value="Completed"><Setter Property="Visibility" Value="Visible" /></DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </ui:Button.Style>
+                    </ui:Button>
+                    <ui:Button Content="Cancel" Tag="{Binding TransferId}" Click="CancelTransfer_OnClick" />
+                  </StackPanel>
                   <StackPanel><TextBlock Text="{Binding FileName}" /><TextBlock FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"><Run Text="{Binding Status}" /><Run Text=" — " /><Run Text="{Binding BytesTransferred}" /><Run Text=" / " /><Run Text="{Binding TotalBytes}" /></TextBlock></StackPanel>
                 </DockPanel></DataTemplate></ListBox.ItemTemplate>
               </ListBox>

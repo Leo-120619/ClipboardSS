@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Windows;
+using Microsoft.Win32;
 using ClipboardSS.App.Settings;
 using ClipboardSS.App.Win32;
 
@@ -126,6 +127,28 @@ public partial class PreferencesWindow : Wpf.Ui.Controls.FluentWindow
         }
     }
 
+    private void ChangeReceiveFolder_OnClick(object sender, RoutedEventArgs args)
+    {
+        var picker = new OpenFolderDialog { Title = "Choose received files folder" };
+        if (picker.ShowDialog(this) != true) return;
+        _settings.Update(current => current with
+        {
+            ReceiveDestinationMode = ReceiveDestinationMode.Folder,
+            ReceiveDestinationPath = picker.FolderName,
+        });
+        SyncControls();
+    }
+
+    private void AskEveryTime_OnClick(object sender, RoutedEventArgs args)
+    {
+        _settings.Update(current => current with
+        {
+            ReceiveDestinationMode = AskEveryTimeCheck.IsChecked == true ? ReceiveDestinationMode.Ask : ReceiveDestinationMode.Default,
+            ReceiveDestinationPath = AskEveryTimeCheck.IsChecked == true ? null : current.ReceiveDestinationPath,
+        });
+        SyncControls();
+    }
+
     private void SyncControls()
     {
         var current = _settings.Current;
@@ -133,6 +156,13 @@ public partial class PreferencesWindow : Wpf.Ui.Controls.FluentWindow
         ClipboardRecorder.Shortcut = current.ClipboardShortcut;
         ScreenshotRecorder.Shortcut = current.ScreenshotShortcut;
         ScreenTextRecorder.Shortcut = current.ScreenTextShortcut;
+        AskEveryTimeCheck.IsChecked = current.ReceiveDestinationMode == ReceiveDestinationMode.Ask;
+        ReceivePathText.Text = current.ReceiveDestinationMode switch
+        {
+            ReceiveDestinationMode.Ask => "Ask after every received file",
+            ReceiveDestinationMode.Folder when !string.IsNullOrWhiteSpace(current.ReceiveDestinationPath) => current.ReceiveDestinationPath,
+            _ => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
+        };
         if (!_hotKeys.LastResult.Succeeded)
         {
             var failure = _hotKeys.LastResult.Failures[0];

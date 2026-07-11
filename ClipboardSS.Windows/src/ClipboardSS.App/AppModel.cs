@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using ClipboardSS.App.Net;
 using ClipboardSS.App.Pairing;
+using ClipboardSS.App.Settings;
 using ClipboardSS.App.Win32;
 using ClipboardSS.Core.Crypto;
 using ClipboardSS.Core.Models;
@@ -20,6 +21,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private readonly ClipSender _sender;
     private readonly FileSender _fileSender;
     private readonly FileReceiver _fileReceiver;
+    private readonly SettingsStore _settings;
     private readonly Dictionary<string, CancellationTokenSource> _fileCancellations = [];
     private readonly List<FileTransferProgress> _transfers = [];
     private readonly MdnsService _mdns;
@@ -39,7 +41,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         MdnsService mdns,
         SubnetSweeper sweeper,
         FileSender fileSender,
-        FileReceiver fileReceiver)
+        FileReceiver fileReceiver,
+        SettingsStore settings)
     {
         Store = store;
         PairingCoordinator = pairingCoordinator;
@@ -51,6 +54,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _sweeper = sweeper;
         _fileSender = fileSender;
         _fileReceiver = fileReceiver;
+        _settings = settings;
         _fileReceiver.TransferChanged += UpdateTransfer;
         _clipboard.Changed += ClipboardChanged;
         _mdns.PeersChanged += (_, _) => OnPropertyChanged(nameof(VisiblePeers));
@@ -196,6 +200,13 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void SetConnected(Guid deviceId, bool connected)
+    {
+        PairingCoordinator.PairedStore.SetConnected(deviceId, connected);
+        OnPropertyChanged(nameof(PairedDevices));
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public async Task SendFileAsync(string path, Guid deviceId)
     {
         try { await SendFileCoreAsync(path, deviceId); }
@@ -254,7 +265,11 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         if (_fileCancellations.Remove(transferId, out var cancellation)) cancellation.Cancel();
     }
 
-    public byte[]? GetPairKey(Guid deviceId) => PairingCoordinator.PairedStore.GetKey(deviceId);
+    // This is intentionally local: a paused receiver rejects new requests with 401,
+    // while a remote device may still consider this pairing active.
+    public byte[]? GetPairKey(Guid deviceId) => PairingCoordinator.PairedStore.IsConnected(deviceId)
+        ? PairingCoordinator.PairedStore.GetKey(deviceId)
+        : null;
 
     public ReceiveResult Receive(ClipPayload payload)
     {
@@ -298,13 +313,17 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         IEnumerable<Peer> mdnsPeers,
         IEnumerable<PairedDevice> pairedDevices)
     {
+        var devices = pairedDevices.ToArray();
         var byId = new Dictionary<Guid, Peer>();
-        foreach (var device in pairedDevices)
+        foreach (var device in devices)
         {
+            if (!device.Connected) continue;
             if (!string.IsNullOrWhiteSpace(device.Host))
                 byId[device.Id] = new Peer(device.Id, device.Name, device.Host, 51888);
         }
-        foreach (var peer in mdnsPeers) byId[peer.Id] = peer;
+        var connectedIds = devices.Where(device => device.Connected).Select(device => device.Id).ToHashSet();
+        foreach (var peer in mdnsPeers)
+            if (connectedIds.Contains(peer.Id)) byId[peer.Id] = peer;
         return byId.Values.ToArray();
     }
 
@@ -428,8 +447,64 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
             var index = _transfers.FindIndex(item => item.TransferId == progress.TransferId);
             if (index >= 0) _transfers[index] = progress; else _transfers.Insert(0, progress);
             OnPropertyChanged(nameof(Transfers)); StateChanged?.Invoke(this, EventArgs.Empty);
+            if (progress.Direction == FileTransferDirection.Receiving && progress.Status == FileTransferStatus.Completed)
+                ProcessCompletedReceive(progress);
         }
         if (Application.Current.Dispatcher.CheckAccess()) Apply(); else Application.Current.Dispatcher.Invoke(Apply);
+    }
+
+    private void ProcessCompletedReceive(FileTransferProgress progress)
+    {
+        var mode = _settings.Current.ReceiveDestinationMode;
+        if (mode == ReceiveDestinationMode.Unset)
+        {
+            var choice = MessageBox.Show(
+                "Where should ClipboardSS save received files?\n\nYes: keep using Downloads\nNo: choose a folder\nCancel: ask every time",
+                "Received files", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            if (choice == MessageBoxResult.Yes)
+                _settings.Update(current => current with { ReceiveDestinationMode = ReceiveDestinationMode.Default, ReceiveDestinationPath = null });
+            else if (choice == MessageBoxResult.No)
+                ChooseReceiveFolder();
+            else
+                _settings.Update(current => current with { ReceiveDestinationMode = ReceiveDestinationMode.Ask, ReceiveDestinationPath = null });
+        }
+
+        if (_settings.Current.ReceiveDestinationMode == ReceiveDestinationMode.Ask)
+            MoveReceivedFileAfterPrompt(progress);
+    }
+
+    private void ChooseReceiveFolder()
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog { Title = "Choose received files folder" };
+        if (dialog.ShowDialog(Application.Current.MainWindow) == true)
+            _settings.Update(current => current with { ReceiveDestinationMode = ReceiveDestinationMode.Folder, ReceiveDestinationPath = dialog.FolderName });
+    }
+
+    private void MoveReceivedFileAfterPrompt(FileTransferProgress progress)
+    {
+        if (string.IsNullOrWhiteSpace(progress.SavedPath) || !File.Exists(progress.SavedPath)) return;
+        var dialog = new Microsoft.Win32.OpenFolderDialog { Title = "Save received file to" };
+        if (dialog.ShowDialog(Application.Current.MainWindow) != true) return;
+        try
+        {
+            var destination = CollisionSafePath(dialog.FolderName, Path.GetFileName(progress.SavedPath));
+            File.Move(progress.SavedPath, destination);
+            var index = _transfers.FindIndex(item => item.TransferId == progress.TransferId);
+            if (index >= 0) _transfers[index] = progress with { SavedPath = destination };
+            OnPropertyChanged(nameof(Transfers)); StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception exception)
+        {
+            LastError = $"Could not move received file: {exception.Message}";
+        }
+    }
+
+    private static string CollisionSafePath(string directory, string name)
+    {
+        var path = Path.Combine(directory, name);
+        for (var number = 2; File.Exists(path); number++)
+            path = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(name)} ({number}){Path.GetExtension(name)}");
+        return path;
     }
 }
 

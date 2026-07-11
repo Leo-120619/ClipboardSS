@@ -1,4 +1,6 @@
 using System.Xml.Linq;
+using ClipboardSS.App;
+using ClipboardSS.Core.Models;
 
 namespace ClipboardSS.App.Tests;
 
@@ -36,6 +38,19 @@ public sealed class ShareTargetTests
         {
             Directory.Delete(directory, true);
         }
+    }
+
+    [Fact]
+    public void ComposeSendTargetsExcludesPausedDevicesIncludingMdnsPeers()
+    {
+        var connected = Guid.NewGuid();
+        var paused = Guid.NewGuid();
+        var targets = AppModel.ComposeSendTargets(
+            [new Peer(connected, "Phone", "10.0.0.2", 51888), new Peer(paused, "Tablet", "10.0.0.3", 51888)],
+            [new PairedDevice(connected, "Phone"), new PairedDevice(paused, "Tablet", Connected: false)]);
+
+        Assert.Single(targets);
+        Assert.Equal(connected, targets[0].Id);
     }
 
     private static string FindRepositoryRoot()
