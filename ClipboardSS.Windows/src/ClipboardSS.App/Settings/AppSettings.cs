@@ -93,6 +93,16 @@ public sealed record AppSettings
     public ShortcutSettings? ScreenshotShortcut { get; init; }
     public ShortcutSettings? ScreenTextShortcut { get; init; }
     public WindowFrame? MainWindowFrame { get; init; }
+    public ReceiveDestinationMode ReceiveDestinationMode { get; init; } = ReceiveDestinationMode.Unset;
+    public string? ReceiveDestinationPath { get; init; }
+}
+
+public enum ReceiveDestinationMode
+{
+    Unset,
+    Default,
+    Folder,
+    Ask,
 }
 
 public static class ShortcutValidation

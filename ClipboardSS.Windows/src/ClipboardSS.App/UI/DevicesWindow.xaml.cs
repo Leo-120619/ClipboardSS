@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Win32;
@@ -66,9 +67,31 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         Refresh();
     }
 
+    private void Connected_OnClick(object sender, RoutedEventArgs args)
+    {
+        if (sender is CheckBox { Tag: Guid id } checkBox) _model.SetConnected(id, checkBox.IsChecked == true);
+        Refresh();
+    }
+
     private void CancelTransfer_OnClick(object sender, RoutedEventArgs args)
     {
         if (sender is Button { Tag: string id }) _model.CancelTransfer(id);
+    }
+
+    private void OpenLocation_OnClick(object sender, RoutedEventArgs args)
+    {
+        if (sender is not Button { Tag: string path } || string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            var arguments = File.Exists(path)
+                ? $"/select,\"{path}\""
+                : $"\"{Path.GetDirectoryName(path)}\"";
+            Process.Start(new ProcessStartInfo("explorer.exe", arguments) { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            ErrorText.Text = $"Could not open file location: {exception.Message}";
+        }
     }
 
     private async void SendFile_OnClick(object sender, RoutedEventArgs args)

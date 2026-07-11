@@ -61,6 +61,25 @@ public sealed class PairedDeviceStore
         }
     }
 
+    public void SetConnected(Guid id, bool connected)
+    {
+        lock (_gate)
+        {
+            var index = _devices.FindIndex(device => device.Id == id);
+            if (index < 0) return;
+            _devices[index] = _devices[index] with { Connected = connected };
+            Save();
+        }
+    }
+
+    public bool IsConnected(Guid id)
+    {
+        lock (_gate)
+        {
+            return _devices.Find(device => device.Id == id)?.Connected == true;
+        }
+    }
+
     public byte[]? GetKey(Guid deviceId)
     {
         lock (_gate)

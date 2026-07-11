@@ -125,8 +125,8 @@ public partial class App : System.Windows.Application
         var sender = new ClipSender(identity, pairedStore, transport, _settings.StorageDirectory);
         var fileSender = new FileSender(identity, pairedStore, transport);
         var fileReceiver = new FileReceiver(Path.Combine(_settings.StorageDirectory, "Transfers"),
-            () => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
-        _model = new AppModel(store, _clipboard, pairing, sender, mdns, sweeper, fileSender, fileReceiver);
+            () => ResolveReceiveDirectory(_settings.Current));
+        _model = new AppModel(store, _clipboard, pairing, sender, mdns, sweeper, fileSender, fileReceiver, _settings);
         _shareCoordinator = new ShareActivationCoordinator(
             _model,
             () => _mainWindow,
@@ -333,5 +333,15 @@ public partial class App : System.Windows.Application
         _preferencesWindow?.CloseForExit();
         _mainWindow?.CloseForExit();
         Shutdown();
+    }
+
+    private static string ResolveReceiveDirectory(AppSettings settings)
+    {
+        if (settings.ReceiveDestinationMode == ReceiveDestinationMode.Folder &&
+            !string.IsNullOrWhiteSpace(settings.ReceiveDestinationPath) &&
+            Directory.Exists(settings.ReceiveDestinationPath))
+            return settings.ReceiveDestinationPath;
+
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
     }
 }

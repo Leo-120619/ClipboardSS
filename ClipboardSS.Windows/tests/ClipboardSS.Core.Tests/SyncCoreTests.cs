@@ -80,11 +80,14 @@ public sealed class SyncCoreTests
         var store = new PairedDeviceStore(path, keys);
 
         Assert.Null(store.Devices[0].Host);
+        Assert.True(store.Devices[0].Connected);
         var device = new PairedDevice(Guid.NewGuid(), "Mac", "192.168.0.4");
         store.AddDevice(device, Enumerable.Repeat((byte)7, 32).ToArray());
+        store.SetConnected(device.Id, false);
 
         var reopened = new PairedDeviceStore(path, keys);
         Assert.Contains(reopened.Devices, item => item.Host == "192.168.0.4");
+        Assert.False(reopened.IsConnected(device.Id));
     }
 
     [Fact]
