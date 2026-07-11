@@ -5,6 +5,8 @@ import Foundation
 public enum FileTransferConstants {
     /// Plaintext chunk size: 4 MiB.
     public static let chunkSize = 4 * 1024 * 1024
+    /// Largest accepted plaintext chunk size (4 MiB).
+    public static let maxChunkSize = 4 * 1024 * 1024
     /// HKDF salt for the per-transfer file key.
     public static let fileKeySalt = "ClipboardSS_FileKey"
     /// Receiver session idle timeout before garbage collection.

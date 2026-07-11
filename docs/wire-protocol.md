@@ -162,7 +162,16 @@ All on port `51888`, same host as the clip server.
    ```
    Responses: `200 {"status":"ready"}` · `401` unpaired · `403 {"status":"declined"}`
    (reserved for a future accept prompt; v1 auto-accepts) · `409` duplicate active
-   transferId.
+ transferId.
+
+### Receiver validation
+
+Before creating any transfer state or `.part` file, receivers MUST validate the decrypted
+offer. `transferId` MUST match `^[a-z0-9-]{1,64}$`; otherwise they return `400
+{"status":"invalidId"}`. Offer math MUST satisfy `0 < chunkSize <= 4 MiB`,
+`fileSize >= 0`, and `chunkCount == ceil(fileSize / chunkSize)` (zero for an empty
+file); otherwise receivers return `400 {"status":"invalidOffer"}`. Receivers MUST
+authenticate a chunk body before treating a repeated index as an idempotent duplicate.
 
 2. **`POST /v1/file/chunk`** — headers `X-Transfer-Id`, `X-Chunk-Index`; body = raw
    `ciphertext || tag` bytes (`application/octet-stream`). Codecs lowercase header keys,

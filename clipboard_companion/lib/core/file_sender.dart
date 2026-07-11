@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
@@ -47,8 +48,13 @@ class FileSender {
 
     const chunkSize = FileTransferConstants.chunkSize;
     final fileSize = await file.length();
-    final chunkCount = fileSize == 0 ? 0 : ((fileSize + chunkSize - 1) ~/ chunkSize);
-    final fileHash = await ContentHasher.fileHashOfFile(file);
+    final chunkCount = fileSize == 0
+        ? 0
+        : ((fileSize + chunkSize - 1) ~/ chunkSize);
+    final filePath = file.path;
+    final fileHash = await Isolate.run(
+      () => ContentHasher.fileHashOfFile(File(filePath)),
+    );
 
     final transferId = const Uuid().v4().toLowerCase();
     final fileKey = await FileTransferCrypto.deriveFileKey(key, transferId);
@@ -66,10 +72,17 @@ class FileSender {
     );
 
     // Offer — nothing registered on the receiver yet, so no cancel on failure.
-    final offerEnvelope = await CryptoEnvelopeUtils.sealJson(offer.toJson(), identity.id, key);
-    await _post(peer, '/v1/file/offer',
-        body: utf8.encode(jsonEncode(offerEnvelope.toJson())),
-        contentType: 'application/json');
+    final offerEnvelope = await CryptoEnvelopeUtils.sealJson(
+      offer.toJson(),
+      identity.id,
+      key,
+    );
+    await _post(
+      peer,
+      '/v1/file/offer',
+      body: utf8.encode(jsonEncode(offerEnvelope.toJson())),
+      contentType: 'application/json',
+    );
 
     try {
       if (isCancelled?.call() == true) throw FileSendCancelledException();
@@ -80,14 +93,21 @@ class FileSender {
           for (var index = 0; index < chunkCount; index++) {
             if (isCancelled?.call() == true) throw FileSendCancelledException();
             final slice = await raf.read(chunkSize);
-            final sealed = await FileTransferCrypto.sealChunk(slice, fileKey, index);
-            await _post(peer, '/v1/file/chunk',
-                body: sealed,
-                contentType: 'application/octet-stream',
-                headers: {
-                  FileTransferConstants.transferIdHeader: transferId,
-                  FileTransferConstants.chunkIndexHeader: '$index',
-                });
+            final sealed = await FileTransferCrypto.sealChunk(
+              slice,
+              fileKey,
+              index,
+            );
+            await _post(
+              peer,
+              '/v1/file/chunk',
+              body: sealed,
+              contentType: 'application/octet-stream',
+              headers: {
+                FileTransferConstants.transferIdHeader: transferId,
+                FileTransferConstants.chunkIndexHeader: '$index',
+              },
+            );
             onProgress?.call((index + 1) / chunkCount);
           }
         } finally {
@@ -96,10 +116,17 @@ class FileSender {
       }
 
       final finish = FileFinishPayload(transferId);
-      final finishEnvelope = await CryptoEnvelopeUtils.sealJson(finish.toJson(), identity.id, key);
-      await _post(peer, '/v1/file/finish',
-          body: utf8.encode(jsonEncode(finishEnvelope.toJson())),
-          contentType: 'application/json');
+      final finishEnvelope = await CryptoEnvelopeUtils.sealJson(
+        finish.toJson(),
+        identity.id,
+        key,
+      );
+      await _post(
+        peer,
+        '/v1/file/finish',
+        body: utf8.encode(jsonEncode(finishEnvelope.toJson())),
+        contentType: 'application/json',
+      );
       onProgress?.call(1.0);
     } catch (e) {
       await _bestEffortCancel(peer, transferId, key);
@@ -107,12 +134,23 @@ class FileSender {
     }
   }
 
-  Future<void> _bestEffortCancel(Peer peer, String transferId, SecretKey key) async {
+  Future<void> _bestEffortCancel(
+    Peer peer,
+    String transferId,
+    SecretKey key,
+  ) async {
     try {
-      final envelope =
-          await CryptoEnvelopeUtils.sealJson(FileCancelPayload(transferId).toJson(), identity.id, key);
-      await _post(peer, '/v1/file/cancel',
-          body: utf8.encode(jsonEncode(envelope.toJson())), contentType: 'application/json');
+      final envelope = await CryptoEnvelopeUtils.sealJson(
+        FileCancelPayload(transferId).toJson(),
+        identity.id,
+        key,
+      );
+      await _post(
+        peer,
+        '/v1/file/cancel',
+        body: utf8.encode(jsonEncode(envelope.toJson())),
+        contentType: 'application/json',
+      );
     } catch (_) {
       // best effort
     }
@@ -125,7 +163,12 @@ class FileSender {
     required String contentType,
     Map<String, String> headers = const {},
   }) async {
-    final uri = Uri(scheme: 'http', host: peer.host, port: peer.port, path: path);
+    final uri = Uri(
+      scheme: 'http',
+      host: peer.host,
+      port: peer.port,
+      path: path,
+    );
     final response = await _client.post(
       uri,
       headers: {'Content-Type': contentType, ...headers},

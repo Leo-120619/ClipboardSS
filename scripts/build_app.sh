@@ -131,5 +131,8 @@ if [[ "$INSTALL_APP" == "1" ]]; then
     # Register with LaunchServices so the share extension is discovered immediately.
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
         -f "$INSTALL_DIR" >/dev/null 2>&1 || true
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+        -u "$APP_DIR" >/dev/null 2>&1 || true
+    rm -rf "$APP_DIR"
     echo "Installed $INSTALL_DIR"
 fi

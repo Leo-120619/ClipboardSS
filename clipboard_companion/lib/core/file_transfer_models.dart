@@ -4,6 +4,7 @@ import 'models.dart';
 /// Canonical spec: docs/wire-protocol.md ("File Transfer Protocol").
 class FileTransferConstants {
   static const int chunkSize = 4 * 1024 * 1024;
+  static const int maxChunkSize = 4 * 1024 * 1024;
   static const String fileKeySalt = 'ClipboardSS_FileKey';
   static const String transferIdHeader = 'X-Transfer-Id';
   static const String chunkIndexHeader = 'X-Chunk-Index';
@@ -38,18 +39,19 @@ class FileOfferPayload {
   });
 
   Map<String, dynamic> toJson() => {
-        'transferId': transferId,
-        'fileName': fileName,
-        'fileSize': fileSize,
-        'mimeType': mimeType,
-        'fileHash': fileHash,
-        'chunkSize': chunkSize,
-        'chunkCount': chunkCount,
-        'createdAt': _iso8601(createdAt),
-        'sourceDeviceName': sourceDeviceName,
-      };
+    'transferId': transferId,
+    'fileName': fileName,
+    'fileSize': fileSize,
+    'mimeType': mimeType,
+    'fileHash': fileHash,
+    'chunkSize': chunkSize,
+    'chunkCount': chunkCount,
+    'createdAt': _iso8601(createdAt),
+    'sourceDeviceName': sourceDeviceName,
+  };
 
-  factory FileOfferPayload.fromJson(Map<String, dynamic> json) => FileOfferPayload(
+  factory FileOfferPayload.fromJson(Map<String, dynamic> json) =>
+      FileOfferPayload(
         transferId: json['transferId'] as String,
         fileName: json['fileName'] as String,
         fileSize: (json['fileSize'] as num).toInt(),

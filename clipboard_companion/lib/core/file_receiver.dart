@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:cryptography/cryptography.dart';
 import 'content_hasher.dart';
 import 'crypto_utils.dart';
@@ -89,9 +90,17 @@ class FileReceiver {
 
     FileOfferPayload offer;
     try {
-      offer = FileOfferPayload.fromJson(await CryptoEnvelopeUtils.openJson(envelope, key));
+      offer = FileOfferPayload.fromJson(
+        await CryptoEnvelopeUtils.openJson(envelope, key),
+      );
     } catch (_) {
       return FileTransferResponse(401, {'status': 'unpaired'});
+    }
+    if (!_validTransferId(offer.transferId)) {
+      return FileTransferResponse(400, {'status': 'invalidId'});
+    }
+    if (!_validOffer(offer)) {
+      return FileTransferResponse(400, {'status': 'invalidOffer'});
     }
 
     if (_sessions.containsKey(offer.transferId)) {
@@ -100,9 +109,14 @@ class FileReceiver {
 
     try {
       await transfersDirectory.create(recursive: true);
-      final tempFile = File('${transfersDirectory.path}/${offer.transferId}.part');
+      final tempFile = File(
+        '${transfersDirectory.path}/${offer.transferId}.part',
+      );
       final raf = await tempFile.open(mode: FileMode.write);
-      final fileKey = await FileTransferCrypto.deriveFileKey(key, offer.transferId);
+      final fileKey = await FileTransferCrypto.deriveFileKey(
+        key,
+        offer.transferId,
+      );
       _sessions[offer.transferId] = _Session(
         offer: offer,
         sourceDeviceId: envelope.sourceDeviceId,
@@ -112,8 +126,14 @@ class FileReceiver {
         lastActivity: now(),
       );
       _cancelled.remove(offer.transferId);
-      _emit(FileTransferReceiveEvent('started', offer.transferId,
-          fileName: offer.fileName, total: offer.chunkCount));
+      _emit(
+        FileTransferReceiveEvent(
+          'started',
+          offer.transferId,
+          fileName: offer.fileName,
+          total: offer.chunkCount,
+        ),
+      );
       return FileTransferResponse(200, {'status': 'ready'});
     } catch (_) {
       return FileTransferResponse(400, {'status': 'error'});
@@ -122,29 +142,48 @@ class FileReceiver {
 
   // MARK: - Chunk
 
-  Future<FileTransferResponse> handleChunk(String transferId, int chunkIndex, List<int> body) async {
+  Future<FileTransferResponse> handleChunk(
+    String transferId,
+    int chunkIndex,
+    List<int> body,
+  ) async {
     if (_cancelled.contains(transferId)) {
       return FileTransferResponse(410, {'status': 'cancelled'});
     }
     final session = _sessions[transferId];
-    if (session == null) return FileTransferResponse(404, {'status': 'unknown'});
+    if (session == null)
+      return FileTransferResponse(404, {'status': 'unknown'});
 
     if (chunkIndex < 0 || chunkIndex >= session.offer.chunkCount) {
       await _teardown(transferId, 'bad chunk index');
       return FileTransferResponse(400, {'status': 'badIndex'});
     }
 
-    if (session.received.contains(chunkIndex)) {
-      session.lastActivity = now();
-      return FileTransferResponse(200, {'status': 'ok', 'received': session.received.length});
-    }
-
     List<int> plaintext;
     try {
-      plaintext = await FileTransferCrypto.openChunk(body, session.fileKey, chunkIndex);
+      plaintext = await FileTransferCrypto.openChunk(
+        body,
+        session.fileKey,
+        chunkIndex,
+      );
     } catch (_) {
       await _teardown(transferId, 'chunk authentication failed');
       return FileTransferResponse(400, {'status': 'authFailed'});
+    }
+    final expectedSize = chunkIndex == session.offer.chunkCount - 1
+        ? session.offer.fileSize - chunkIndex * session.offer.chunkSize
+        : session.offer.chunkSize;
+    if (plaintext.length != expectedSize) {
+      await _teardown(transferId, 'bad chunk size');
+      return FileTransferResponse(400, {'status': 'badSize'});
+    }
+
+    if (session.received.contains(chunkIndex)) {
+      session.lastActivity = now();
+      return FileTransferResponse(200, {
+        'status': 'ok',
+        'received': session.received.length,
+      });
     }
 
     try {
@@ -157,9 +196,18 @@ class FileReceiver {
 
     session.received.add(chunkIndex);
     session.lastActivity = now();
-    _emit(FileTransferReceiveEvent('progress', transferId,
-        received: session.received.length, total: session.offer.chunkCount));
-    return FileTransferResponse(200, {'status': 'ok', 'received': session.received.length});
+    _emit(
+      FileTransferReceiveEvent(
+        'progress',
+        transferId,
+        received: session.received.length,
+        total: session.offer.chunkCount,
+      ),
+    );
+    return FileTransferResponse(200, {
+      'status': 'ok',
+      'received': session.received.length,
+    });
   }
 
   // MARK: - Finish
@@ -170,13 +218,16 @@ class FileReceiver {
 
     FileFinishPayload finish;
     try {
-      finish = FileFinishPayload.fromJson(await CryptoEnvelopeUtils.openJson(envelope, key));
+      finish = FileFinishPayload.fromJson(
+        await CryptoEnvelopeUtils.openJson(envelope, key),
+      );
     } catch (_) {
       return FileTransferResponse(401, {'status': 'unpaired'});
     }
 
     final session = _sessions[finish.transferId];
-    if (session == null) return FileTransferResponse(404, {'status': 'unknown'});
+    if (session == null)
+      return FileTransferResponse(404, {'status': 'unknown'});
 
     if (session.received.length != session.offer.chunkCount) {
       return FileTransferResponse(409, {'status': 'incomplete'});
@@ -184,21 +235,45 @@ class FileReceiver {
 
     await session.raf.close();
 
-    final computed = await ContentHasher.fileHashOfFile(session.tempFile);
+    final tempPath = session.tempFile.path;
+    final computed = await Isolate.run(
+      () => ContentHasher.fileHashOfFile(File(tempPath)),
+    );
     if (computed != session.offer.fileHash) {
       await _destroy(finish.transferId, session);
-      _emit(FileTransferReceiveEvent('failed', finish.transferId, reason: 'hash mismatch'));
+      _emit(
+        FileTransferReceiveEvent(
+          'failed',
+          finish.transferId,
+          reason: 'hash mismatch',
+        ),
+      );
       return FileTransferResponse(422, {'status': 'hashMismatch'});
     }
 
     try {
       final destination = await _finalize(session);
       _sessions.remove(finish.transferId);
-      _emit(FileTransferReceiveEvent('completed', finish.transferId, path: destination.path));
-      return FileTransferResponse(200, {'status': 'complete', 'fileName': _basename(destination.path)});
+      _emit(
+        FileTransferReceiveEvent(
+          'completed',
+          finish.transferId,
+          path: destination.path,
+        ),
+      );
+      return FileTransferResponse(200, {
+        'status': 'complete',
+        'fileName': _basename(destination.path),
+      });
     } catch (_) {
       await _destroy(finish.transferId, session);
-      _emit(FileTransferReceiveEvent('failed', finish.transferId, reason: 'finalize failed'));
+      _emit(
+        FileTransferReceiveEvent(
+          'failed',
+          finish.transferId,
+          reason: 'finalize failed',
+        ),
+      );
       return FileTransferResponse(422, {'status': 'error'});
     }
   }
@@ -209,7 +284,9 @@ class FileReceiver {
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key != null) {
       try {
-        final cancel = FileCancelPayload.fromJson(await CryptoEnvelopeUtils.openJson(envelope, key));
+        final cancel = FileCancelPayload.fromJson(
+          await CryptoEnvelopeUtils.openJson(envelope, key),
+        );
         _cancelled.add(cancel.transferId);
         final session = _sessions[cancel.transferId];
         if (session != null) {
@@ -232,7 +309,9 @@ class FileReceiver {
         .toList();
     for (final entry in stale) {
       await _destroy(entry.key, entry.value);
-      _emit(FileTransferReceiveEvent('failed', entry.key, reason: 'idle timeout'));
+      _emit(
+        FileTransferReceiveEvent('failed', entry.key, reason: 'idle timeout'),
+      );
     }
   }
 
@@ -258,7 +337,10 @@ class FileReceiver {
     final dir = destinationProvider();
     await dir.create(recursive: true);
     final safeName = _basename(session.offer.fileName);
-    final destination = _uniqueDestination(dir, safeName.isEmpty ? 'download' : safeName);
+    final destination = _uniqueDestination(
+      dir,
+      safeName.isEmpty ? 'download' : safeName,
+    );
     try {
       return await session.tempFile.rename(destination.path);
     } catch (_) {
@@ -267,6 +349,21 @@ class FileReceiver {
       await session.tempFile.delete();
       return copied;
     }
+  }
+
+  bool _validTransferId(String transferId) =>
+      RegExp(r'^[a-z0-9-]{1,64}$').hasMatch(transferId);
+
+  bool _validOffer(FileOfferPayload offer) {
+    if (offer.chunkSize <= 0 ||
+        offer.chunkSize > FileTransferConstants.maxChunkSize ||
+        offer.fileSize < 0) {
+      return false;
+    }
+    final expectedCount = offer.fileSize == 0
+        ? 0
+        : (offer.fileSize + offer.chunkSize - 1) ~/ offer.chunkSize;
+    return offer.chunkCount == expectedCount;
   }
 
   File _uniqueDestination(Directory dir, String fileName) {

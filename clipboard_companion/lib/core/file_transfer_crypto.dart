@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'file_transfer_models.dart';
@@ -32,21 +33,50 @@ class FileTransferCrypto {
     return bytes;
   }
 
-  static Future<Uint8List> sealChunk(List<int> plaintext, SecretKey fileKey, int index) async {
-    final box = await _chacha.encrypt(
-      plaintext,
-      secretKey: fileKey,
-      nonce: nonceForChunk(index),
-    );
-    return Uint8List.fromList([...box.cipherText, ...box.mac.bytes]);
+  static Future<Uint8List> sealChunk(
+    List<int> plaintext,
+    SecretKey fileKey,
+    int index,
+  ) async {
+    final keyBytes = await fileKey.extractBytes();
+    return Isolate.run(() async {
+      final box = await Chacha20.poly1305Aead().encrypt(
+        plaintext,
+        secretKey: SecretKeyData(keyBytes),
+        nonce: nonceForChunk(index),
+      );
+      final result = Uint8List(box.cipherText.length + box.mac.bytes.length);
+      result.setRange(0, box.cipherText.length, box.cipherText);
+      result.setRange(box.cipherText.length, result.length, box.mac.bytes);
+      return result;
+    });
   }
 
-  static Future<Uint8List> openChunk(List<int> body, SecretKey fileKey, int index) async {
+  static Future<Uint8List> openChunk(
+    List<int> body,
+    SecretKey fileKey,
+    int index,
+  ) async {
     if (body.length < 16) throw Exception('chunk too short');
-    final ciphertext = body.sublist(0, body.length - 16);
-    final mac = body.sublist(body.length - 16);
-    final box = SecretBox(ciphertext, nonce: nonceForChunk(index), mac: Mac(mac));
-    final plaintext = await _chacha.decrypt(box, secretKey: fileKey);
-    return Uint8List.fromList(plaintext);
+    final keyBytes = await fileKey.extractBytes();
+    final bodyBytes = body is Uint8List ? body : Uint8List.fromList(body);
+    return Isolate.run(() async {
+      final ciphertext = Uint8List.sublistView(
+        bodyBytes,
+        0,
+        bodyBytes.length - 16,
+      );
+      final mac = Uint8List.sublistView(bodyBytes, bodyBytes.length - 16);
+      final box = SecretBox(
+        ciphertext,
+        nonce: nonceForChunk(index),
+        mac: Mac(mac),
+      );
+      final plaintext = await Chacha20.poly1305Aead().decrypt(
+        box,
+        secretKey: SecretKeyData(keyBytes),
+      );
+      return Uint8List.fromList(plaintext);
+    });
   }
 }
