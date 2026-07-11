@@ -121,6 +121,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setDeviceConnected(_ id: UUID, _ connected: Bool) {
+        Task {
+            do {
+                try await pairingCoordinator.pairedStore.setConnected(id, connected)
+                await refreshPairedDevices()
+            } catch { lastError = error.localizedDescription }
+        }
+    }
+
     func requestDevices() {
         showDevices = true
     }
@@ -187,12 +196,13 @@ final class AppModel: ObservableObject {
 
     nonisolated static func composeSendTargets(mdnsPeers: [Peer], pairedDevices: [PairedDevice]) -> [Peer] {
         var byId: [UUID: Peer] = [:]
-        for device in pairedDevices {
+        for device in pairedDevices where device.connected {
             if let host = device.host {
                 byId[device.id] = Peer(id: device.id, name: device.name, host: host, port: 51888)
             }
         }
-        for peer in mdnsPeers {
+        let connectedIds = Set(pairedDevices.filter(\.connected).map(\.id))
+        for peer in mdnsPeers where !pairedDevices.contains(where: { $0.id == peer.id }) || connectedIds.contains(peer.id) {
             byId[peer.id] = peer
         }
         return Array(byId.values)
@@ -330,6 +340,7 @@ final class AppModel: ObservableObject {
                 transfers[i].progress = 1.0
                 transfers[i].status = .completed
                 transfers[i].destinationURL = url
+                postProcessReceivedFile(at: i)
             }
         case let .failed(transferId, reason):
             if let i = index(ofKey: transferId) {
@@ -348,6 +359,35 @@ final class AppModel: ObservableObject {
 
     func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func postProcessReceivedFile(at index: Int) {
+        switch ReceiveSettings.mode {
+        case .unset:
+            let alert = NSAlert()
+            alert.messageText = "Where should received files be saved?"
+            alert.informativeText = "They are currently saved to \(ReceiveSettings.resolvedDirectory().path)."
+            alert.addButton(withTitle: "Keep saving here")
+            alert.addButton(withTitle: "Choose a folder…")
+            alert.addButton(withTitle: "Ask every time")
+            switch alert.runModal() {
+            case .alertSecondButtonReturn:
+                if let folder = ReceiveSettings.chooseDirectory() {
+                    ReceiveSettings.path = folder.path
+                    ReceiveSettings.mode = .defaultFolder
+                }
+            case .alertThirdButtonReturn: ReceiveSettings.mode = .askEveryTime
+            default: ReceiveSettings.mode = .defaultFolder
+            }
+        case .askEveryTime:
+            guard let folder = ReceiveSettings.chooseDirectory(), let source = transfers[index].destinationURL else { return }
+            let destination = folder.appendingPathComponent(source.lastPathComponent)
+            do {
+                try FileManager.default.moveItem(at: source, to: destination)
+                transfers[index].destinationURL = destination
+            } catch { lastError = error.localizedDescription }
+        case .defaultFolder: break
+        }
     }
 
     /// Periodically reaps idle receiver sessions; wired to the app's poll timer.

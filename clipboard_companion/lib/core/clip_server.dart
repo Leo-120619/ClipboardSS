@@ -86,7 +86,8 @@ class ClipServer {
       final initiatorName = body['deviceName'] as String;
       final initiatorPubKeyBase64 = body['ephemeralPublicKey'] as String;
 
-      final connInfo = request.context['shelf.io.connection_info'] as HttpConnectionInfo?;
+      final connInfo =
+          request.context['shelf.io.connection_info'] as HttpConnectionInfo?;
       final remoteHost = connInfo?.remoteAddress.address ?? '';
       final targetPubKeyBase64 = await pairingCoordinator.handlePairStart(
         initiatorId,
@@ -101,7 +102,10 @@ class ClipServer {
         'ephemeralPublicKey': targetPubKeyBase64,
       };
 
-      return Response.ok(jsonEncode(respData), headers: {'Content-Type': 'application/json'});
+      return Response.ok(
+        jsonEncode(respData),
+        headers: {'Content-Type': 'application/json'},
+      );
     } catch (e) {
       developer.log('Pair start error: $e', name: 'ClipServer');
       return Response.internalServerError(body: e.toString());
@@ -116,7 +120,10 @@ class ClipServer {
       final initiatorId = body['deviceId'] as String;
       final proof = body['proof'] as String;
 
-      final success = await pairingCoordinator.handlePairConfirmRequest(initiatorId, proof);
+      final success = await pairingCoordinator.handlePairConfirmRequest(
+        initiatorId,
+        proof,
+      );
       if (success) {
         return Response.ok('OK');
       } else {
@@ -139,6 +146,10 @@ class ClipServer {
       if (key == null) {
         return Response(401, body: 'Not paired');
       }
+      if (!pairedStore.isConnected(envelope.sourceDeviceId)) {
+        // Pausing is local; remote devices may still try to send and receive 401.
+        return Response(401, body: 'Paused');
+      }
 
       final payload = await CryptoEnvelopeUtils.open(envelope, key);
       onClipReceived(payload);
@@ -153,16 +164,18 @@ class ClipServer {
   // MARK: - File transfer
 
   Response _fileResponse(FileTransferResponse result) => Response(
-        result.statusCode,
-        body: jsonEncode(result.body),
-        headers: {'Content-Type': 'application/json'},
-      );
+    result.statusCode,
+    body: jsonEncode(result.body),
+    headers: {'Content-Type': 'application/json'},
+  );
 
   Future<Response> _handleFileOffer(Request request) async {
     final receiver = fileReceiver;
     if (receiver == null) return Response.notFound('Not Found');
     try {
-      final envelope = ClipEnvelope.fromJson(jsonDecode(await request.readAsString()));
+      final envelope = ClipEnvelope.fromJson(
+        jsonDecode(await request.readAsString()),
+      );
       return _fileResponse(await receiver.handleOffer(envelope));
     } catch (e) {
       return Response(400, body: jsonEncode({'status': 'error'}));
@@ -173,12 +186,21 @@ class ClipServer {
     final receiver = fileReceiver;
     if (receiver == null) return Response.notFound('Not Found');
     // Codecs lowercase header keys.
-    final transferId = request.headers[FileTransferConstants.transferIdHeader.toLowerCase()] ?? '';
-    final index = int.tryParse(
-            request.headers[FileTransferConstants.chunkIndexHeader.toLowerCase()] ?? '') ??
+    final transferId =
+        request.headers[FileTransferConstants.transferIdHeader.toLowerCase()] ??
+        '';
+    final index =
+        int.tryParse(
+          request.headers[FileTransferConstants.chunkIndexHeader
+                  .toLowerCase()] ??
+              '',
+        ) ??
         -1;
     // shelf has no body cap; enforce one manually (chunk plaintext + tag + slack).
-    final body = await _readRawBody(request, FileTransferConstants.chunkSize + 4096);
+    final body = await _readRawBody(
+      request,
+      FileTransferConstants.chunkSize + 4096,
+    );
     if (body == null) {
       return _fileResponse(FileTransferResponse(400, {'status': 'tooLarge'}));
     }
@@ -189,7 +211,9 @@ class ClipServer {
     final receiver = fileReceiver;
     if (receiver == null) return Response.notFound('Not Found');
     try {
-      final envelope = ClipEnvelope.fromJson(jsonDecode(await request.readAsString()));
+      final envelope = ClipEnvelope.fromJson(
+        jsonDecode(await request.readAsString()),
+      );
       return _fileResponse(await receiver.handleFinish(envelope));
     } catch (e) {
       return Response(400, body: jsonEncode({'status': 'error'}));
@@ -200,7 +224,9 @@ class ClipServer {
     final receiver = fileReceiver;
     if (receiver == null) return Response.notFound('Not Found');
     try {
-      final envelope = ClipEnvelope.fromJson(jsonDecode(await request.readAsString()));
+      final envelope = ClipEnvelope.fromJson(
+        jsonDecode(await request.readAsString()),
+      );
       return _fileResponse(await receiver.handleCancel(envelope));
     } catch (e) {
       return Response(400, body: jsonEncode({'status': 'error'}));

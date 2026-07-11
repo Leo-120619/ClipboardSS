@@ -29,11 +29,20 @@ class ClipPayload {
     return {
       'id': id,
       'type': type == ClipType.text ? 'text' : 'image',
-      'createdAt': '${createdAt.toUtc().toIso8601String().split('.').first.replaceAll('Z', '')}Z',
+      'createdAt':
+          '${createdAt.toUtc().toIso8601String().split('.').first.replaceAll('Z', '')}Z',
       'text': text,
       'imageBase64': imageBase64,
       'imageExtension': imageExtension,
-      'previewText': previewText ?? (type == ClipType.text ? (text != null ? (text!.length > 100 ? '${text!.substring(0, 100)}...' : text!) : '') : 'Image clip'),
+      'previewText':
+          previewText ??
+          (type == ClipType.text
+              ? (text != null
+                    ? (text!.length > 100
+                          ? '${text!.substring(0, 100)}...'
+                          : text!)
+                    : '')
+              : 'Image clip'),
       'contentHash': contentHash,
       'sourceDeviceName': sourceDeviceName,
     };
@@ -104,11 +113,13 @@ class PairedDevice {
   final String id;
   final String name;
   final String? host;
+  final bool connected;
 
   PairedDevice({
     required String id,
     required this.name,
     this.host,
+    this.connected = true,
   }) : id = canonicalDeviceId(id);
 
   Map<String, dynamic> toJson() {
@@ -116,6 +127,7 @@ class PairedDevice {
       'id': id,
       'name': name,
       if (host != null) 'host': host,
+      'connected': connected,
     };
   }
 
@@ -124,6 +136,7 @@ class PairedDevice {
       id: json['id'] as String,
       name: json['name'] as String,
       host: json['host'] as String?,
+      connected: json['connected'] as bool? ?? true,
     );
   }
 }
@@ -132,8 +145,6 @@ class DeviceIdentity {
   final String id;
   final String name;
 
-  DeviceIdentity({
-    required String id,
-    required this.name,
-  }) : id = canonicalDeviceId(id);
+  DeviceIdentity({required String id, required this.name})
+    : id = canonicalDeviceId(id);
 }

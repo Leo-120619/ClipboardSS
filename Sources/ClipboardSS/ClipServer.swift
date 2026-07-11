@@ -112,6 +112,11 @@ public final class ClipServer: @unchecked Sendable {
                         self.sendResponse(resp, on: connection)
                         return
                     }
+                    guard await self.pairingCoordinator.pairedStore.isConnected(envelopeRaw.sourceDeviceId) else {
+                        let resp = HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
+                        self.sendResponse(resp, on: connection)
+                        return
+                    }
                     
                     let envelope = ClipEnvelope(sourceDeviceId: envelopeRaw.sourceDeviceId, nonce: envelopeRaw.nonce, ciphertext: envelopeRaw.ciphertext)
                     let payload = try envelope.open(pairKey: key)

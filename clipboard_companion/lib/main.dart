@@ -1157,8 +1157,18 @@ class _DevicesScreenState extends State<DevicesScreen> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
 
+    _showReceiveDestinationPromptIfNeeded(context, state);
     return Scaffold(
-      appBar: AppBar(title: const Text('Devices')),
+      appBar: AppBar(
+        title: const Text('Devices'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.folder_outlined),
+            tooltip: 'Received files',
+            onPressed: () => _showReceiveSettings(context, state),
+          ),
+        ],
+      ),
       body: _devicesBody(context, state),
     );
   }
@@ -1181,6 +1191,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
         const SizedBox(height: 16),
         _PairedDevicesCard(
           devices: state.pairedStore.devices,
+          onSetConnected: state.setDeviceConnected,
           onUnpair: (id) async {
             await state.pairedStore.removeDevice(id);
             if (mounted) setState(() {});
@@ -1195,11 +1206,98 @@ class _DevicesScreenState extends State<DevicesScreen> {
     );
   }
 
-  Future<void> _pickAndSend(BuildContext context, AppState state, String deviceId) async {
+  Future<void> _pickAndSend(
+    BuildContext context,
+    AppState state,
+    String deviceId,
+  ) async {
     final result = await FilePicker.platform.pickFiles(withData: false);
     final path = result?.files.single.path;
     if (path == null) return;
     await state.sendFileTo(File(path), deviceId);
+  }
+
+  void _showReceiveDestinationPromptIfNeeded(
+    BuildContext context,
+    AppState state,
+  ) {
+    if (state.pendingDestinationChoicePath == null &&
+        state.pendingAskDestinationPath == null)
+      return;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted ||
+          (state.pendingDestinationChoicePath == null &&
+              state.pendingAskDestinationPath == null))
+        return;
+      final firstRun = state.pendingDestinationChoicePath != null;
+      final action = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(firstRun ? 'Save received files' : 'Choose a folder'),
+          content: Text(
+            firstRun
+                ? 'Choose where future received files should be saved.'
+                : 'Choose where to copy this received file.',
+          ),
+          actions: [
+            if (firstRun)
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'keep'),
+                child: const Text('Keep default'),
+              ),
+            if (firstRun)
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'ask'),
+                child: const Text('Ask every time'),
+              ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'choose'),
+              child: const Text('Choose folder…'),
+            ),
+          ],
+        ),
+      );
+      if (action == 'keep') await state.keepDefaultReceiveDestination();
+      if (action == 'ask') await state.setReceiveDestinationAskEveryTime();
+      if (action == 'choose') {
+        final directory = await FilePicker.platform.getDirectoryPath();
+        if (directory != null) {
+          if (firstRun) await state.setReceiveDestinationDefault(directory);
+          await state.movePendingReceivedFileTo(directory);
+        }
+      }
+    });
+  }
+
+  void _showReceiveSettings(BuildContext context, AppState state) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Received files'),
+        content: Text(
+          state.receiveDestinationMode == 'ask'
+              ? 'Ask every time'
+              : 'Files are saved to the app’s Received folder unless you choose another folder.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await state.setReceiveDestinationAskEveryTime();
+              if (context.mounted) Navigator.pop(context);
+            },
+            child: const Text('Ask every time'),
+          ),
+          TextButton(
+            onPressed: () async {
+              final dir = await FilePicker.platform.getDirectoryPath();
+              if (dir != null) await state.setReceiveDestinationDefault(dir);
+              if (context.mounted) Navigator.pop(context);
+            },
+            child: const Text('Choose folder…'),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -1341,10 +1439,12 @@ class _PairedDevicesCard extends StatelessWidget {
   final List<PairedDevice> devices;
   final Future<void> Function(String id) onUnpair;
   final Future<void> Function(String id)? onSendFile;
+  final Future<void> Function(String id, bool connected) onSetConnected;
 
   const _PairedDevicesCard({
     required this.devices,
     required this.onUnpair,
+    required this.onSetConnected,
     this.onSendFile,
   });
 
@@ -1422,6 +1522,10 @@ class _PairedDevicesCard extends StatelessWidget {
                           color: theme.colorScheme.primary,
                           onPressed: () => onSendFile!(device.id),
                         ),
+                      Switch(
+                        value: device.connected,
+                        onChanged: (value) => onSetConnected(device.id, value),
+                      ),
                       TextButton(
                         onPressed: () => onUnpair(device.id),
                         style: TextButton.styleFrom(
@@ -1461,8 +1565,9 @@ class _TransfersCard extends StatelessWidget {
                 Expanded(
                   child: Text(
                     'Transfers',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.bold),
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
                 TextButton(
@@ -1535,13 +1640,15 @@ class _TransferRow extends StatelessWidget {
             child: const Text('Cancel'),
           );
         }
-        return Text('${(transfer.progress * 100).round()}%',
-            style: Theme.of(context).textTheme.bodySmall);
+        return Text(
+          '${(transfer.progress * 100).round()}%',
+          style: Theme.of(context).textTheme.bodySmall,
+        );
       case TransferStatus.completed:
         if (transfer.path != null) {
           return TextButton(
             onPressed: () => Share.shareXFiles([XFile(transfer.path!)]),
-            child: const Text('Open'),
+            child: const Text('Open location'),
           );
         }
         return const Icon(Icons.check_circle, color: Colors.green, size: 20);

@@ -87,6 +87,9 @@ class FileReceiver {
   Future<FileTransferResponse> handleOffer(ClipEnvelope envelope) async {
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key == null) return FileTransferResponse(401, {'status': 'unpaired'});
+    if (!pairedStore.isConnected(envelope.sourceDeviceId)) {
+      return FileTransferResponse(401, {'status': 'paused'});
+    }
 
     FileOfferPayload offer;
     try {

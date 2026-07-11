@@ -5,11 +5,22 @@ public struct PairedDevice: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public var name: String
     public var host: String?
+    public var connected: Bool
 
-    public init(id: UUID, name: String, host: String? = nil) {
+    public init(id: UUID, name: String, host: String? = nil, connected: Bool = true) {
         self.id = id
         self.name = name
         self.host = host
+        self.connected = connected
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, host, connected }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        host = try container.decodeIfPresent(String.self, forKey: .host)
+        connected = try container.decodeIfPresent(Bool.self, forKey: .connected) ?? true
     }
 }
 
@@ -42,7 +53,10 @@ public actor PairedDeviceStore {
     public func addDevice(_ device: PairedDevice, key: SymmetricKey) throws {
         try keyStorage.storeKey(key, for: device.id)
         if let index = devices.firstIndex(where: { $0.id == device.id }) {
-            devices[index] = device
+            // Re-pairing refreshes identity data but must not silently resume a paused device.
+            var refreshed = device
+            refreshed.connected = devices[index].connected
+            devices[index] = refreshed
         } else {
             devices.append(device)
         }
@@ -57,6 +71,16 @@ public actor PairedDeviceStore {
     
     public func getKey(for deviceId: UUID) throws -> SymmetricKey? {
         try keyStorage.getKey(for: deviceId)
+    }
+
+    public func isConnected(_ deviceId: UUID) -> Bool {
+        devices.first(where: { $0.id == deviceId })?.connected ?? false
+    }
+
+    public func setConnected(_ deviceId: UUID, _ connected: Bool) throws {
+        guard let index = devices.firstIndex(where: { $0.id == deviceId }) else { return }
+        devices[index].connected = connected
+        try save()
     }
     
     private func save() throws {

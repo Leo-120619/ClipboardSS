@@ -24,7 +24,7 @@ List<Peer> composeSendTargets(
   List<PairedDevice> pairedDevices,
 ) {
   final byId = <String, Peer>{};
-  for (final device in pairedDevices) {
+  for (final device in pairedDevices.where((device) => device.connected)) {
     final host = device.host;
     if (host != null && host.isNotEmpty) {
       byId[device.id] = Peer(
@@ -35,8 +35,10 @@ List<Peer> composeSendTargets(
       );
     }
   }
+  final pairedById = {for (final device in pairedDevices) device.id: device};
   for (final peer in mdnsPeers) {
-    byId[peer.id] = peer;
+    final paired = pairedById[peer.id];
+    if (paired == null || paired.connected) byId[peer.id] = peer;
   }
   return byId.values.toList();
 }
@@ -78,6 +80,16 @@ class AppState extends ChangeNotifier {
   final List<FileTransferUiState> transfers = [];
 
   static const _clipsKey = 'saved_clips';
+  static const _receiveDestinationModeKey = 'receive_dest_mode';
+  static const _receiveDestinationPathKey = 'receive_dest_path';
+  static const _defaultDestinationMode = 'default';
+  static const _askDestinationMode = 'ask';
+  String _receiveDestinationMode = '';
+  String? _receiveDestinationPath;
+  String? pendingDestinationChoicePath;
+  String? pendingAskDestinationPath;
+
+  String get receiveDestinationMode => _receiveDestinationMode;
 
   List<ClipPayload> clips = [];
 
@@ -112,6 +124,8 @@ class AppState extends ChangeNotifier {
 
     // 2. Setup stores
     pairedStore = PairedDeviceStore(prefs);
+    _receiveDestinationMode = prefs.getString(_receiveDestinationModeKey) ?? '';
+    _receiveDestinationPath = prefs.getString(_receiveDestinationPathKey);
     _loadClips();
     notifyListeners();
   }
@@ -278,6 +292,11 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setDeviceConnected(String id, bool connected) async {
+    await pairedStore.setConnected(id, connected);
+    notifyListeners();
+  }
+
   Future<void> resumeSyncServices() => startSyncServices();
 
   Future<ClipSendSummary> sendClip(ClipPayload clip) async {
@@ -383,7 +402,8 @@ class AppState extends ChangeNotifier {
   void _onReceiveEvent(FileTransferReceiveEvent event) {
     FileTransferUiState? existing;
     for (final t in transfers) {
-      if (t.key == event.transferId && t.direction == TransferDirection.receiving) {
+      if (t.key == event.transferId &&
+          t.direction == TransferDirection.receiving) {
         existing = t;
         break;
       }
@@ -413,6 +433,8 @@ class AppState extends ChangeNotifier {
           existing.progress = 1.0;
           existing.status = TransferStatus.completed;
           existing.path = event.path;
+          if (event.path != null)
+            unawaited(_postProcessCompletedTransfer(existing, event.path!));
         }
         break;
       case 'failed':
@@ -427,12 +449,90 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _postProcessCompletedTransfer(
+    FileTransferUiState transfer,
+    String path,
+  ) async {
+    // iOS keeps files in Documents/Received, which is visible in Files. Android uses
+    // its app-scoped directory as a reliable staging area before a user-selected copy.
+    if (!Platform.isAndroid) return;
+    if (_receiveDestinationMode.isEmpty) {
+      pendingDestinationChoicePath = path;
+      notifyListeners();
+      return;
+    }
+    if (_receiveDestinationMode == _askDestinationMode) {
+      pendingAskDestinationPath = path;
+      notifyListeners();
+      return;
+    }
+    if (_receiveDestinationMode == _defaultDestinationMode &&
+        _receiveDestinationPath != null) {
+      await _copyReceivedFile(transfer, path, _receiveDestinationPath!);
+    }
+  }
+
+  Future<void> setReceiveDestinationDefault(String directory) async {
+    _receiveDestinationMode = _defaultDestinationMode;
+    _receiveDestinationPath = directory;
+    pendingDestinationChoicePath = null;
+    await _prefs.setString(_receiveDestinationModeKey, _receiveDestinationMode);
+    await _prefs.setString(_receiveDestinationPathKey, directory);
+    notifyListeners();
+  }
+
+  Future<void> setReceiveDestinationAskEveryTime() async {
+    _receiveDestinationMode = _askDestinationMode;
+    pendingDestinationChoicePath = null;
+    await _prefs.setString(_receiveDestinationModeKey, _receiveDestinationMode);
+    await _prefs.remove(_receiveDestinationPathKey);
+    notifyListeners();
+  }
+
+  Future<void> keepDefaultReceiveDestination() async {
+    await setReceiveDestinationDefault((await _resolveDestinationDir()).path);
+  }
+
+  Future<void> movePendingReceivedFileTo(String directory) async {
+    final path = pendingAskDestinationPath ?? pendingDestinationChoicePath;
+    if (path == null) return;
+    final transfer = transfers.where((t) => t.path == path).firstOrNull;
+    if (transfer != null) await _copyReceivedFile(transfer, path, directory);
+    pendingAskDestinationPath = null;
+    notifyListeners();
+  }
+
+  Future<void> _copyReceivedFile(
+    FileTransferUiState transfer,
+    String sourcePath,
+    String directory,
+  ) async {
+    try {
+      final destinationDirectory = Directory(directory);
+      await destinationDirectory.create(recursive: true);
+      final source = File(sourcePath);
+      var destination = File('$directory/${_basename(sourcePath)}');
+      var suffix = 1;
+      while (await destination.exists()) {
+        destination = File('$directory/${suffix++}_${_basename(sourcePath)}');
+      }
+      await source.copy(destination.path);
+      transfer.path = destination.path;
+      notifyListeners();
+    } catch (e) {
+      lastError = 'Could not copy received file: $e';
+      notifyListeners();
+    }
+  }
+
   /// Save location: Android app-scoped external files dir (no SAF), iOS Documents
   /// dir (Files-visible via Info.plist keys), fallback to app support elsewhere.
   Future<Directory> _resolveDestinationDir() async {
     Directory base;
     if (Platform.isAndroid) {
-      base = (await getExternalStorageDirectory()) ?? await getApplicationSupportDirectory();
+      base =
+          (await getExternalStorageDirectory()) ??
+          await getApplicationSupportDirectory();
     } else if (Platform.isIOS) {
       base = await getApplicationDocumentsDirectory();
     } else {

@@ -51,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let fileReceiver = FileReceiver(
                 pairedStore: pairedStore,
                 transfersDirectory: store.storageDirectory.appendingPathComponent("Transfers", isDirectory: true),
-                destinationProvider: { Self.downloadsDirectory() },
+                destinationProvider: { ReceiveSettings.resolvedDirectory() },
                 onEvent: { [transferEventSink] event in transferEventSink.emit(event) }
             )
 

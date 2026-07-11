@@ -78,6 +78,10 @@ public actor FileReceiver {
         guard let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId) else {
             return .json(401, ["status": "unpaired"])
         }
+        // A pause is local: a remote sender may still attempt delivery and receives 401.
+        guard await pairedStore.isConnected(envelope.sourceDeviceId) else {
+            return .json(401, ["status": "paused"])
+        }
         guard let offer = try? envelope.open(FileOfferPayload.self, pairKey: key) else {
             return .json(401, ["status": "unpaired"])
         }
