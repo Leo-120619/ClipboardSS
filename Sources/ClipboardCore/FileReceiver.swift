@@ -81,6 +81,12 @@ public actor FileReceiver {
         guard let offer = try? envelope.open(FileOfferPayload.self, pairKey: key) else {
             return .json(401, ["status": "unpaired"])
         }
+        guard isValidTransferId(offer.transferId) else {
+            return .json(400, ["status": "invalidId"])
+        }
+        guard isValidOffer(offer) else {
+            return .json(400, ["status": "invalidOffer"])
+        }
 
         if sessions[offer.transferId] != nil {
             return .json(409, ["status": "duplicate"])
@@ -124,16 +130,23 @@ public actor FileReceiver {
             return .json(400, ["status": "badIndex"])
         }
 
-        // Idempotent: a re-sent chunk we already have is accepted without rewriting.
+        guard let plaintext = try? FileTransferCrypto.openChunk(body, fileKey: session.fileKey, index: UInt64(chunkIndex)) else {
+            teardown(transferId, reason: "chunk authentication failed")
+            return .json(400, ["status": "authFailed"])
+        }
+        let expectedSize = chunkIndex == session.offer.chunkCount - 1
+            ? Int(session.offer.fileSize - Int64(chunkIndex) * Int64(session.offer.chunkSize))
+            : session.offer.chunkSize
+        guard plaintext.count == expectedSize else {
+            teardown(transferId, reason: "bad chunk size")
+            return .json(400, ["status": "badSize"])
+        }
+
+        // Authenticate duplicate bodies too; idempotence must not bypass AEAD verification.
         if session.receivedIndices.contains(chunkIndex) {
             session.lastActivity = now()
             sessions[transferId] = session
             return .json(200, ["status": "ok", "received": session.receivedIndices.count])
-        }
-
-        guard let plaintext = try? FileTransferCrypto.openChunk(body, fileKey: session.fileKey, index: UInt64(chunkIndex)) else {
-            teardown(transferId, reason: "chunk authentication failed")
-            return .json(400, ["status": "authFailed"])
         }
 
         do {
@@ -257,5 +270,21 @@ public actor FileReceiver {
 
     private func emit(_ event: FileTransferReceiveEvent) {
         onEvent?(event)
+    }
+
+    private func isValidTransferId(_ transferId: String) -> Bool {
+        guard transferId.utf8.count <= 64, !transferId.isEmpty else { return false }
+        return transferId.utf8.allSatisfy { byte in
+            (byte >= 97 && byte <= 122) || (byte >= 48 && byte <= 57) || byte == 45
+        }
+    }
+
+    private func isValidOffer(_ offer: FileOfferPayload) -> Bool {
+        guard offer.chunkSize > 0,
+              offer.chunkSize <= FileTransferConstants.maxChunkSize,
+              offer.fileSize >= 0 else { return false }
+        let chunkSize = Int64(offer.chunkSize)
+        let expectedCount = offer.fileSize / chunkSize + (offer.fileSize % chunkSize == 0 ? 0 : 1)
+        return expectedCount == Int64(offer.chunkCount)
     }
 }

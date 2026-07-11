@@ -2,7 +2,7 @@ import Cocoa
 import ClipboardCore
 import UniformTypeIdentifiers
 
-/// Principal view controller for the macOS share extension. It copies the shared
+/// Principal view controller for the macOS share extension. It stages shared
 /// file(s) into the app-group outbox, opens the host app via its URL scheme so the
 /// user can pick a device, then dismisses itself.
 final class ShareViewController: NSViewController {
@@ -37,9 +37,13 @@ final class ShareViewController: NSViewController {
             return
         }
 
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ClipboardSSShare-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        let drop: (id: String, directory: URL)
+        do {
+            drop = try ShareInbox.createDrop()
+        } catch {
+            finish(error: "Couldn't prepare the shared item.")
+            return
+        }
 
         let group = DispatchGroup()
         let lock = NSLock()
@@ -47,7 +51,7 @@ final class ShareViewController: NSViewController {
 
         for provider in providers {
             group.enter()
-            loadFile(from: provider, into: staging) { url in
+            loadFile(from: provider, into: drop.directory) { url in
                 if let url {
                     lock.lock(); collected.append(url); lock.unlock()
                 }
@@ -62,9 +66,8 @@ final class ShareViewController: NSViewController {
                 return
             }
             do {
-                let id = try ShareInbox.writeDrop(sources: collected)
-                try? FileManager.default.removeItem(at: staging)
-                self.openHost(dropId: id)
+                try ShareInbox.finalizeDrop(id: drop.id, names: collected.map(\.lastPathComponent))
+                self.openHost(dropId: drop.id)
                 self.finish(error: nil)
             } catch {
                 self.finish(error: "Couldn't hand off to ClipboardSS.")
@@ -72,8 +75,8 @@ final class ShareViewController: NSViewController {
         }
     }
 
-    /// Materialises a provider's payload as a readable file inside `staging`.
-    private func loadFile(from provider: NSItemProvider, into staging: URL, completion: @escaping (URL?) -> Void) {
+    /// Materialises a provider's payload directly inside the final outbox drop.
+    private func loadFile(from provider: NSItemProvider, into dropDirectory: URL, completion: @escaping (URL?) -> Void) {
         // Prefer an explicit file URL (Finder, most document apps).
         if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
@@ -86,7 +89,7 @@ final class ShareViewController: NSViewController {
                     sourceURL = nil
                 }
                 guard let source = sourceURL else { completion(nil); return }
-                completion(Self.copyIntoStaging(source, staging: staging))
+                completion(Self.copyIntoDrop(source, dropDirectory: dropDirectory))
             }
             return
         }
@@ -97,17 +100,17 @@ final class ShareViewController: NSViewController {
             ?? UTType.data.identifier
         provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { url, _ in
             guard let url else { completion(nil); return }
-            completion(Self.copyIntoStaging(url, staging: staging))
+            completion(Self.copyIntoDrop(url, dropDirectory: dropDirectory))
         }
     }
 
-    /// Copies a (possibly security-scoped) source file into `staging` and returns the copy.
-    private static func copyIntoStaging(_ source: URL, staging: URL) -> URL? {
+    /// Copies a (possibly security-scoped) provider file into the final outbox drop.
+    private static func copyIntoDrop(_ source: URL, dropDirectory: URL) -> URL? {
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
 
         let name = source.lastPathComponent.isEmpty ? "file" : source.lastPathComponent
-        var dest = staging.appendingPathComponent(name)
+        var dest = dropDirectory.appendingPathComponent(name)
         var counter = 2
         while FileManager.default.fileExists(atPath: dest.path) {
             let ext = (name as NSString).pathExtension

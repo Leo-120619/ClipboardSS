@@ -195,7 +195,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try? FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
                 let dest = destDir.appendingPathComponent(source.lastPathComponent)
                 do {
-                    try FileManager.default.copyItem(at: source, to: dest)
+                    do {
+                        try FileManager.default.moveItem(at: source, to: dest)
+                    } catch {
+                        try FileManager.default.copyItem(at: source, to: dest)
+                    }
                     stagedURLs.append(dest)
                 } catch {
                     // Skip files we can't stage; keep going with the rest.

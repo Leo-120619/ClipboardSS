@@ -2,7 +2,7 @@ import Foundation
 
 /// Bridges the macOS Share Extension (sandboxed) and the host app (not sandboxed).
 ///
-/// The extension copies the shared files into a per-drop folder inside the shared
+/// The extension stages shared files in a per-drop folder inside the shared
 /// app-group container and writes a `manifest.json` last (so the host only ever sees
 /// complete drops). The host polls the outbox, stages the files locally, deletes the
 /// drop folder, and hands the staged URLs to its normal file-send flow.
@@ -32,33 +32,53 @@ public enum ShareInbox {
 
     // MARK: - Extension side
 
-    /// Writes a drop into the outbox. `sources` are readable file URLs whose bytes are
-    /// copied into a fresh `<uuid>` folder; `manifest.json` is written last.
-    /// Returns the drop id on success.
-    @discardableResult
-    public static func writeDrop(sources: [URL]) throws -> String {
+    /// Creates an empty outbox drop. Call `finalizeDrop` only after all files have been
+    /// staged in this directory; writing its manifest last is the completeness barrier.
+    public static func createDrop() throws -> (id: String, directory: URL) {
         guard let outbox = outboxDirectory() else {
             throw ShareInboxError.containerUnavailable
         }
         let id = UUID().uuidString.lowercased()
         let dropDir = outbox.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: dropDir, withIntermediateDirectories: true)
+        return (id, dropDir)
+    }
+
+    /// Marks a fully staged drop complete by writing `manifest.json` last.
+    public static func finalizeDrop(id: String, names: [String]) throws {
+        guard let outbox = outboxDirectory() else {
+            throw ShareInboxError.containerUnavailable
+        }
+        let dropDir = outbox.appendingPathComponent(id, isDirectory: true)
+        let manifest = ShareManifest(id: id, fileNames: names)
+        let data = try JSONEncoder().encode(manifest)
+        try data.write(to: dropDir.appendingPathComponent(manifestName), options: .atomic)
+    }
+
+    /// Writes a drop into the outbox. Existing callers supply extension-owned staging
+    /// URLs, so files are moved rather than copied (with a copy fallback).
+    /// Returns the drop id on success.
+    @discardableResult
+    public static func writeDrop(sources: [URL]) throws -> String {
+        let drop = try createDrop()
 
         var storedNames: [String] = []
         for source in sources {
             let name = uniqueName(source.lastPathComponent, existing: storedNames)
-            let dest = dropDir.appendingPathComponent(name)
+            let dest = drop.directory.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: dest.path) {
                 try? FileManager.default.removeItem(at: dest)
             }
-            try FileManager.default.copyItem(at: source, to: dest)
+            do {
+                try FileManager.default.moveItem(at: source, to: dest)
+            } catch {
+                try FileManager.default.copyItem(at: source, to: dest)
+            }
             storedNames.append(name)
         }
 
-        let manifest = ShareManifest(id: id, fileNames: storedNames)
-        let data = try JSONEncoder().encode(manifest)
-        try data.write(to: dropDir.appendingPathComponent(manifestName), options: .atomic)
-        return id
+        try finalizeDrop(id: drop.id, names: storedNames)
+        return drop.id
     }
 
     // MARK: - Host side

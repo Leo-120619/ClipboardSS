@@ -115,6 +115,37 @@ struct FileReceiverTests {
         #expect(received == 1)
     }
 
+    @Test("a malformed duplicate chunk is authenticated and rejected")
+    func malformedDuplicateChunk() async throws {
+        let fixture = try await makeFixture()
+        let data = Data((0..<4).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
+        _ = await fixture.receiver.handleOffer(envelope: offer)
+        _ = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0])
+        let response = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: Data(repeating: 0, count: 16))
+        #expect(response.statusCode == 400)
+    }
+
+    @Test("offer validation rejects unsafe ids and invalid math before creating files")
+    func offerValidation() async throws {
+        let fixture = try await makeFixture()
+        func offer(id: String, size: Int64, chunkSize: Int, count: Int) throws -> ClipEnvelope {
+            try sealedEnvelope(FileOfferPayload(
+                transferId: id, fileName: "file.bin", fileSize: size,
+                mimeType: "application/octet-stream", fileHash: "h", chunkSize: chunkSize,
+                chunkCount: count, createdAt: Date(), sourceDeviceName: "Peer"
+            ), sourceDeviceId: fixture.peerId, key: fixture.key)
+        }
+        let invalidId = try offer(id: "../../evil", size: 1, chunkSize: 1, count: 1)
+        let invalidIdResponse = await fixture.receiver.handleOffer(envelope: invalidId)
+        #expect(invalidIdResponse.statusCode == 400)
+        #expect(status(invalidIdResponse) == "invalidId")
+        let invalidOffer = try offer(id: UUID().uuidString.lowercased(), size: 1, chunkSize: -1, count: 1)
+        let invalidOfferResponse = await fixture.receiver.handleOffer(envelope: invalidOffer)
+        #expect(invalidOfferResponse.statusCode == 400)
+        #expect(status(invalidOfferResponse) == "invalidOffer")
+    }
+
     @Test("finish before all chunks arrive returns 409 incomplete")
     func incompleteFinish() async throws {
         let fixture = try await makeFixture()
