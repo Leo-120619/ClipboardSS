@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>ClipboardSS — Your clipboard on every device. No cloud required.</title>
+<meta name="description" content="ClipboardSS syncs your clipboard and sends files between macOS, Windows, Android and iOS directly over your own Wi-Fi. End-to-end encrypted. No cloud, no account, no server. Free & open source.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="canonical" href="https://leo-120619.github.io/ClipboardSS/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="ClipboardSS — Your clipboard on every device. No cloud required.">
+<meta property="og:description" content="Copy on your Mac, paste on your PC or phone. Send files device-to-device over your own Wi-Fi — end-to-end encrypted, no account, no server. Free & open source.">
+<meta property="og:url" content="https://leo-120619.github.io/ClipboardSS/">
+<meta property="og:image" content="https://leo-120619.github.io/ClipboardSS/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+:root{
+  --bg:#fafafa;
+  --surface:#ffffff;
+  --text:#0f172a;
+  --text-2:#475569;
+  --text-3:#64748b;
+  --border:#e2e8f0;
+  --accent:#2469e6;
+  --accent-hover:#1c56c4;
+  --accent-soft:#eaf1fd;
+  --teal:#0f9e90;
+  --teal-soft:#e6f7f5;
+  --radius:14px;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.05);
+  --shadow-md:0 4px 16px rgba(15,23,42,.07);
+  --shadow-lg:0 12px 40px rgba(15,23,42,.12);
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:76px}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{animation:none!important;transition:none!important}
+}
+body{
+  font-family:var(--font);
+  background:var(--bg);
+  color:var(--text);
+  line-height:1.6;
+  font-size:16px;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+}
+img,video{max-width:100%;height:auto;display:block}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.container{max-width:1080px;margin:0 auto;padding:0 24px}
+section{padding:88px 0}
+@media (max-width:640px){section{padding:56px 0}}
+
+/* ---------- nav ---------- */
+.nav{
+  position:sticky;top:0;z-index:100;
+  background:rgba(250,250,250,.85);
+  -webkit-backdrop-filter:saturate(180%) blur(14px);
+  backdrop-filter:saturate(180%) blur(14px);
+  border-bottom:1px solid var(--border);
+}
+.nav-inner{display:flex;align-items:center;gap:28px;height:60px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;color:var(--text)}
+.brand:hover{text-decoration:none}
+.brand img{width:28px;height:28px;border-radius:7px}
+.nav-links{display:flex;gap:24px;margin-left:auto;align-items:center}
+.nav-links a{color:var(--text-2);font-size:14.5px;font-weight:500;padding:6px 2px}
+.nav-links a:hover{color:var(--text);text-decoration:none}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  font-weight:600;font-size:15px;border-radius:10px;
+  padding:10px 20px;cursor:pointer;border:1px solid transparent;
+  transition:background .18s ease,border-color .18s ease,transform .18s ease,box-shadow .18s ease;
+  min-height:44px;
+}
+.btn:hover{text-decoration:none}
+.btn:focus-visible,a:focus-visible,summary:focus-visible,button:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:10px}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-secondary{background:var(--surface);color:var(--text);border-color:var(--border);box-shadow:var(--shadow-sm)}
+.btn-secondary:hover{border-color:#cbd5e1}
+.btn-sm{padding:7px 14px;min-height:36px;font-size:14px}
+.nav .btn-sm{margin-left:4px}
+@media (max-width:720px){.nav-links a:not(.btn){display:none}}
+
+/* ---------- hero ---------- */
+.hero{padding:80px 0 72px;text-align:center;background:linear-gradient(180deg,#fff 0%,var(--bg) 100%)}
+.eyebrow{
+  display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;
+  font-size:13.5px;font-weight:600;color:var(--text-2);
+  background:var(--surface);border:1px solid var(--border);border-radius:999px;
+  padding:7px 16px;box-shadow:var(--shadow-sm);margin-bottom:26px;
+}
+.eyebrow .dot{width:4px;height:4px;border-radius:50%;background:#cbd5e1;display:inline-block}
+.eyebrow .free{color:var(--teal)}
+h1{
+  font-size:clamp(2.2rem,5.4vw,3.6rem);
+  line-height:1.12;font-weight:800;letter-spacing:-.025em;
+  max-width:820px;margin:0 auto 22px;
+}
+h1 .accent{color:var(--accent)}
+.hero-sub{
+  font-size:clamp(1.05rem,2vw,1.25rem);color:var(--text-2);
+  max-width:640px;margin:0 auto 34px;
+}
+.hero-ctas{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-bottom:18px}
+.hero-note{font-size:13.5px;color:var(--text-3)}
+.hero-shot{margin:56px auto 0;max-width:920px}
+.window{
+  background:var(--surface);border:1px solid var(--border);border-radius:16px;
+  box-shadow:var(--shadow-lg);overflow:hidden;
+}
+.window-bar{display:flex;gap:7px;padding:12px 14px;border-bottom:1px solid var(--border);background:#f8fafc}
+.window-bar span{width:11px;height:11px;border-radius:50%;display:block}
+.window-bar span:nth-child(1){background:#fc5f57}
+.window-bar span:nth-child(2){background:#febc2e}
+.window-bar span:nth-child(3){background:#28c840}
+
+/* ---------- section headers ---------- */
+.kicker{
+  font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--accent);margin-bottom:12px;
+}
+h2{font-size:clamp(1.7rem,3.6vw,2.4rem);font-weight:800;letter-spacing:-.02em;line-height:1.18;margin-bottom:14px}
+.section-sub{font-size:1.1rem;color:var(--text-2);max-width:640px;margin-bottom:44px}
+.center{text-align:center}
+.center .section-sub{margin-left:auto;margin-right:auto}
+
+/* ---------- problem ---------- */
+.problem{background:var(--surface);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.problem-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:34px}
+@media (max-width:760px){.problem-grid{grid-template-columns:1fr}}
+.problem-card{
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+  padding:30px;
+}
+.problem-card h3{font-size:1.15rem;font-weight:700;margin:14px 0 10px}
+.problem-card p{color:var(--text-2);font-size:15.5px}
+.icon-chip{
+  width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  background:var(--accent-soft);color:var(--accent);
+}
+.icon-chip.teal{background:var(--teal-soft);color:var(--teal)}
+.icon-chip svg{width:22px;height:22px}
+.punchline{
+  font-size:clamp(1.15rem,2.4vw,1.45rem);font-weight:700;letter-spacing:-.01em;
+  text-align:center;max-width:660px;margin:0 auto;
+}
+.punchline em{font-style:normal;color:var(--accent)}
+
+/* ---------- platforms ---------- */
+.platform-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-bottom:40px}
+@media (max-width:900px){.platform-grid{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:480px){.platform-grid{grid-template-columns:1fr}}
+.platform{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:26px 22px;box-shadow:var(--shadow-sm);
+  transition:transform .18s ease,box-shadow .18s ease;
+}
+.platform:hover{transform:translateY(-3px);box-shadow:var(--shadow-md)}
+.platform .icon-chip{margin-bottom:14px}
+.platform h3{font-size:1.05rem;font-weight:700}
+.platform p{font-size:14px;color:var(--text-2);margin-top:6px}
+.proto-band{
+  display:flex;flex-wrap:wrap;align-items:center;gap:14px 28px;justify-content:center;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:22px 28px;box-shadow:var(--shadow-sm);
+}
+.proto-band .item{display:flex;align-items:center;gap:9px;font-size:14.5px;font-weight:600;color:var(--text-2)}
+.proto-band .item svg{width:18px;height:18px;color:var(--teal);flex:none}
+
+/* ---------- pairing steps ---------- */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;counter-reset:step}
+@media (max-width:820px){.steps{grid-template-columns:1fr}}
+.step{
+  position:relative;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:30px;box-shadow:var(--shadow-sm);
+}
+.step-num{
+  width:34px;height:34px;border-radius:50%;background:var(--accent);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;
+  margin-bottom:16px;
+}
+.step h3{font-size:1.08rem;font-weight:700;margin-bottom:8px}
+.step p{font-size:15px;color:var(--text-2)}
+.step code{font-family:var(--mono);font-size:.9em;background:var(--accent-soft);color:var(--accent-hover);padding:2px 6px;border-radius:6px}
+.pairing-code{
+  font-family:var(--mono);font-weight:700;font-size:1.55rem;letter-spacing:.35em;
+  color:var(--accent);background:var(--accent-soft);border-radius:10px;
+  padding:8px 6px 8px calc(6px + .35em);text-align:center;margin:14px 0 2px;
+}
+.spec-link{display:inline-flex;align-items:center;gap:6px;margin-top:30px;font-weight:600;font-size:15px}
+
+/* ---------- video ---------- */
+.video-wrap{max-width:920px;margin:0 auto}
+.video-wrap video{width:100%;border-radius:16px;border:1px solid var(--border);box-shadow:var(--shadow-lg);background:#0f172a}
+.video-caption{text-align:center;color:var(--text-3);font-size:14px;margin-top:16px}
+
+/* ---------- privacy ---------- */
+.privacy{background:#0f172a;color:#f8fafc}
+.privacy .kicker{color:#7fb0ff}
+.privacy h2{color:#fff}
+.privacy .section-sub{color:#b6c2d4}
+.privacy-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+@media (max-width:820px){.privacy-grid{grid-template-columns:1fr}}
+.privacy-card{
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);
+  border-radius:var(--radius);padding:26px;
+}
+.privacy-card h3{display:flex;align-items:center;gap:10px;font-size:1.02rem;font-weight:700;color:#fff;margin-bottom:8px}
+.privacy-card h3 svg{width:20px;height:20px;color:#3ddbc9;flex:none}
+.privacy-card p{font-size:14.5px;color:#b6c2d4}
+.privacy-quote{
+  margin-top:40px;text-align:center;font-size:clamp(1.1rem,2.2vw,1.35rem);
+  font-weight:600;color:#e2e8f0;
+}
+.privacy-quote a{color:#7fb0ff}
+
+/* ---------- features ---------- */
+.feature{display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:center;padding:44px 0}
+.feature:not(:last-child){border-bottom:1px solid var(--border)}
+@media (max-width:820px){.feature{grid-template-columns:1fr;gap:28px}.feature .shot{order:-1}}
+.feature h3{font-size:1.45rem;font-weight:750;letter-spacing:-.015em;margin-bottom:12px}
+.feature p{color:var(--text-2);font-size:16px;margin-bottom:14px}
+.feature ul{list-style:none;display:grid;gap:9px}
+.feature li{display:flex;gap:10px;font-size:15px;color:var(--text-2)}
+.feature li svg{width:18px;height:18px;color:var(--teal);flex:none;margin-top:3px}
+.feature .shot img{border-radius:12px;border:1px solid var(--border);box-shadow:var(--shadow-md)}
+.feature .tag{
+  display:inline-block;font-size:12.5px;font-weight:700;color:var(--teal);
+  background:var(--teal-soft);border-radius:999px;padding:4px 12px;margin-bottom:12px;
+}
+
+/* ---------- download ---------- */
+.dl-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+@media (max-width:900px){.dl-grid{grid-template-columns:1fr}}
+.dl-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:28px;box-shadow:var(--shadow-sm);display:flex;flex-direction:column;
+}
+.dl-card h3{display:flex;align-items:center;gap:10px;font-size:1.1rem;font-weight:700;margin-bottom:6px}
+.dl-card h3 svg{width:20px;height:20px;color:var(--text-2)}
+.dl-card .req{font-size:13px;color:var(--text-3);margin-bottom:16px}
+.codeblock{
+  position:relative;background:#0f172a;border-radius:10px;padding:16px 44px 16px 16px;
+  font-family:var(--mono);font-size:12.8px;line-height:1.75;color:#e2e8f0;
+  overflow-x:auto;white-space:pre;margin-top:auto;
+}
+.codeblock .c{color:#7c8ba1}
+.copy-btn{
+  position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:8px;
+  background:rgba(255,255,255,.08);border:none;color:#cbd5e1;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:background .15s ease;
+}
+.copy-btn:hover{background:rgba(255,255,255,.18)}
+.copy-btn svg{width:15px;height:15px}
+.dl-note{margin-top:26px;text-align:center;color:var(--text-3);font-size:14px}
+
+/* ---------- faq ---------- */
+.faq{max-width:720px;margin:0 auto}
+.faq details{
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  margin-bottom:12px;overflow:hidden;
+}
+.faq summary{
+  cursor:pointer;font-weight:600;font-size:15.5px;padding:18px 22px;
+  list-style:none;display:flex;justify-content:space-between;align-items:center;gap:12px;
+}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary::after{
+  content:"";width:9px;height:9px;flex:none;
+  border-right:2px solid var(--text-3);border-bottom:2px solid var(--text-3);
+  transform:rotate(45deg);transition:transform .18s ease;margin-right:4px;
+}
+.faq details[open] summary::after{transform:rotate(225deg)}
+.faq details p{padding:0 22px 18px;color:var(--text-2);font-size:15px}
+.faq details p a{font-weight:600}
+
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--border);background:var(--surface);padding:44px 0}
+.footer-inner{display:flex;flex-wrap:wrap;gap:24px;align-items:center;justify-content:space-between}
+.footer-brand{display:flex;align-items:center;gap:10px;font-weight:700}
+.footer-brand img{width:24px;height:24px;border-radius:6px}
+.footer-links{display:flex;flex-wrap:wrap;gap:20px;font-size:14px}
+.footer-links a{color:var(--text-2)}
+.footer-links a:hover{color:var(--text)}
+.footer-meta{width:100%;font-size:13px;color:var(--text-3)}
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Main">
+  <div class="container nav-inner">
+    <a class="brand" href="#top">
+      <img src="assets/logo.png" alt="" width="28" height="28">
+      ClipboardSS
+    </a>
+    <div class="nav-links">
+      <a href="#sync">Cross-device</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#features">Features</a>
+      <a href="#download">Download</a>
+      <a class="btn btn-secondary btn-sm" href="https://github.com/Leo-120619/ClipboardSS">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<main id="top">
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="container">
+    <p class="eyebrow">
+      macOS <span class="dot"></span> Windows <span class="dot"></span> Android <span class="dot"></span> iOS
+      <span class="dot"></span> <span class="free">Free &amp; open source</span>
+    </p>
+    <h1>Your Mac, your PC, your phone — <span class="accent">finally on speaking terms.</span></h1>
+    <p class="hero-sub">
+      Stop emailing yourself snippets and files. ClipboardSS syncs your clipboard and sends files
+      between devices directly over your own Wi-Fi — end-to-end encrypted, with no cloud, no account, no server.
+    </p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary" href="#download">Get ClipboardSS</a>
+      <a class="btn btn-secondary" href="https://github.com/Leo-120619/ClipboardSS">View on GitHub</a>
+    </div>
+    <p class="hero-note">Open source · Donation-funded · Your data never leaves your network</p>
+    <div class="hero-shot">
+      <div class="window">
+        <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+        <img src="assets/dashboard.png" alt="ClipboardSS clipboard history dashboard on macOS showing text and image clips as cards" width="1600" height="893">
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ============ PROBLEM ============ -->
+<section class="problem" aria-labelledby="problem-title">
+  <div class="container">
+    <div class="center">
+      <p class="kicker">The problem</p>
+      <h2 id="problem-title">Working across platforms shouldn't feel like smuggling</h2>
+      <p class="section-sub">
+        If your day spans more than one operating system, you know the drill: getting a simple
+        piece of text or a file from one machine to the other is somehow still hard in 2026.
+      </p>
+    </div>
+    <div class="problem-grid">
+      <article class="problem-card">
+        <div class="icon-chip" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="9" height="7" rx="1"/><rect x="13" y="13" width="9" height="7" rx="1"/><path d="M6.5 11v3a2 2 0 0 0 2 2H13"/><path d="M17.5 13V10a2 2 0 0 0-2-2H11"/></svg>
+        </div>
+        <h3>Your devices don't speak the same language</h3>
+        <p>
+          You write code on a Mac and test on Windows. You read on your phone and work at a desk.
+          Every ecosystem has its own transfer tool — AirDrop only talks to Apple, Nearby Share only
+          to Android and Windows — so moving an error log, an API key, or a build artifact across
+          the fence means USB sticks, cloud drives, or retyping it by hand.
+        </p>
+      </article>
+      <article class="problem-card">
+        <div class="icon-chip teal" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><path d="m22 6-10 7L2 6"/></svg>
+        </div>
+        <h3>The message-yourself workaround</h3>
+        <p>
+          So you email yourself. Or keep a WhatsApp chat with yourself. Or paste snippets into a
+          cloud note. It works — but every private link, password, and document takes a round trip
+          through someone else's server, just to travel two meters across your desk.
+        </p>
+      </article>
+    </div>
+    <p class="punchline">ClipboardSS takes the detour out: <em>your devices talk directly to each other.</em></p>
+  </div>
+</section>
+
+<!-- ============ SOLUTION / CROSS-OS ============ -->
+<section id="sync" aria-labelledby="sync-title">
+  <div class="container">
+    <div class="center">
+      <p class="kicker">The solution</p>
+      <h2 id="sync-title">One clipboard. Four operating systems. Zero cloud.</h2>
+      <p class="section-sub">
+        Copy on one device, paste on another. Send whole files device-to-device.
+        Everything travels over your own Wi-Fi network and nowhere else.
+      </p>
+    </div>
+    <div class="platform-grid">
+      <article class="platform">
+        <div class="icon-chip" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>
+        </div>
+        <h3>macOS</h3>
+        <p>Native Swift app. Clipboard history, OCR, editor, sync &amp; file transfer.</p>
+      </article>
+      <article class="platform">
+        <div class="icon-chip" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        </div>
+        <h3>Windows</h3>
+        <p>Native .NET app with feature parity — history, hotkeys, OCR, tray sync.</p>
+      </article>
+      <article class="platform">
+        <div class="icon-chip" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
+        </div>
+        <h3>Android</h3>
+        <p>Companion app: send clips and files from your pocket to any paired desktop.</p>
+      </article>
+      <article class="platform">
+        <div class="icon-chip" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M10 5h4"/></svg>
+        </div>
+        <h3>iOS</h3>
+        <p>Companion app: share text and files to paired devices via the share sheet.</p>
+      </article>
+    </div>
+    <div class="proto-band">
+      <span class="item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        One wire protocol, parity-tested across three codebases
+      </span>
+      <span class="item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        Clipboard sync for text &amp; images
+      </span>
+      <span class="item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        Encrypted file transfer, SHA-256 verified
+      </span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PAIRING ============ -->
+<section id="pairing" style="padding-top:0" aria-labelledby="pairing-title">
+  <div class="container">
+    <div class="center">
+      <p class="kicker">How it works</p>
+      <h2 id="pairing-title">Paired in thirty seconds. Encrypted forever after.</h2>
+      <p class="section-sub">No sign-up form, no QR-code app, no cloud handshake. Two devices, one code.</p>
+    </div>
+    <div class="steps">
+      <article class="step">
+        <div class="step-num" aria-hidden="true">1</div>
+        <h3>Join the same Wi-Fi</h3>
+        <p>Devices find each other automatically with Bonjour — and if your network blocks it,
+        a built-in subnet scan finds them anyway.</p>
+      </article>
+      <article class="step">
+        <div class="step-num" aria-hidden="true">2</div>
+        <h3>Type the 6-digit code</h3>
+        <p>One device shows a short-lived pairing code; you type it on the other. That's the whole ceremony.</p>
+        <div class="pairing-code" aria-hidden="true">407 213</div>
+      </article>
+      <article class="step">
+        <div class="step-num" aria-hidden="true">3</div>
+        <h3>Keys, not trust</h3>
+        <p>The code seals an <code>X25519</code> key exchange. From then on, every clip and every file chunk
+        is encrypted with <code>ChaCha20-Poly1305</code> — a key only your two devices hold.</p>
+      </article>
+    </div>
+    <div class="center">
+      <a class="spec-link" href="https://github.com/Leo-120619/ClipboardSS/blob/main/docs/wire-protocol.md">
+        Read the wire protocol spec
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DEMO VIDEO ============ -->
+<section id="demo" style="padding-top:0" aria-labelledby="demo-title">
+  <div class="container">
+    <div class="center">
+      <p class="kicker">See it work</p>
+      <h2 id="demo-title">Ninety seconds, no cuts that matter</h2>
+    </div>
+    <div class="video-wrap">
+      <video controls preload="none" poster="assets/demo-poster.jpg" playsinline
+             aria-label="ClipboardSS demo video: cross-device clipboard sync and file transfer, screen text capture, and the annotation editor">
+        <source src="assets/demo.mp4" type="video/mp4">
+        Your browser doesn't support embedded video. <a href="assets/demo.mp4">Download the demo</a> instead.
+      </video>
+      <p class="video-caption">
+        Real footage: pairing two devices, syncing the clipboard across them, sending a file,
+        grabbing text off the screen, and annotating a screenshot.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PRIVACY ============ -->
+<section id="privacy" class="privacy" aria-labelledby="privacy-title">
+  <div class="container">
+    <div class="center">
+      <p class="kicker">Privacy</p>
+      <h2 id="privacy-title">There is no cloud</h2>
+      <p class="section-sub">
+        Not "encrypted in the cloud." Not "we don't look at your data." There is simply no server
+        in the architecture for your data to visit.
+      </p>
+    </div>
+    <div class="privacy-grid">
+      <article class="privacy-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          No account, no server
+        </h3>
+        <p>Nothing to sign up for and nothing to breach. Your devices authenticate each other directly with keys created at pairing.</p>
+      </article>
+      <article class="privacy-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          End-to-end encrypted
+        </h3>
+        <p>X25519 key exchange at pairing, ChaCha20-Poly1305 on every clip and file chunk. Even on your own network, traffic is sealed.</p>
+      </article>
+      <article class="privacy-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+          Verifiable, not promised
+        </h3>
+        <p>The apps, the crypto, and the wire protocol are open source with cross-platform test vectors. The claims above are checkable, not marketing.</p>
+      </article>
+      <article class="privacy-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 1l22 22"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55M5 12.55a10.94 10.94 0 0 1 5.17-2.39M10.71 5.05A16 16 0 0 1 22.58 9M1.42 9a15.91 15.91 0 0 1 4.7-2.88M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/></svg>
+          Offline by default
+        </h3>
+        <p>History, search, OCR and editing all run 100% locally. The network only comes into play when you pair devices — and then only your LAN.</p>
+      </article>
+      <article class="privacy-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          No telemetry
+        </h3>
+        <p>The apps phone home to no one. No analytics, no crash uploaders, no "anonymous usage statistics."</p>
+      </article>
+      <article class="privacy-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Free, funded by users
+        </h3>
+        <p>No paid tier collecting your data to subsidize the free one. If it helps you, you can sponsor development — that's the whole business model.</p>
+      </article>
+    </div>
+    <p class="privacy-quote">"You don't have to trust us — <a href="https://github.com/Leo-120619/ClipboardSS">you can read the code</a>."</p>
+  </div>
+</section>
+
+<!-- ============ FEATURES ============ -->
+<section id="features" aria-labelledby="features-title">
+  <div class="container">
+    <div class="center">
+      <p class="kicker">And on each device</p>
+      <h2 id="features-title">A serious clipboard manager in its own right</h2>
+      <p class="section-sub">Cross-device sync is the headline, but ClipboardSS earns its place on a single machine too.</p>
+    </div>
+
+    <article class="feature">
+      <div>
+        <span class="tag">History</span>
+        <h3>Every copy, kept and searchable</h3>
+        <p>Text and images land as clean visual cards the moment you copy them.</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Fuzzy search across everything you've copied</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Pin what matters; the rest cleans itself up after 7 days</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Click to copy back, double-click to paste straight into the active app</li>
+        </ul>
+      </div>
+      <div class="shot">
+        <img src="assets/dashboard.png" alt="Clipboard history dashboard with search, filters and pinned cards" loading="lazy" width="1600" height="893">
+      </div>
+    </article>
+
+    <article class="feature">
+      <div>
+        <span class="tag">Screen text</span>
+        <h3>Copy text that was never copyable</h3>
+        <p>Hit a hotkey, drag a rectangle over anything on screen — an error dialog, a video frame,
+        a locked PDF — and the text is on your clipboard.</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>On-device OCR: Apple Vision on Mac, Windows OCR on PC</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Your screen contents never leave your machine</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Word and character counts in a status HUD as you capture</li>
+        </ul>
+      </div>
+      <div class="shot">
+        <img src="assets/ocr.png" alt="Drag-to-OCR screen text selector capturing text from a screen region" loading="lazy" width="1600" height="893">
+      </div>
+    </article>
+
+    <article class="feature">
+      <div>
+        <span class="tag">Screenshots</span>
+        <h3>Annotate without opening an editor app</h3>
+        <p>Capture a region with a hotkey, then mark it up right there: arrows, shapes,
+        freehand, text overlays, filters, crop and rotate — and it's back on your clipboard.</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Vector annotations with adjustable brushes and opacity</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Click OCR'd text blocks in any screenshot to copy them</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Saved edits go straight into your history</li>
+        </ul>
+      </div>
+      <div class="shot">
+        <img src="assets/editor.png" alt="Built-in image annotation editor with shapes, arrows and filters" loading="lazy" width="1600" height="1140">
+      </div>
+    </article>
+  </div>
+</section>
+
+<!-- ============ DOWNLOAD ============ -->
+<section id="download" class="problem" aria-labelledby="download-title">
+  <div class="container">
+    <div class="center">
+      <p class="kicker">Get started</p>
+      <h2 id="download-title">Build it from source — it takes minutes</h2>
+      <p class="section-sub">
+        Packaged releases are coming. Until then, ClipboardSS builds with the standard toolchain of each platform.
+      </p>
+    </div>
+    <div class="dl-grid">
+      <article class="dl-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>
+          macOS
+        </h3>
+        <p class="req">Requires macOS 13+, Xcode 15+</p>
+        <div class="codeblock"><button class="copy-btn" type="button" aria-label="Copy macOS build commands"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>git clone https://github.com/Leo-120619/ClipboardSS.git
+cd ClipboardSS
+scripts/build_app.sh
+open build/ClipboardSS.app</div>
+      </article>
+      <article class="dl-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          Windows
+        </h3>
+        <p class="req">Requires Windows 10 (19041+), .NET 8 SDK</p>
+        <div class="codeblock"><button class="copy-btn" type="button" aria-label="Copy Windows build commands"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>git clone https://github.com/Leo-120619/ClipboardSS.git
+cd ClipboardSS\ClipboardSS.Windows
+dotnet build
+dotnet run --project ClipboardSS.App</div>
+      </article>
+      <article class="dl-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
+          Phone companion
+        </h3>
+        <p class="req">Android &amp; iOS · Requires Flutter</p>
+        <div class="codeblock"><button class="copy-btn" type="button" aria-label="Copy companion build commands"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>git clone https://github.com/Leo-120619/ClipboardSS.git
+cd ClipboardSS/clipboard_companion
+flutter pub get
+flutter run</div>
+      </article>
+    </div>
+    <p class="dl-note">
+      Full instructions, permissions notes and troubleshooting live in the
+      <a href="https://github.com/Leo-120619/ClipboardSS#getting-started">README</a>.
+    </p>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section id="faq" aria-labelledby="faq-title">
+  <div class="container">
+    <div class="center">
+      <p class="kicker">FAQ</p>
+      <h2 id="faq-title">Fair questions</h2>
+    </div>
+    <div class="faq" style="margin-top:40px">
+      <details>
+        <summary>Does my data ever touch the internet?</summary>
+        <p>No. Clipboard history, OCR and editing run entirely on-device. Sync and file transfer travel
+        only across your local network, encrypted end-to-end. There is no relay server, no cloud storage,
+        and no telemetry endpoint in the codebase — you can <a href="https://github.com/Leo-120619/ClipboardSS">verify that yourself</a>.</p>
+      </details>
+      <details>
+        <summary>Can I sync over the internet, away from home?</summary>
+        <p>Not today, and that's a deliberate design choice: no server means nothing to trust and nothing to breach.
+        Devices must be on the same network (an office LAN or a phone hotspot both work).</p>
+      </details>
+      <details>
+        <summary>What if my network blocks device discovery?</summary>
+        <p>Discovery uses Bonjour/mDNS first. On networks that block multicast (some offices, some routers),
+        ClipboardSS falls back to a quick scan of your subnet, and paired devices remember each other's addresses.</p>
+      </details>
+      <details>
+        <summary>Which OS versions are supported?</summary>
+        <p>macOS 13 or later, Windows 10 build 19041 or later, plus the Flutter companion on current Android and iOS.
+        On iOS, sending is manual via the share sheet (iOS doesn't allow background clipboard monitoring — no app can do it).</p>
+      </details>
+      <details>
+        <summary>Is it really free?</summary>
+        <p>Yes — free and open source, with no paid tier and no data-funded business model. Development is funded by
+        donations via <a href="https://github.com/sponsors/Leo-120619">GitHub Sponsors</a> and
+        <a href="https://www.buymeacoffee.com/Leo120619">Buy Me a Coffee</a>.</p>
+      </details>
+      <details>
+        <summary>How do file transfers stay safe?</summary>
+        <p>Files travel in encrypted chunks — each one sealed with ChaCha20-Poly1305 under a key derived for that
+        transfer — and the whole file is verified against a SHA-256 hash on arrival. A corrupted or tampered
+        transfer is rejected, not saved.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="container footer-inner">
+    <div class="footer-brand">
+      <img src="assets/logo.png" alt="" width="24" height="24">
+      ClipboardSS
+    </div>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="https://github.com/Leo-120619/ClipboardSS">GitHub</a>
+      <a href="https://github.com/Leo-120619/ClipboardSS/blob/main/docs/wire-protocol.md">Wire protocol</a>
+      <a href="https://github.com/sponsors/Leo-120619">Sponsor</a>
+      <a href="https://www.buymeacoffee.com/Leo120619">Buy me a coffee</a>
+    </nav>
+    <p class="footer-meta">
+      Made by <a href="https://github.com/Leo-120619">Leo-120619</a>. Open source — your clipboard is yours.
+    </p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.copy-btn').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    var text = btn.parentElement.textContent.trim();
+    navigator.clipboard.writeText(text).then(function(){
+      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#3ddbc9" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+      setTimeout(function(){
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+      }, 1600);
+    });
+  });
+});
+</script>
+</body>
+</html>

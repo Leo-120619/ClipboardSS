@@ -40,7 +40,7 @@ public sealed class PairedDeviceStore
             var index = _devices.FindIndex(item => item.Id == device.Id);
             if (index >= 0)
             {
-                _devices[index] = device;
+                _devices[index] = device with { Connected = _devices[index].Connected };
             }
             else
             {

@@ -56,6 +56,33 @@ public sealed class ClipServerRouterTests
         Assert.Equal("{\"status\":\"duplicate\"}", System.Text.Encoding.UTF8.GetString(duplicate.Body));
     }
 
+    [Theory]
+    [InlineData("/v1/clip")]
+    [InlineData("/v1/file/offer")]
+    public async Task ContentRoutesRejectDisconnectedSources(string path)
+    {
+        var backend = new FakeBackend { Connected = false };
+        var router = new ClipServerRouter(Identity, backend);
+        var sourceId = Guid.NewGuid();
+        var key = Enumerable.Repeat((byte)7, 32).ToArray();
+        backend.Keys[sourceId] = key;
+        var payload = path == "/v1/clip"
+            ? EnvelopeCrypto.Seal(TextPayload("hello"), sourceId, key)
+            : EnvelopeCrypto.SealJson(
+                new FileOfferPayload(
+                    "transfer", "test.txt", 4, "text/plain", "hash", 4, 1,
+                    DateTimeOffset.FromUnixTimeSeconds(1_700_000_000), "Mac"),
+                sourceId,
+                key);
+
+        var response = await router.RouteAsync(
+            Request("POST", path, JsonSerializer.SerializeToUtf8Bytes(payload, WireJson.Options)),
+            "host",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(401, response.StatusCode);
+    }
+
     [Fact]
     public async Task PairRoutesUseExpectedStatusesAndCaptureRemoteHost()
     {
@@ -114,7 +141,9 @@ public sealed class ClipServerRouterTests
         public string? RemoteHost { get; private set; }
         public bool ConfirmResult { get; set; } = true;
         public bool RejectPairStart { get; set; }
+        public bool Connected { get; set; } = true;
         public byte[]? GetPairKey(Guid deviceId) => Keys.GetValueOrDefault(deviceId);
+        public bool IsConnected(Guid deviceId) => Connected;
         public ReceiveResult Receive(ClipPayload payload) => new(ReceiveStatus, null);
 
         public Task<PairStartResponse> HandlePairStartAsync(

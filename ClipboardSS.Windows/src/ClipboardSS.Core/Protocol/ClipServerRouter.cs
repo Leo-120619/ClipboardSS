@@ -14,6 +14,7 @@ public sealed record PairConfirmRequest(Guid DeviceId, string Proof);
 public interface IClipServerBackend
 {
     byte[]? GetPairKey(Guid deviceId);
+    bool IsConnected(Guid deviceId) => true;
     ReceiveResult Receive(ClipPayload payload);
     Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, CancellationToken cancellationToken) =>
         Task.FromResult(new FileReceiveResult(404, "unsupported"));
@@ -61,6 +62,8 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
                 {
                     return TextResponse(401, "Unauthorized");
                 }
+                if (!backend.IsConnected(envelope.SourceDeviceId))
+                    return TextResponse(401, "Unauthorized");
 
                 var payload = EnvelopeCrypto.Open(envelope, key);
                 var result = backend.Receive(payload);
@@ -90,6 +93,7 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
                     ?? throw new JsonException("Missing envelope.");
                 var key = backend.GetPairKey(envelope.SourceDeviceId);
                 if (key is null) return TextResponse(401, "Unauthorized");
+                if (!backend.IsConnected(envelope.SourceDeviceId)) return TextResponse(401, "Unauthorized");
                 FileReceiveResult result;
                 if (request.Path == "/v1/file/offer")
                     result = await backend.HandleFileOfferAsync(EnvelopeCrypto.OpenJson<FileOfferPayload>(envelope, key), key, cancellationToken);

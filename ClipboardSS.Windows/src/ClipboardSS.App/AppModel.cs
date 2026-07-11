@@ -207,6 +207,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public bool IsDeviceConnected(Guid deviceId) => PairingCoordinator.PairedStore.IsConnected(deviceId);
+
     public async Task SendFileAsync(string path, Guid deviceId)
     {
         try { await SendFileCoreAsync(path, deviceId); }
@@ -265,11 +267,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         if (_fileCancellations.Remove(transferId, out var cancellation)) cancellation.Cancel();
     }
 
-    // This is intentionally local: a paused receiver rejects new requests with 401,
-    // while a remote device may still consider this pairing active.
-    public byte[]? GetPairKey(Guid deviceId) => PairingCoordinator.PairedStore.IsConnected(deviceId)
-        ? PairingCoordinator.PairedStore.GetKey(deviceId)
-        : null;
+    public byte[]? GetPairKey(Guid deviceId) => PairingCoordinator.PairedStore.GetKey(deviceId);
+    public bool IsConnected(Guid deviceId) => PairingCoordinator.PairedStore.IsConnected(deviceId);
 
     public ReceiveResult Receive(ClipPayload payload)
     {

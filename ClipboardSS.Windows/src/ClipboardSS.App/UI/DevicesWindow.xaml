@@ -58,7 +58,7 @@
                         <ui:Card Padding="12" Background="{DynamicResource ControlFillColorDefaultBrush}" BorderThickness="1" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
                             <DockPanel>
                                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                                    <CheckBox Content="Connected" IsChecked="{Binding Connected}" Tag="{Binding Id}" Margin="0,5,10,0" Click="Connected_OnClick" />
+                                    <ui:Button Content="{Binding ConnectActionLabel}" Tag="{Binding Id}" Margin="0,0,8,0" Click="ToggleConnected_OnClick" />
                                     <ui:Button Content="Send file" Tag="{Binding Id}" Margin="0,0,8,0" Click="SendFile_OnClick" />
                                     <ui:Button Content="Unpair" Tag="{Binding Id}" Appearance="Danger" Click="Unpair_OnClick" />
                                 </StackPanel>

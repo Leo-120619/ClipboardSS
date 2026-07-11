@@ -67,9 +67,10 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         Refresh();
     }
 
-    private void Connected_OnClick(object sender, RoutedEventArgs args)
+    private void ToggleConnected_OnClick(object sender, RoutedEventArgs args)
     {
-        if (sender is CheckBox { Tag: Guid id } checkBox) _model.SetConnected(id, checkBox.IsChecked == true);
+        if (sender is Button { Tag: Guid id })
+            _model.SetConnected(id, !_model.IsDeviceConnected(id));
         Refresh();
     }
 
@@ -104,7 +105,17 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         catch (Exception exception) { ErrorText.Text = exception.Message; }
     }
 
-    private void Refresh() { PairedList.ItemsSource = _model.PairedDevices.ToArray(); TransferList.ItemsSource = _model.Transfers.ToArray(); }
+    private void Refresh()
+    {
+        PairedList.ItemsSource = _model.PairedDevices
+            .Select(device => new PairedDeviceRow(
+                device.Id,
+                device.Name,
+                device.Host,
+                device.Connected ? "Disconnect" : "Connect"))
+            .ToArray();
+        TransferList.ItemsSource = _model.Transfers.ToArray();
+    }
 
     private void OnClosing(object? sender, CancelEventArgs args)
     {
@@ -115,3 +126,5 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         Hide();
     }
 }
+
+internal sealed record PairedDeviceRow(Guid Id, string Name, string? Host, string ConnectActionLabel);

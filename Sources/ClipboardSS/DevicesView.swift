@@ -161,12 +161,9 @@ struct PairedDeviceRow: View {
                 }
             }
             Spacer()
-            Toggle("Connected", isOn: Binding(
-                get: { device.connected },
-                set: { model.setDeviceConnected(device.id, $0) }
-            ))
-            .toggleStyle(.switch)
-            .labelsHidden()
+            Button(device.connected ? "Disconnect" : "Connect") {
+                model.setDeviceConnected(device.id, !device.connected)
+            }
             Button("Send File…") {
                 presentOpenPanel()
             }

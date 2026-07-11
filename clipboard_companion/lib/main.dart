@@ -1522,9 +1522,15 @@ class _PairedDevicesCard extends StatelessWidget {
                           color: theme.colorScheme.primary,
                           onPressed: () => onSendFile!(device.id),
                         ),
-                      Switch(
-                        value: device.connected,
-                        onChanged: (value) => onSetConnected(device.id, value),
+                      TextButton(
+                        onPressed: () =>
+                            onSetConnected(device.id, !device.connected),
+                        style: TextButton.styleFrom(
+                          foregroundColor: theme.colorScheme.primary,
+                        ),
+                        child: Text(
+                          device.connected ? 'Disconnect' : 'Connect',
+                        ),
                       ),
                       TextButton(
                         onPressed: () => onUnpair(device.id),
