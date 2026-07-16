@@ -99,7 +99,7 @@ extension SubnetSweeper {
         }
     }
 
-    private static func probe(host: String, timeoutMs: Int) async -> Peer? {
+    static func probe(host: String, timeoutMs: Int) async -> Peer? {
         let request = HTTPRequest(method: "GET", path: "/v1/id", headers: [:], body: Data())
         let bytes = HTTPCodec.encodeRequest(request, host: "\(host):51888")
         guard

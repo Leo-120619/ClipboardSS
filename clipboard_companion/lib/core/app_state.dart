@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -44,6 +45,38 @@ List<Peer> composeSendTargets(
     if (paired == null || paired.connected) byId[peer.id] = peer;
   }
   return byId.values.toList();
+}
+
+/// Resolves whether each paired device is reachable right now. A device is online
+/// when mDNS already sees it, or when [probe] confirms its stored host answers
+/// with that device's id. Independent of [PairedDevice.connected], which is a
+/// local pause switch rather than a statement about reachability.
+Future<Map<String, bool>> computeDeviceLiveness({
+  required List<PairedDevice> devices,
+  required List<Peer> mdnsPeers,
+  required Future<Peer?> Function(String host) probe,
+}) async {
+  final mdnsIds = {for (final peer in mdnsPeers) peer.id};
+  final online = <String, bool>{};
+
+  await Future.wait(
+    devices.map((device) async {
+      final id = device.id;
+      if (mdnsIds.contains(id)) {
+        online[id] = true;
+        return;
+      }
+      final host = device.host;
+      if (host == null || host.isEmpty) {
+        online[id] = false;
+        return;
+      }
+      final peer = await probe(host);
+      online[id] = peer != null && peer.id == id;
+    }),
+  );
+
+  return online;
 }
 
 List<Peer> composeJoinCandidates(List<Peer> mdnsPeers, List<Peer> sweptPeers) {
@@ -92,6 +125,12 @@ class AppState extends ChangeNotifier {
 
   StreamSubscription<FileTransferReceiveEvent>? _transferSub;
   Timer? _transferGcTimer;
+  Timer? _livenessTimer;
+  http.Client? _livenessClient;
+
+  /// Live reachability per paired device id. In-memory only: it is rebuilt from
+  /// scratch on every refresh, so unpaired devices drop out on their own.
+  final Map<String, bool> deviceOnline = {};
   final Map<String, TransferCancelToken> _sendTokens = {};
   final Set<String> _consumedShareBatchIds = {};
   IncomingShareBatch? pendingShareBatch;
@@ -100,6 +139,7 @@ class AppState extends ChangeNotifier {
   /// In-flight and finished transfers (both directions), newest first.
   final List<FileTransferUiState> transfers = [];
 
+  static const _livenessInterval = Duration(seconds: 5);
   static const _clipsKey = 'saved_clips';
   static const _maxPersistedClipBytes = 4 * 1024 * 1024;
   List<ClipPayload> clips = [];
@@ -292,6 +332,8 @@ class AppState extends ChangeNotifier {
       _coreNetworkingStarted = true;
     }
 
+    _startLivenessTimer();
+
     if (_discoveryRunning) return;
     try {
       await peerBrowser.start(identity);
@@ -355,6 +397,7 @@ class AppState extends ChangeNotifier {
         await pairingCoordinator.startPairing(peer, code);
         lastError = null;
         notifyListeners();
+        unawaited(refreshDeviceLiveness());
         return true;
       } catch (_) {
         // Wrong code, not in hosting mode, or unreachable: try the next candidate.
@@ -365,6 +408,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> pauseSyncServices() async {
     if (!_coreNetworkingStarted || !_discoveryRunning) return;
+    _stopLivenessTimer();
     await peerBrowser.stop();
     await peerAdvertiser.stop();
     _discoveryRunning = false;
@@ -374,6 +418,48 @@ class AppState extends ChangeNotifier {
 
   Future<void> setDeviceConnected(String id, bool connected) async {
     await pairedStore.setConnected(id, connected);
+    notifyListeners();
+  }
+
+  /// Whether [id] answered on the network as of the last liveness refresh.
+  bool isDeviceOnline(String id) => deviceOnline[canonicalDeviceId(id)] ?? false;
+
+  /// Rebuilds [deviceOnline]. Probes run concurrently on a shared client and are
+  /// skipped for devices mDNS already reports, so a refresh stays cheap enough
+  /// to run every [_livenessInterval].
+  Future<void> refreshDeviceLiveness() async {
+    if (!_coreNetworkingStarted) return;
+
+    final client = _livenessClient ??= http.Client();
+    final next = await computeDeviceLiveness(
+      devices: pairedStore.devices,
+      mdnsPeers: peerBrowser.peers,
+      probe: (host) => SubnetSweeper.probeHost(host, client: client),
+    );
+
+    if (mapEquals(deviceOnline, next)) return;
+    deviceOnline
+      ..clear()
+      ..addAll(next);
+    notifyListeners();
+  }
+
+  void _startLivenessTimer() {
+    _livenessTimer?.cancel();
+    _livenessTimer = Timer.periodic(
+      _livenessInterval,
+      (_) => unawaited(refreshDeviceLiveness()),
+    );
+    unawaited(refreshDeviceLiveness());
+  }
+
+  void _stopLivenessTimer() {
+    _livenessTimer?.cancel();
+    _livenessTimer = null;
+    _livenessClient?.close();
+    _livenessClient = null;
+    if (deviceOnline.isEmpty) return;
+    deviceOnline.clear();
     notifyListeners();
   }
 
@@ -686,6 +772,8 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _transferGcTimer?.cancel();
+    _livenessTimer?.cancel();
+    _livenessClient?.close();
     unawaited(_transferSub?.cancel());
     if (_coreNetworkingStarted) {
       unawaited(peerBrowser.stop());

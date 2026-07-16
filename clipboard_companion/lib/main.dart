@@ -1215,6 +1215,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
         const SizedBox(height: 16),
         _PairedDevicesCard(
           devices: state.pairedStore.devices,
+          isOnline: state.isDeviceOnline,
           onSetConnected: state.setDeviceConnected,
           onUnpair: (id) async {
             await state.pairedStore.removeDevice(id);
@@ -1501,12 +1502,14 @@ class _PairingCodeCardState extends State<_PairingCodeCard> {
 
 class _PairedDevicesCard extends StatelessWidget {
   final List<PairedDevice> devices;
+  final bool Function(String id) isOnline;
   final Future<void> Function(String id) onUnpair;
   final Future<void> Function(String id)? onSendFile;
   final Future<void> Function(String id, bool connected) onSetConnected;
 
   const _PairedDevicesCard({
     required this.devices,
+    required this.isOnline,
     required this.onUnpair,
     required this.onSetConnected,
     this.onSendFile,
@@ -1570,15 +1573,62 @@ class _PairedDevicesCard extends StatelessWidget {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
-                                if (device.host != null)
-                                  Text(
-                                    device.host!,
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      color: const Color(
-                                        0xFF134E4A,
-                                      ).withValues(alpha: 0.65),
+                                const SizedBox(height: 3),
+                                Row(
+                                  children: [
+                                    Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: BoxDecoration(
+                                        color: isOnline(device.id)
+                                            ? const Color(0xFF10B981)
+                                            : const Color(
+                                                0xFF134E4A,
+                                              ).withValues(alpha: 0.35),
+                                        shape: BoxShape.circle,
+                                      ),
                                     ),
-                                  ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      isOnline(device.id)
+                                          ? 'Online'
+                                          : 'Offline',
+                                      style: theme.textTheme.bodySmall
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w600,
+                                            color: isOnline(device.id)
+                                                ? const Color(0xFF047857)
+                                                : const Color(
+                                                    0xFF134E4A,
+                                                  ).withValues(alpha: 0.6),
+                                          ),
+                                    ),
+                                    if (device.host != null) ...[
+                                      Text(
+                                        ' · ',
+                                        style: theme.textTheme.bodySmall
+                                            ?.copyWith(
+                                              color: const Color(
+                                                0xFF134E4A,
+                                              ).withValues(alpha: 0.45),
+                                            ),
+                                      ),
+                                      Flexible(
+                                        child: Text(
+                                          device.host!,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: theme.textTheme.bodySmall
+                                              ?.copyWith(
+                                                color: const Color(
+                                                  0xFF134E4A,
+                                                ).withValues(alpha: 0.65),
+                                              ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
                               ],
                             ),
                           ),
@@ -1592,7 +1642,9 @@ class _PairedDevicesCard extends StatelessWidget {
                         children: [
                           if (onSendFile != null)
                             TextButton.icon(
-                              onPressed: () => onSendFile!(device.id),
+                              onPressed: isOnline(device.id)
+                                  ? () => onSendFile!(device.id)
+                                  : null,
                               icon: const Icon(
                                 Icons.upload_file_rounded,
                                 size: 18,

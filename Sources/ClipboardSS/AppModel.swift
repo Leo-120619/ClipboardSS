@@ -25,6 +25,9 @@ final class AppModel: ObservableObject {
     @Published var showDevices = false
     @Published var joinInProgress = false
     @Published private(set) var pairedDevices: [PairedDevice] = []
+    /// Live reachability per paired device. In-memory only: it is rebuilt from scratch
+    /// on every refresh, so unpaired devices drop out on their own.
+    @Published private(set) var onlineDeviceIds: Set<UUID> = []
     @Published private(set) var transfers: [FileTransferState] = []
     @Published var pendingSend: PendingSend?
 
@@ -37,6 +40,8 @@ final class AppModel: ObservableObject {
     private let fileReceiver: FileReceiver
     private var notifiedReceiveIds: Set<String> = []
     private var sendTokens: [UUID: CancellationToken] = [:]
+    private var livenessTask: Task<Void, Never>?
+    private static let livenessInterval = Duration.seconds(5)
     nonisolated static let coachMarksCompletedDefaultsKey = "hasCompletedCoachMarks"
     nonisolated static let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
     nonisolated static let coachMarkStepCount = CoachMarkStep.steps.count
@@ -101,15 +106,55 @@ final class AppModel: ObservableObject {
     /// this app is the target of an incoming request).
     func startNetworking() {
         pairingCoordinator.onPairedDevicesChanged = { [weak self] in
-            Task { @MainActor in await self?.refreshPairedDevices() }
+            Task { @MainActor in
+                await self?.refreshPairedDevices()
+                await self?.refreshDeviceLiveness()
+            }
         }
         clipServer.start()
         peerBrowser.start()
-        Task { await refreshPairedDevices() }
+        Task {
+            await refreshPairedDevices()
+            startLivenessRefresh()
+        }
     }
 
     func refreshPairedDevices() async {
         pairedDevices = await pairingCoordinator.pairedStore.devices
+    }
+
+    /// Polls paired-device reachability on its own cadence. Kept off the app's 0.75s
+    /// clipboard poll: network probes are far too expensive to run at that rate.
+    private func startLivenessRefresh() {
+        livenessTask?.cancel()
+        livenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshDeviceLiveness()
+                try? await Task.sleep(for: Self.livenessInterval)
+            }
+        }
+    }
+
+    func stopLivenessRefresh() {
+        livenessTask?.cancel()
+        livenessTask = nil
+        onlineDeviceIds = []
+    }
+
+    /// Rebuilds `onlineDeviceIds`. Probes run concurrently with a short timeout and are
+    /// skipped for devices mDNS already reports, so a refresh stays cheap.
+    func refreshDeviceLiveness() async {
+        let online = await Self.computeOnlineDeviceIds(
+            devices: pairedDevices,
+            mdnsPeers: peerBrowser.peers,
+            probe: { await SubnetSweeper.probe(host: $0, timeoutMs: 500) }
+        )
+        guard online != onlineDeviceIds else { return }
+        onlineDeviceIds = online
+    }
+
+    func isDeviceOnline(_ id: UUID) -> Bool {
+        onlineDeviceIds.contains(id)
     }
 
     func unpairDevice(_ id: UUID) {
@@ -208,6 +253,38 @@ final class AppModel: ObservableObject {
             byId[peer.id] = peer
         }
         return Array(byId.values)
+    }
+
+    /// Resolves which paired devices are reachable right now. A device is online when
+    /// mDNS already sees it, or when `probe` confirms its stored host answers with that
+    /// device's id. Independent of `PairedDevice.connected`, which is a local pause
+    /// switch rather than a statement about reachability.
+    nonisolated static func computeOnlineDeviceIds(
+        devices: [PairedDevice],
+        mdnsPeers: [Peer],
+        probe: @escaping @Sendable (String) async -> Peer?
+    ) async -> Set<UUID> {
+        let mdnsIds = Set(mdnsPeers.map(\.id))
+
+        return await withTaskGroup(of: UUID?.self) { group in
+            for device in devices {
+                if mdnsIds.contains(device.id) {
+                    group.addTask { device.id }
+                    continue
+                }
+                guard let host = device.host, !host.isEmpty else { continue }
+                group.addTask {
+                    guard let peer = await probe(host), peer.id == device.id else { return nil }
+                    return device.id
+                }
+            }
+
+            var online: Set<UUID> = []
+            for await id in group {
+                if let id { online.insert(id) }
+            }
+            return online
+        }
     }
 
     nonisolated static func composeJoinCandidates(mdnsPeers: [Peer], sweptPeers: [Peer]) -> [Peer] {
@@ -430,6 +507,7 @@ final class AppModel: ObservableObject {
             do {
                 try await pairingCoordinator.startPairing(with: peer, code: code)
                 await refreshPairedDevices()
+                await refreshDeviceLiveness()
                 return true
             } catch {
                 continue

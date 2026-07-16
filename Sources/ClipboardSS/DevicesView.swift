@@ -149,15 +149,27 @@ struct PairedDeviceRow: View {
     let device: PairedDevice
     @ObservedObject var model: AppModel
 
+    private var isOnline: Bool {
+        model.isDeviceOnline(device.id)
+    }
+
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
                 Text(device.name)
                     .font(.headline)
-                if let host = device.host {
-                    Text(host)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(isOnline ? Color.green : Color.secondary.opacity(0.5))
+                        .frame(width: 7, height: 7)
+                    Text(isOnline ? "Online" : "Offline")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(isOnline ? Color.green : Color.secondary)
+                    if let host = device.host {
+                        Text("· \(host)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             Spacer()
@@ -167,7 +179,7 @@ struct PairedDeviceRow: View {
             Button("Send File…") {
                 presentOpenPanel()
             }
-            .disabled(model.resolvePeer(for: device.id) == nil)
+            .disabled(!isOnline || model.resolvePeer(for: device.id) == nil)
             Button("Unpair") {
                 model.unpairDevice(device.id)
             }
