@@ -29,6 +29,9 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private readonly List<FileTransferProgress> _transfers = [];
     private readonly MdnsService _mdns;
     private readonly SubnetSweeper _sweeper;
+    private readonly HashSet<Guid> _onlineDevices = [];
+    private readonly System.Threading.Timer _livenessTimer;
+    private readonly SemaphoreSlim _livenessRefreshLock = new(1, 1);
     private CancellationTokenSource? _clipboardDebounce;
     private string? _lastWrittenHash;
     private Guid? _lastBroadcastClipId;
@@ -60,13 +63,20 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _fileReceiver = fileReceiver;
         _settings = settings;
         _receivedFileNotifications = receivedFileNotifications;
+        _livenessTimer = new System.Threading.Timer(
+            _ => _ = RefreshDeviceLivenessAsync(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _fileReceiver.TransferChanged += UpdateTransfer;
         _clipboard.Changed += ClipboardChanged;
-        _mdns.PeersChanged += (_, _) => OnPropertyChanged(nameof(VisiblePeers));
+        _mdns.PeersChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(VisiblePeers));
+            _ = RefreshDeviceLivenessAsync();
+        };
         PairingCoordinator.PairedDevicesChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(PairedDevices));
             StateChanged?.Invoke(this, EventArgs.Empty);
+            _ = RefreshDeviceLivenessAsync();
         };
     }
 
@@ -99,6 +109,10 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         {
             if (_isSyncPaused == value) return;
             _isSyncPaused = value;
+            _livenessTimer.Change(
+                value ? Timeout.InfiniteTimeSpan : TimeSpan.Zero,
+                value ? Timeout.InfiniteTimeSpan : TimeSpan.FromSeconds(5));
+            if (!value) _ = RefreshDeviceLivenessAsync();
             OnPropertyChanged();
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -107,6 +121,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     public void Start()
     {
         _ = _mdns.Start();
+        _livenessTimer.Change(TimeSpan.Zero, TimeSpan.FromSeconds(5));
         Refresh();
     }
 
@@ -201,6 +216,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     public void Unpair(Guid deviceId)
     {
         PairingCoordinator.PairedStore.RemoveDevice(deviceId);
+        lock (_onlineDevices) _onlineDevices.Remove(deviceId);
         OnPropertyChanged(nameof(PairedDevices));
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -213,6 +229,41 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     }
 
     public bool IsDeviceConnected(Guid deviceId) => PairingCoordinator.PairedStore.IsConnected(deviceId);
+    public bool IsDeviceOnline(Guid deviceId)
+    {
+        lock (_onlineDevices) return _onlineDevices.Contains(deviceId);
+    }
+
+    public async Task RefreshDeviceLivenessAsync(CancellationToken cancellationToken = default)
+    {
+        if (_disposed || IsSyncPaused || !await _livenessRefreshLock.WaitAsync(0, cancellationToken)) return;
+        try
+        {
+            var online = await DeviceLiveness.ResolveOnlineDeviceIdsAsync(
+                PairedDevices,
+                VisiblePeers,
+                _sweeper.ProbeHostAsync,
+                cancellationToken);
+            var changed = false;
+            lock (_onlineDevices)
+            {
+                if (!_onlineDevices.SetEquals(online))
+                {
+                    _onlineDevices.Clear();
+                    _onlineDevices.UnionWith(online);
+                    changed = true;
+                }
+            }
+            if (changed) StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            _livenessRefreshLock.Release();
+        }
+    }
 
     public async Task SendFileAsync(string path, Guid deviceId)
     {
@@ -238,6 +289,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     private async Task SendFileCoreAsync(string path, Guid deviceId)
     {
+        if (!IsDeviceOnline(deviceId))
+            throw new InvalidOperationException("The device is not currently reachable.");
         var peer = ComposeSendTargets(VisiblePeers, PairedDevices).FirstOrDefault(item => item.Id == deviceId)
             ?? throw new InvalidOperationException("The device is not currently reachable.");
         var cancellation = new CancellationTokenSource();
@@ -343,6 +396,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _clipboard.Changed -= ClipboardChanged;
         _clipboardDebounce?.Cancel();
         _clipboardDebounce?.Dispose();
+        _livenessTimer.Dispose();
         _mdns.Dispose();
         _fileReceiver.Dispose();
     }
