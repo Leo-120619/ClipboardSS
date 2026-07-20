@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using Microsoft.Win32;
 
 namespace ClipboardSS.App.UI;
@@ -112,7 +113,8 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
                 device.Id,
                 device.Name,
                 device.Host,
-                device.Connected ? "Disconnect" : "Connect"))
+                device.Connected ? "Disconnect" : "Connect",
+                _model.IsDeviceOnline(device.Id)))
             .ToArray();
         TransferList.ItemsSource = _model.Transfers.ToArray();
     }
@@ -127,4 +129,8 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
     }
 }
 
-internal sealed record PairedDeviceRow(Guid Id, string Name, string? Host, string ConnectActionLabel);
+internal sealed record PairedDeviceRow(Guid Id, string Name, string? Host, string ConnectActionLabel, bool Online)
+{
+    public string StatusText => Online ? "Online" : "Offline";
+    public Brush StatusBrush => Online ? Brushes.LimeGreen : Brushes.Gray;
+}

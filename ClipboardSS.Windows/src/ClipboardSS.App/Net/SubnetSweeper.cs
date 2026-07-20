@@ -34,6 +34,10 @@ public sealed class SubnetSweeper(TimeSpan? timeout = null, int concurrency = 32
         return peers.Values.OrderBy(peer => peer.Name, StringComparer.CurrentCultureIgnoreCase).ToArray();
     }
 
+    /// <summary>Probes one known host for its ClipboardSS identity.</summary>
+    public Task<Peer?> ProbeHostAsync(string host, CancellationToken cancellationToken = default) =>
+        ProbeAsync(host, cancellationToken);
+
     internal static IReadOnlyList<string> HostAddresses(string ownIpv4)
     {
         if (!IPAddress.TryParse(ownIpv4, out var address)) return [];
