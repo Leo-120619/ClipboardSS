@@ -29,6 +29,7 @@
 		4CE75BA08C8A703B597ED847 /* PairingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05EB26C97F57889DA50FF46 /* PairingSession.swift */; };
 		529657BEBE04E1C2D0DBE387 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA042486B9F28FC2A991BB5 /* DeviceIdentity.swift */; };
 		52AA331D4F9626A38E0F167A /* LaunchAtLoginController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D442B0EFE2C18CEF0F7780A /* LaunchAtLoginController.swift */; };
+		62158102D9C2AFDC4E4BE12A /* ReceivedFileNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 524166374EA51A4DBF094053 /* ReceivedFileNotificationService.swift */; };
 		6533B31B391253C44DBD16BC /* ClipboardRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 019B36DE17CEF5D5D0EC4469 /* ClipboardRootView.swift */; };
 		71DE8400C15FB2CC344B18A6 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B633F73072971B8CDD415480 /* main.swift */; };
 		78677A30353C05EB628A61EA /* OCRSelectionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ED7E85E62B3DF303C65A809 /* OCRSelectionState.swift */; };
@@ -122,6 +123,7 @@
 		45F9973F4C24D5D32CCEBB85 /* ClipCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipCard.swift; sourceTree = "<group>"; };
 		461DF30243890CBC60721C45 /* ClipServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipServer.swift; sourceTree = "<group>"; };
 		4D938DBCD7B6812CE576F860 /* ClipboardSS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClipboardSS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		524166374EA51A4DBF094053 /* ReceivedFileNotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceivedFileNotificationService.swift; sourceTree = "<group>"; };
 		5E7DE024C191BB3EA9536A0A /* ClipSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipSender.swift; sourceTree = "<group>"; };
 		617404615A0733214F622DF2 /* ClipEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipEnvelope.swift; sourceTree = "<group>"; };
 		636F2D8CAF716D18A4F5EEB7 /* FileSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSender.swift; sourceTree = "<group>"; };
@@ -259,6 +261,7 @@
 				22D5ACAE3270EE78B3667EC6 /* PeerBrowser.swift */,
 				456CFF7F25EACF8D2E535219 /* PhotoEditorView.swift */,
 				40DD41FBDDCB707B8B0EFCD7 /* PreferencesView.swift */,
+				524166374EA51A4DBF094053 /* ReceivedFileNotificationService.swift */,
 				8408B934E71DE5F8A2090FE1 /* ReceiveSettings.swift */,
 				FA1FB3C5477C43ADBE471313 /* ScreenshotCaptureService.swift */,
 				F1E1C46DB19A8F7CF1957D56 /* ScreenshotReviewView.swift */,
@@ -342,9 +345,6 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
-					1B4269F8823D0DDE0B0DFB59 = {
-						ProvisioningStyle = Manual;
-					};
 					8D1C65D7C537AB12E986B1C2 = {
 						ProvisioningStyle = Manual;
 					};
@@ -443,6 +443,7 @@
 				F73FB48D306595D70DF5AC5E /* PhotoEditorView.swift in Sources */,
 				18C4ECABE234359995367AC3 /* PreferencesView.swift in Sources */,
 				4B0BCEE02A9F6D29DBCC32D7 /* ReceiveSettings.swift in Sources */,
+				62158102D9C2AFDC4E4BE12A /* ReceivedFileNotificationService.swift in Sources */,
 				1A63F11E5CF74B7B9A34BCD1 /* ScreenTextCaptureService.swift in Sources */,
 				BD1ED9B5901215FF8402D7D2 /* ScreenTextOverlayController.swift in Sources */,
 				242474FA05B76DBA34A5822D /* ScreenshotCaptureService.swift in Sources */,
@@ -634,9 +635,10 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_REQUIRED = YES;
 				CODE_SIGN_ENTITLEMENTS = ClipboardSS.entitlements;
-				CODE_SIGN_IDENTITY = "ClipboardSS Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = H2GP3VABB6;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = Info.plist;
@@ -649,6 +651,7 @@
 					"-ObjC",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.local.ClipboardSS;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -685,9 +688,10 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_REQUIRED = YES;
 				CODE_SIGN_ENTITLEMENTS = ClipboardSS.entitlements;
-				CODE_SIGN_IDENTITY = "ClipboardSS Local Code Signing";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = H2GP3VABB6;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = Info.plist;
@@ -700,6 +704,7 @@
 					"-ObjC",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.local.ClipboardSS;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 			};
 			name = Debug;
