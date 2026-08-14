@@ -3,39 +3,127 @@ import Network
 import ClipboardCore
 
 public final class ClipServer: @unchecked Sendable {
-    private let listener: NWListener
     private let receiver: ClipReceiver
     private let pairingCoordinator: PairingCoordinator
     private let identity: DeviceIdentity
     private let fileReceiver: FileReceiver?
+    private let listenerQueue = DispatchQueue(label: "com.local.ClipboardSS.ClipServer.listener")
+    private var listener: NWListener?
+    private var retryWorkItem: DispatchWorkItem?
+    private var isStarted = false
+    private var failureCount = 0
 
     public init(identity: DeviceIdentity, receiver: ClipReceiver, pairingCoordinator: PairingCoordinator, fileReceiver: FileReceiver? = nil) throws {
         self.identity = identity
         self.receiver = receiver
         self.pairingCoordinator = pairingCoordinator
         self.fileReceiver = fileReceiver
-        
-        let parameters = NWParameters.tcp
-        self.listener = try NWListener(using: parameters, on: 51888)
-        
+        self.listener = nil
+        self.listener = try makeListener()
+    }
+
+    public func start() {
+        listenerQueue.async { [weak self] in
+            guard let self, !self.isStarted else { return }
+            self.isStarted = true
+            self.startPreparedListener()
+        }
+    }
+
+    public func stop() {
+        listenerQueue.async { [weak self] in
+            guard let self else { return }
+            self.isStarted = false
+            self.failureCount = 0
+            self.retryWorkItem?.cancel()
+            self.retryWorkItem = nil
+            let current = self.listener
+            self.listener = nil
+            current?.cancel()
+        }
+    }
+
+    static func retryDelaySeconds(failureCount: Int) -> Int {
+        var delay = 1
+        for _ in 1..<max(1, failureCount) {
+            delay = min(delay * 2, 30)
+        }
+        return delay
+    }
+
+    private func makeListener() throws -> NWListener {
+        let listener = try NWListener(using: .tcp, on: 51888)
         var txt = NWTXTRecord()
         txt["deviceId"] = identity.id.uuidString
         txt["deviceName"] = Self.bonjourSafeTXTValue(identity.name)
         txt["v"] = "1"
-        
-        self.listener.service = NWListener.Service(name: identity.id.uuidString, type: "_clipboardss._tcp", domain: "local", txtRecord: txt)
-        
-        self.listener.newConnectionHandler = { [weak self] connection in
+
+        listener.service = NWListener.Service(
+            name: identity.id.uuidString,
+            type: "_clipboardss._tcp",
+            domain: "local",
+            txtRecord: txt
+        )
+        listener.newConnectionHandler = { [weak self] connection in
             self?.handleConnection(connection)
         }
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener else { return }
+            self.handleListenerState(state, for: listener)
+        }
+        return listener
     }
-    
-    public func start() {
-        listener.start(queue: .global())
+
+    private func startPreparedListener() {
+        guard isStarted else { return }
+        if listener == nil {
+            do {
+                listener = try makeListener()
+            } catch {
+                failureCount += 1
+                logToFile("ClipServer: Could not recreate listener: \(error)")
+                scheduleRestart()
+                return
+            }
+        }
+
+        logToFile("ClipServer: Starting listener on TCP 51888")
+        listener?.start(queue: listenerQueue)
     }
-    
-    public func stop() {
-        listener.cancel()
+
+    private func handleListenerState(_ state: NWListener.State, for current: NWListener) {
+        guard listener === current else { return }
+        switch state {
+        case .ready:
+            failureCount = 0
+            logToFile("ClipServer: Listener ready on TCP 51888")
+        case .waiting(let error):
+            logToFile("ClipServer: Listener waiting for network: \(error)")
+        case .failed(let error):
+            logToFile("ClipServer: Listener failed: \(error); scheduling recovery")
+            listener = nil
+            current.cancel()
+            failureCount += 1
+            scheduleRestart()
+        case .cancelled:
+            logToFile("ClipServer: Listener cancelled")
+        case .setup:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    private func scheduleRestart() {
+        guard isStarted, retryWorkItem == nil else { return }
+        let delay = Self.retryDelaySeconds(failureCount: failureCount)
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.retryWorkItem = nil
+            self.startPreparedListener()
+        }
+        retryWorkItem = workItem
+        listenerQueue.asyncAfter(deadline: .now() + .seconds(delay), execute: workItem)
     }
     
     private func handleConnection(_ connection: NWConnection) {
