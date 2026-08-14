@@ -6,19 +6,44 @@ namespace ClipboardSS.App.Tests;
 public sealed class DeviceLivenessTests
 {
     [Fact]
-    public async Task MdnsPeerIsOnlineWithoutAHostProbe()
+    public async Task MdnsPeerMustAnswerWithMatchingIdentityToBeOnline()
     {
         var id = Guid.NewGuid();
-        var probeCalls = 0;
+        var probedHosts = new List<string>();
 
         var online = await DeviceLiveness.ResolveOnlineDeviceIdsAsync(
             [new PairedDevice(id, "Phone", "10.0.0.2")],
-            [new Peer(id, "Phone", "10.0.0.2", 51888)],
-            (_, _) => { probeCalls++; return Task.FromResult<Peer?>(null); },
+            [new Peer(id, "Phone", "10.0.0.3", 51888)],
+            (host, _) =>
+            {
+                probedHosts.Add(host);
+                return Task.FromResult<Peer?>(null);
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(online);
+        Assert.Equal(["10.0.0.3", "10.0.0.2"], probedHosts);
+    }
+
+    [Fact]
+    public async Task CurrentMdnsHostIsProbedBeforeStoredHost()
+    {
+        var id = Guid.NewGuid();
+        var probedHosts = new List<string>();
+
+        var online = await DeviceLiveness.ResolveOnlineDeviceIdsAsync(
+            [new PairedDevice(id, "Mac", "10.0.0.2")],
+            [new Peer(id, "Mac", "10.0.0.3", 51888)],
+            (host, _) =>
+            {
+                probedHosts.Add(host);
+                return Task.FromResult<Peer?>(
+                    host == "10.0.0.3" ? new Peer(id, "Mac", host, 51888) : null);
+            },
             TestContext.Current.CancellationToken);
 
         Assert.Contains(id, online);
-        Assert.Equal(0, probeCalls);
+        Assert.Equal(["10.0.0.3"], probedHosts);
     }
 
     [Fact]
