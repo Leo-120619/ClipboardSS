@@ -18,6 +18,7 @@
 # Build directories
 build/
 DerivedData/
+.worktrees/
 
 # Windows .NET build and MSIX signing output
 ClipboardSS.Windows/bin/
