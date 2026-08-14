@@ -199,4 +199,10 @@ class DesktopShell with TrayListener, WindowListener {
       await windowManager.hide();
     }());
   }
+
+  @override
+  void onWindowMinimize() {
+    // Keep sync running while removing the minimized window from the desktop.
+    unawaited(windowManager.hide());
+  }
 }
