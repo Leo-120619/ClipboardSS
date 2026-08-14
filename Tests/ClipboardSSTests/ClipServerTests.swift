@@ -40,4 +40,12 @@ struct ClipServerTests {
         let ep = NWEndpoint.hostPort(host: .ipv4(IPv4Address("192.168.0.9")!), port: 51888)
         #expect(ClipServer.remoteHost(from: ep) == "192.168.0.9")
     }
+
+    @Test("listener retry delay backs off and caps")
+    func listenerRetryDelay() {
+        #expect(ClipServer.retryDelaySeconds(failureCount: 1) == 1)
+        #expect(ClipServer.retryDelaySeconds(failureCount: 2) == 2)
+        #expect(ClipServer.retryDelaySeconds(failureCount: 3) == 4)
+        #expect(ClipServer.retryDelaySeconds(failureCount: 8) == 30)
+    }
 }

@@ -10,12 +10,11 @@ public sealed class MdnsService : IDisposable
     private const uint DnsRequestPending = 9506;
     private const ushort DnsTypePtr = 12;
     private readonly DeviceIdentity _identity;
-    private readonly ConcurrentDictionary<Guid, SeenPeer> _peers = [];
+    private readonly ConcurrentDictionary<Guid, Peer> _peers = [];
     private readonly ConcurrentDictionary<IntPtr, ResolveOperation> _resolveOperations = [];
     private readonly BrowseCallback _browseCallback;
     private readonly ResolveCallback _resolveCallback;
     private readonly RegisterCallback _registerCallback;
-    private readonly System.Threading.Timer _pruneTimer;
     private IntPtr _browseRequest;
     private IntPtr _browseCancel;
     private IntPtr _browseQueryName;
@@ -29,12 +28,10 @@ public sealed class MdnsService : IDisposable
         _browseCallback = BrowseCompleted;
         _resolveCallback = ResolveCompleted;
         _registerCallback = RegisterCompleted;
-        _pruneTimer = new System.Threading.Timer(_ => Prune(), null, Timeout.Infinite, Timeout.Infinite);
     }
 
     public event EventHandler? PeersChanged;
     public IReadOnlyList<Peer> Peers => _peers.Values
-        .Select(entry => entry.Peer)
         .OrderBy(peer => peer.Name, StringComparer.CurrentCultureIgnoreCase)
         .ToArray();
 
@@ -45,7 +42,6 @@ public sealed class MdnsService : IDisposable
         {
             var registered = Register();
             var browsing = Browse();
-            if (browsing) _pruneTimer.Change(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
             return registered || browsing;
         }
         catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
@@ -58,7 +54,6 @@ public sealed class MdnsService : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _pruneTimer.Dispose();
         if (_browseCancel != IntPtr.Zero) _ = DnsServiceBrowseCancel(_browseCancel);
         if (_registerRequest != IntPtr.Zero) _ = DnsServiceDeRegister(_registerRequest, IntPtr.Zero);
         foreach (var operation in _resolveOperations.Values)
@@ -182,7 +177,7 @@ public sealed class MdnsService : IDisposable
             var name = properties.GetValueOrDefault("deviceName");
             if (string.IsNullOrWhiteSpace(name)) name = id.ToString("D");
             var port = instance.Port == 0 ? (ushort)51888 : instance.Port;
-            _peers[id] = new SeenPeer(new Peer(id, name, host, port), DateTimeOffset.UtcNow);
+            _peers[id] = new Peer(id, name, host, port);
             PeersChanged?.Invoke(this, EventArgs.Empty);
         }
         finally
@@ -196,17 +191,6 @@ public sealed class MdnsService : IDisposable
     {
         if (instancePointer != IntPtr.Zero && instancePointer != _registerInstance)
             DnsServiceFreeInstance(instancePointer);
-    }
-
-    private void Prune()
-    {
-        var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10);
-        var changed = false;
-        foreach (var (id, entry) in _peers)
-        {
-            if (entry.LastSeen < cutoff) changed |= _peers.TryRemove(id, out _);
-        }
-        if (changed) PeersChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private static Dictionary<string, string> ReadProperties(DnsServiceInstance instance)
@@ -236,8 +220,6 @@ public sealed class MdnsService : IDisposable
         Marshal.FreeHGlobal(pointer);
         pointer = IntPtr.Zero;
     }
-
-    private sealed record SeenPeer(Peer Peer, DateTimeOffset LastSeen);
 
     private sealed class ResolveOperation : IDisposable
     {
