@@ -23,6 +23,53 @@ import 'android_downloads.dart';
 import 'subnet_sweeper.dart';
 import 'received_file_notifications.dart';
 
+class AsyncOperationQueue {
+  Future<void> _tail = Future<void>.value();
+
+  Future<void> run(Future<void> Function() operation) {
+    final result = _tail.then((_) => operation());
+    _tail = result.catchError((_) {});
+    return result;
+  }
+}
+
+bool isDeviceConnectionActive({required bool enabled, required bool online}) =>
+    enabled && online;
+
+Peer? matchingReconnectPeer({
+  required String deviceId,
+  required List<Peer> mdnsPeers,
+  required List<Peer> sweptPeers,
+}) {
+  final canonical = canonicalDeviceId(deviceId);
+  for (final peer in [...mdnsPeers, ...sweptPeers]) {
+    if (canonicalDeviceId(peer.id) == canonical) return peer;
+  }
+  return null;
+}
+
+Peer? resolveVerifiedPeer({
+  required PairedDevice device,
+  required bool online,
+  required List<Peer> mdnsPeers,
+}) {
+  if (!isDeviceConnectionActive(enabled: device.connected, online: online)) {
+    return null;
+  }
+  final canonical = canonicalDeviceId(device.id);
+  for (final peer in mdnsPeers) {
+    if (canonicalDeviceId(peer.id) == canonical) return peer;
+  }
+  final host = device.host;
+  if (host == null || host.isEmpty) return null;
+  return Peer(
+    id: canonical,
+    name: device.name,
+    host: host,
+    port: SubnetSweeper.fixedPort,
+  );
+}
+
 List<Peer> composeSendTargets(
   List<Peer> mdnsPeers,
   List<PairedDevice> pairedDevices,
@@ -47,32 +94,40 @@ List<Peer> composeSendTargets(
   return byId.values.toList();
 }
 
-/// Resolves whether each paired device is reachable right now. A device is online
-/// when mDNS already sees it, or when [probe] confirms its stored host answers
-/// with that device's id. Independent of [PairedDevice.connected], which is a
-/// local pause switch rather than a statement about reachability.
+/// Resolves whether each paired device is reachable right now. mDNS and the
+/// stored address provide candidates, but [probe] must confirm that a candidate
+/// answers with the expected device id. Independent of [PairedDevice.connected],
+/// which is a local pause switch rather than a statement about reachability.
 Future<Map<String, bool>> computeDeviceLiveness({
   required List<PairedDevice> devices,
   required List<Peer> mdnsPeers,
   required Future<Peer?> Function(String host) probe,
 }) async {
-  final mdnsIds = {for (final peer in mdnsPeers) peer.id};
   final online = <String, bool>{};
 
   await Future.wait(
     devices.map((device) async {
-      final id = device.id;
-      if (mdnsIds.contains(id)) {
-        online[id] = true;
-        return;
-      }
+      final id = canonicalDeviceId(device.id);
+      final hosts = mdnsPeers
+          .where((peer) => canonicalDeviceId(peer.id) == id)
+          .map((peer) => peer.host)
+          .toList();
       final host = device.host;
-      if (host == null || host.isEmpty) {
+      if (host != null && host.isNotEmpty && !hosts.contains(host)) {
+        hosts.add(host);
+      }
+      if (hosts.isEmpty) {
         online[id] = false;
         return;
       }
-      final peer = await probe(host);
-      online[id] = peer != null && peer.id == id;
+      for (final candidate in hosts) {
+        final peer = await probe(candidate);
+        if (peer != null && canonicalDeviceId(peer.id) == id) {
+          online[id] = true;
+          return;
+        }
+      }
+      online[id] = false;
     }),
   );
 
@@ -127,6 +182,7 @@ class AppState extends ChangeNotifier {
   Timer? _transferGcTimer;
   Timer? _livenessTimer;
   http.Client? _livenessClient;
+  final AsyncOperationQueue _networkTransitions = AsyncOperationQueue();
 
   /// Live reachability per paired device id. In-memory only: it is rebuilt from
   /// scratch on every refresh, so unpaired devices drop out on their own.
@@ -250,7 +306,10 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> startSyncServices() async {
+  Future<void> startSyncServices() =>
+      _enqueueNetworkTransition(_startSyncServices);
+
+  Future<void> _startSyncServices() async {
     if (isReady || isStartingSync) return;
 
     isStartingSync = true;
@@ -277,6 +336,9 @@ class AppState extends ChangeNotifier {
 
   Future<void> retrySyncServices() => startSyncServices();
 
+  Future<void> _enqueueNetworkTransition(Future<void> Function() operation) =>
+      _networkTransitions.run(operation);
+
   Future<bool> _requestSyncPermission() async {
     if (!Platform.isAndroid) return true;
 
@@ -292,32 +354,33 @@ class AppState extends ChangeNotifier {
 
   Future<void> _startCoreNetworking() async {
     if (!_coreNetworkingStarted) {
-      peerBrowser = PeerBrowser();
-      peerAdvertiser = PeerAdvertiser();
-      pairingCoordinator = PairingCoordinator(
+      final nextPeerBrowser = PeerBrowser();
+      final nextPeerAdvertiser = PeerAdvertiser();
+      final nextPairingCoordinator = PairingCoordinator(
         identity: identity,
         pairedStore: pairedStore,
       );
-      clipSender = ClipSender(identity: identity, pairedStore: pairedStore);
-      fileSender = FileSender(identity: identity, pairedStore: pairedStore);
+      final nextClipSender = ClipSender(
+        identity: identity,
+        pairedStore: pairedStore,
+      );
+      final nextFileSender = FileSender(
+        identity: identity,
+        pairedStore: pairedStore,
+      );
 
       final tempDir = await getTemporaryDirectory();
       final transfersDir = Directory('${tempDir.path}/Transfers');
       final destinationDir = await _resolveDestinationDir();
-      fileReceiver = FileReceiver(
+      final nextFileReceiver = FileReceiver(
         pairedStore: pairedStore,
         transfersDirectory: transfersDir,
         destinationProvider: () => destinationDir,
       );
-      _transferSub = fileReceiver.events.listen(handleReceiveEvent);
-      _transferGcTimer = Timer.periodic(
-        const Duration(seconds: 30),
-        (_) => fileReceiver.garbageCollect(),
-      );
 
-      clipServer = ClipServer(
+      final nextClipServer = ClipServer(
         identity: identity,
-        pairingCoordinator: pairingCoordinator,
+        pairingCoordinator: nextPairingCoordinator,
         pairedStore: pairedStore,
         onClipReceived: (payload) {
           clips.insert(0, payload);
@@ -325,10 +388,28 @@ class AppState extends ChangeNotifier {
           notifyListeners();
           onClipReceived?.call(payload);
         },
-        fileReceiver: fileReceiver,
+        fileReceiver: nextFileReceiver,
       );
 
-      await clipServer.start();
+      try {
+        await nextClipServer.start();
+      } catch (_) {
+        await nextFileReceiver.dispose();
+        rethrow;
+      }
+
+      peerBrowser = nextPeerBrowser;
+      peerAdvertiser = nextPeerAdvertiser;
+      pairingCoordinator = nextPairingCoordinator;
+      clipSender = nextClipSender;
+      fileSender = nextFileSender;
+      fileReceiver = nextFileReceiver;
+      clipServer = nextClipServer;
+      _transferSub = fileReceiver.events.listen(handleReceiveEvent);
+      _transferGcTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => fileReceiver.garbageCollect(),
+      );
       _coreNetworkingStarted = true;
     }
 
@@ -406,7 +487,10 @@ class AppState extends ChangeNotifier {
     return false;
   }
 
-  Future<void> pauseSyncServices() async {
+  Future<void> pauseSyncServices() =>
+      _enqueueNetworkTransition(_pauseSyncServices);
+
+  Future<void> _pauseSyncServices() async {
     if (!_coreNetworkingStarted || !_discoveryRunning) return;
     _stopLivenessTimer();
     await peerBrowser.stop();
@@ -417,16 +501,83 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> setDeviceConnected(String id, bool connected) async {
+    if (connected) deviceOnline.remove(canonicalDeviceId(id));
     await pairedStore.setConnected(id, connected);
+    if (connected) {
+      await reconnectDevice(id);
+      return;
+    }
+    lastError = null;
     notifyListeners();
   }
 
-  /// Whether [id] answered on the network as of the last liveness refresh.
-  bool isDeviceOnline(String id) => deviceOnline[canonicalDeviceId(id)] ?? false;
+  bool isDeviceConnected(String id) {
+    final canonical = canonicalDeviceId(id);
+    final device = pairedStore.devices
+        .where((candidate) => candidate.id == canonical)
+        .firstOrNull;
+    return device != null &&
+        isDeviceConnectionActive(
+          enabled: device.connected,
+          online: isDeviceOnline(canonical),
+        );
+  }
 
-  /// Rebuilds [deviceOnline]. Probes run concurrently on a shared client and are
-  /// skipped for devices mDNS already reports, so a refresh stays cheap enough
-  /// to run every [_livenessInterval].
+  Future<bool> reconnectDevice(String id, {bool reportError = true}) async {
+    if (!_coreNetworkingStarted) return false;
+    final canonical = canonicalDeviceId(id);
+    final device = pairedStore.devices
+        .where((candidate) => candidate.id == canonical)
+        .firstOrNull;
+    if (device == null || !device.connected) return false;
+
+    final candidates = <Peer>[
+      ...peerBrowser.peers.where(
+        (peer) => canonicalDeviceId(peer.id) == canonical,
+      ),
+      if (device.host case final host? when host.isNotEmpty)
+        Peer(
+          id: canonical,
+          name: device.name,
+          host: host,
+          port: SubnetSweeper.fixedPort,
+        ),
+    ];
+
+    Peer? matched;
+    for (final candidate in candidates) {
+      final probed = await SubnetSweeper.probeHost(candidate.host);
+      if (probed != null && canonicalDeviceId(probed.id) == canonical) {
+        matched = probed;
+        break;
+      }
+    }
+    matched ??= matchingReconnectPeer(
+      deviceId: canonical,
+      mdnsPeers: const [],
+      sweptPeers: await SubnetSweeper.sweep(),
+    );
+
+    if (matched == null) {
+      deviceOnline[canonical] = false;
+      if (reportError) lastError = 'That device is not reachable right now.';
+      notifyListeners();
+      return false;
+    }
+
+    await pairedStore.updateHost(canonical, matched.host);
+    deviceOnline[canonical] = true;
+    lastError = null;
+    notifyListeners();
+    return true;
+  }
+
+  /// Whether [id] answered on the network as of the last liveness refresh.
+  bool isDeviceOnline(String id) =>
+      deviceOnline[canonicalDeviceId(id)] ?? false;
+
+  /// Rebuilds [deviceOnline]. Device probes run concurrently on a shared client
+  /// and try the current mDNS address before the stored fallback.
   Future<void> refreshDeviceLiveness() async {
     if (!_coreNetworkingStarted) return;
 
@@ -481,18 +632,23 @@ class AppState extends ChangeNotifier {
   /// Resolves the reachable [Peer] for a paired device (mDNS first, then stored host).
   Peer? resolvePeer(String deviceId) {
     final canonical = canonicalDeviceId(deviceId);
-    final targets = composeSendTargets(peerBrowser.peers, pairedStore.devices);
-    for (final peer in targets) {
-      if (peer.id == canonical) return peer;
-    }
-    return null;
+    final device = pairedStore.devices
+        .where((candidate) => candidate.id == canonical)
+        .firstOrNull;
+    if (device == null) return null;
+    return resolveVerifiedPeer(
+      device: device,
+      online: isDeviceOnline(canonical),
+      mdnsPeers: peerBrowser.peers,
+    );
   }
 
   List<PairedDevice> get reachablePairedDevices =>
       pairedStore.devices.where((d) => resolvePeer(d.id) != null).toList();
 
   Future<bool> sendFileTo(File file, String deviceId) async {
-    final peer = resolvePeer(deviceId);
+    final connected = await reconnectDevice(deviceId, reportError: false);
+    final peer = connected ? resolvePeer(deviceId) : null;
     if (peer == null) {
       lastError = 'That device is not reachable right now.';
       notifyListeners();

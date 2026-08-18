@@ -9,11 +9,13 @@ class PairingCoordinator {
   final DeviceIdentity identity;
   final PairedDeviceStore pairedStore;
   final http.Client _client;
+  final Duration requestTimeout;
 
   PairingCoordinator({
     required this.identity,
     required this.pairedStore,
     http.Client? client,
+    this.requestTimeout = const Duration(seconds: 10),
   }) : _client = client ?? http.Client();
 
   final Map<String, PairingSession> _pendingTargetSessions = {};
@@ -82,7 +84,10 @@ class PairingCoordinator {
   }
 
   // Called when this device is the target and the initiator confirms the proof
-  Future<bool> handlePairConfirmRequest(String initiatorId, String proofBase64) async {
+  Future<bool> handlePairConfirmRequest(
+    String initiatorId,
+    String proofBase64,
+  ) async {
     final canonicalInitiatorId = canonicalDeviceId(initiatorId);
     final result = _targetTempResults[canonicalInitiatorId];
     if (result == null) return false;
@@ -125,11 +130,9 @@ class PairingCoordinator {
     });
 
     final uri = Uri.parse('http://${peer.host}:${peer.port}/v1/pair/start');
-    final response = await _client.post(
-      uri,
-      headers: {'Content-Type': 'application/json'},
-      body: reqData,
-    );
+    final response = await _client
+        .post(uri, headers: {'Content-Type': 'application/json'}, body: reqData)
+        .timeout(requestTimeout);
 
     if (response.statusCode != 200) {
       throw Exception('Pair start failed: ${response.statusCode}');
@@ -159,12 +162,16 @@ class PairingCoordinator {
       'proof': base64Encode(proof),
     });
 
-    final confirmUri = Uri.parse('http://${peer.host}:${peer.port}/v1/pair/confirm');
-    final confirmResponse = await _client.post(
-      confirmUri,
-      headers: {'Content-Type': 'application/json'},
-      body: confirmReqData,
+    final confirmUri = Uri.parse(
+      'http://${peer.host}:${peer.port}/v1/pair/confirm',
     );
+    final confirmResponse = await _client
+        .post(
+          confirmUri,
+          headers: {'Content-Type': 'application/json'},
+          body: confirmReqData,
+        )
+        .timeout(requestTimeout);
 
     if (confirmResponse.statusCode == 200) {
       await pairedStore.addDevice(

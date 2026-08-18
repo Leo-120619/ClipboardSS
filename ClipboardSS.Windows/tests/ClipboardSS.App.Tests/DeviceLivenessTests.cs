@@ -5,6 +5,39 @@ namespace ClipboardSS.App.Tests;
 
 public sealed class DeviceLivenessTests
 {
+    [Theory]
+    [InlineData(true, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    public void DisconnectIsShownOnlyForEnabledOnlineDevices(bool enabled, bool online, bool expected)
+    {
+        Assert.Equal(expected, AppModel.IsDeviceConnectionActive(enabled, online));
+    }
+
+    [Fact]
+    public void ReconnectionSelectsMatchingDeviceAtRefreshedAddress()
+    {
+        var target = Guid.NewGuid();
+        var peer = AppModel.MatchingReconnectPeer(
+            target,
+            [new Peer(Guid.NewGuid(), "Other", "10.0.0.8", 51888)],
+            [new Peer(target, "Target", "10.0.0.42", 51888)]);
+
+        Assert.Equal("10.0.0.42", peer?.Host);
+    }
+
+    [Fact]
+    public void FileTargetResolutionRejectsOfflineAndPausedDevices()
+    {
+        var id = Guid.NewGuid();
+        var enabled = new PairedDevice(id, "Mac", "10.0.0.9");
+        var paused = enabled with { Connected = false };
+
+        Assert.Null(AppModel.ResolveVerifiedPeer(enabled, false, []));
+        Assert.Null(AppModel.ResolveVerifiedPeer(paused, true, []));
+        Assert.Equal("10.0.0.9", AppModel.ResolveVerifiedPeer(enabled, true, [])?.Host);
+    }
+
     [Fact]
     public async Task MdnsPeerMustAnswerWithMatchingIdentityToBeOnline()
     {

@@ -82,6 +82,12 @@ public actor PairedDeviceStore {
         devices[index].connected = connected
         try save()
     }
+
+    public func updateHost(_ deviceId: UUID, host: String) throws {
+        guard let index = devices.firstIndex(where: { $0.id == deviceId }) else { return }
+        devices[index].host = host
+        try save()
+    }
     
     private func save() throws {
         let data = try JSONEncoder().encode(devices)

@@ -7,7 +7,8 @@ import Foundation
 func makeTestAppModel(
     store: ClipStore,
     pasteboard: PasteboardClient,
-    launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController()
+    launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
+    screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService()
 ) throws -> AppModel {
     let identity = DeviceIdentity(id: UUID(), name: "Test Mac")
     let pairedStore = try PairedDeviceStore(
@@ -50,6 +51,7 @@ func makeTestAppModel(
         writer: ClipboardWriter(pasteboard: pasteboard, store: store),
         screenshotCaptureService: ScreenshotCaptureService(),
         ocrService: OCRService(),
+        screenTextCaptureService: screenTextCaptureService,
         launchAtLogin: launchAtLogin,
         pasteboard: pasteboard,
         pairingCoordinator: pairingCoordinator,

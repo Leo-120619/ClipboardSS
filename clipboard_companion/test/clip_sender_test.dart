@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 
 import 'package:clipboard_companion/core/clip_sender.dart';
 import 'package:clipboard_companion/core/models.dart';
@@ -31,18 +32,15 @@ void main() {
       }),
     );
 
-    final result = await sender.broadcast(
-      _clip(),
-      [
-        Peer(id: pairedId, name: 'Mac', host: '10.0.0.2', port: 8080),
-        Peer(
-          id: 'a4f030ff-f094-4a28-a3d7-a0d4f0186545',
-          name: 'Other',
-          host: '10.0.0.3',
-          port: 8080,
-        ),
-      ],
-    );
+    final result = await sender.broadcast(_clip(), [
+      Peer(id: pairedId, name: 'Mac', host: '10.0.0.2', port: 8080),
+      Peer(
+        id: 'a4f030ff-f094-4a28-a3d7-a0d4f0186545',
+        name: 'Other',
+        host: '10.0.0.3',
+        port: 8080,
+      ),
+    ]);
 
     expect(result.successCount, 0);
     expect(result.failureCount, 1);
@@ -74,13 +72,38 @@ void main() {
       }),
     );
 
-    final result = await sender.broadcast(
-      _clip(),
-      [Peer(id: peerId, name: 'Mac', host: 'fe80::1', port: 8080)],
-    );
+    final result = await sender.broadcast(_clip(), [
+      Peer(id: peerId, name: 'Mac', host: 'fe80::1', port: 8080),
+    ]);
 
     expect(result.successCount, 1);
     expect(observedUrl, Uri.parse('http://[fe80::1]:8080/v1/clip'));
+  });
+
+  test('broadcast bounds stalled HTTP requests', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final pairedStore = PairedDeviceStore(prefs);
+    const peerId = '550e8400-e29b-41d4-a716-446655440000';
+    await pairedStore.addDevice(
+      PairedDevice(id: peerId, name: 'Mac'),
+      SecretKey(List<int>.filled(32, 1)),
+    );
+    final sender = ClipSender(
+      identity: DeviceIdentity(
+        id: '4d967c79-47dc-4e1f-a3bd-d3160b082da7',
+        name: 'Android',
+      ),
+      pairedStore: pairedStore,
+      client: MockClient((request) => Completer<http.Response>().future),
+      requestTimeout: const Duration(milliseconds: 10),
+    );
+
+    final result = await sender.broadcast(_clip(), [
+      Peer(id: peerId, name: 'Mac', host: '10.0.0.2', port: 51888),
+    ]);
+
+    expect(result.failureCount, 1);
   });
 }
 

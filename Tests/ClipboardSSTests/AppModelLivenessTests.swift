@@ -8,21 +8,65 @@ struct AppModelLivenessTests {
     private let macId = UUID()
     private let pcId = UUID()
 
-    @Test("a device visible over mDNS is online without probing")
-    func mdnsPeerIsOnlineWithoutProbe() async {
+    @Test("disconnect is shown only for an enabled device that is online")
+    func connectionDisplayContract() {
+        #expect(AppModel.isDeviceConnectionActive(enabled: true, online: true))
+        #expect(!AppModel.isDeviceConnectionActive(enabled: true, online: false))
+        #expect(!AppModel.isDeviceConnectionActive(enabled: false, online: true))
+    }
+
+    @Test("reconnection selects the matching device at its refreshed address")
+    func reconnectionSelectsMatchingPeer() {
+        let peer = AppModel.matchingReconnectPeer(
+            deviceId: macId,
+            mdnsPeers: [Peer(id: pcId, name: "Other", host: "10.0.0.8", port: 51888)],
+            sweptPeers: [Peer(id: macId, name: "Mac", host: "10.0.0.42", port: 51888)]
+        )
+
+        #expect(peer?.host == "10.0.0.42")
+    }
+
+    @Test("file target resolution rejects offline and paused devices")
+    func verifiedFileTarget() {
+        let enabled = PairedDevice(id: macId, name: "Mac", host: "10.0.0.9")
+        let paused = PairedDevice(id: macId, name: "Mac", host: "10.0.0.9", connected: false)
+
+        #expect(AppModel.resolveVerifiedPeer(device: enabled, online: false, mdnsPeers: []) == nil)
+        #expect(AppModel.resolveVerifiedPeer(device: paused, online: true, mdnsPeers: []) == nil)
+        #expect(AppModel.resolveVerifiedPeer(device: enabled, online: true, mdnsPeers: [])?.host == "10.0.0.9")
+    }
+
+    @Test("a device visible over mDNS is online only after its address responds")
+    func mdnsPeerIsProbed() async {
         let probed = Probed()
 
         let online = await AppModel.computeOnlineDeviceIds(
             devices: [PairedDevice(id: macId, name: "Mac", host: "10.0.0.9")],
             mdnsPeers: [Peer(id: macId, name: "Mac", host: "192.168.0.4", port: 51888)],
-            probe: { host in
+            probe: { [macId] host in
                 await probed.record(host)
-                return nil
+                return Peer(id: macId, name: "Mac", host: host, port: 51888)
             }
         )
 
         #expect(online == [macId])
-        #expect(await probed.hosts.isEmpty)
+        #expect(await probed.hosts == ["192.168.0.4"])
+    }
+
+    @Test("a stale mDNS address falls back to the stored address")
+    func staleMdnsFallsBackToStoredHost() async {
+        let probed = Probed()
+        let online = await AppModel.computeOnlineDeviceIds(
+            devices: [PairedDevice(id: macId, name: "Mac", host: "10.0.0.9")],
+            mdnsPeers: [Peer(id: macId, name: "Mac", host: "10.0.0.8", port: 51888)],
+            probe: { [macId] host in
+                await probed.record(host)
+                return host == "10.0.0.9" ? Peer(id: macId, name: "Mac", host: host, port: 51888) : nil
+            }
+        )
+
+        #expect(online == [macId])
+        #expect(await probed.hosts == ["10.0.0.8", "10.0.0.9"])
     }
 
     @Test("a probe returning the matching device id marks it online")
@@ -86,8 +130,9 @@ struct AppModelLivenessTests {
                 PairedDevice(id: offId, name: "Off", host: "192.168.0.30")
             ],
             mdnsPeers: [Peer(id: macId, name: "Mac", host: "10.0.0.9", port: 51888)],
-            probe: { [pcId] host in
-                host == "192.168.0.20" ? Peer(id: pcId, name: "PC", host: host, port: 51888) : nil
+            probe: { [macId, pcId] host in
+                if host == "10.0.0.9" { return Peer(id: macId, name: "Mac", host: host, port: 51888) }
+                return host == "192.168.0.20" ? Peer(id: pcId, name: "PC", host: host, port: 51888) : nil
             }
         )
 
@@ -99,7 +144,7 @@ struct AppModelLivenessTests {
         let online = await AppModel.computeOnlineDeviceIds(
             devices: [PairedDevice(id: macId, name: "Mac", host: "10.0.0.9", connected: false)],
             mdnsPeers: [Peer(id: macId, name: "Mac", host: "10.0.0.9", port: 51888)],
-            probe: { _ in nil }
+            probe: { [macId] host in Peer(id: macId, name: "Mac", host: host, port: 51888) }
         )
 
         #expect(online == [macId])

@@ -223,12 +223,93 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     public void SetConnected(Guid deviceId, bool connected)
     {
+        _ = SetConnectedAsync(deviceId, connected);
+    }
+
+    public async Task SetConnectedAsync(Guid deviceId, bool connected, CancellationToken cancellationToken = default)
+    {
+        if (connected)
+            lock (_onlineDevices) _onlineDevices.Remove(deviceId);
         PairingCoordinator.PairedStore.SetConnected(deviceId, connected);
+        if (connected)
+            await ReconnectDeviceAsync(deviceId, true, cancellationToken);
+        else
+            LastError = null;
         OnPropertyChanged(nameof(PairedDevices));
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public bool IsDeviceConnected(Guid deviceId) => PairingCoordinator.PairedStore.IsConnected(deviceId);
+    public bool IsDeviceConnectionActive(Guid deviceId) =>
+        IsDeviceConnectionActive(IsDeviceConnected(deviceId), IsDeviceOnline(deviceId));
+
+    public static bool IsDeviceConnectionActive(bool enabled, bool online) => enabled && online;
+
+    public static Peer? MatchingReconnectPeer(
+        Guid deviceId,
+        IEnumerable<Peer> mdnsPeers,
+        IEnumerable<Peer> sweptPeers) =>
+        mdnsPeers.Concat(sweptPeers).FirstOrDefault(peer => peer.Id == deviceId);
+
+    public static Peer? ResolveVerifiedPeer(
+        PairedDevice device,
+        bool online,
+        IEnumerable<Peer> mdnsPeers)
+    {
+        if (!IsDeviceConnectionActive(device.Connected, online)) return null;
+        var live = mdnsPeers.FirstOrDefault(peer => peer.Id == device.Id);
+        if (live is not null) return live;
+        return string.IsNullOrWhiteSpace(device.Host)
+            ? null
+            : new Peer(device.Id, device.Name, device.Host, 51888);
+    }
+
+    public async Task<bool> ReconnectDeviceAsync(
+        Guid deviceId,
+        bool reportError = true,
+        CancellationToken cancellationToken = default)
+    {
+        var device = PairedDevices.FirstOrDefault(candidate => candidate.Id == deviceId);
+        if (device is null || !device.Connected) return false;
+
+        var candidateHosts = VisiblePeers
+            .Where(peer => peer.Id == deviceId)
+            .Select(peer => peer.Host)
+            .ToList();
+        if (!string.IsNullOrWhiteSpace(device.Host) && !candidateHosts.Contains(device.Host))
+            candidateHosts.Add(device.Host!);
+
+        Peer? match = null;
+        foreach (var host in candidateHosts)
+        {
+            var peer = await _sweeper.ProbeHostAsync(host, cancellationToken);
+            if (peer?.Id != deviceId) continue;
+            match = peer;
+            break;
+        }
+        match ??= MatchingReconnectPeer(
+            deviceId,
+            [],
+            await _sweeper.SweepAsync(cancellationToken));
+
+        lock (_onlineDevices)
+        {
+            if (match is null) _onlineDevices.Remove(deviceId);
+            else _onlineDevices.Add(deviceId);
+        }
+        if (match is null)
+        {
+            if (reportError) LastError = "That device is not reachable right now.";
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return false;
+        }
+
+        PairingCoordinator.PairedStore.UpdateHost(deviceId, match.Host);
+        LastError = null;
+        OnPropertyChanged(nameof(PairedDevices));
+        StateChanged?.Invoke(this, EventArgs.Empty);
+        return true;
+    }
     public bool IsDeviceOnline(Guid deviceId)
     {
         lock (_onlineDevices) return _onlineDevices.Contains(deviceId);
@@ -289,9 +370,10 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     private async Task SendFileCoreAsync(string path, Guid deviceId)
     {
-        if (!IsDeviceOnline(deviceId))
+        if (!await ReconnectDeviceAsync(deviceId, false))
             throw new InvalidOperationException("The device is not currently reachable.");
-        var peer = ComposeSendTargets(VisiblePeers, PairedDevices).FirstOrDefault(item => item.Id == deviceId)
+        var device = PairedDevices.First(item => item.Id == deviceId);
+        var peer = ResolveVerifiedPeer(device, IsDeviceOnline(deviceId), VisiblePeers)
             ?? throw new InvalidOperationException("The device is not currently reachable.");
         var cancellation = new CancellationTokenSource();
         var transferId = Guid.NewGuid().ToString("D").ToLowerInvariant();
@@ -305,13 +387,16 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     {
         var validPaths = paths.Where(File.Exists).ToArray();
         if (validPaths.Length == 0) return;
-        var targets = ComposeSendTargets(VisiblePeers, PairedDevices);
-        if (targets.Count == 0)
+        var targets = PairedDevices
+            .Select(device => ResolveVerifiedPeer(device, IsDeviceOnline(device.Id), VisiblePeers))
+            .OfType<Peer>()
+            .ToArray();
+        if (targets.Length == 0)
         {
             ReportError("Pair a reachable device before sending a file.");
             return;
         }
-        if (targets.Count > 1)
+        if (targets.Length > 1)
         {
             ReportError("Choose Send file next to a device in Devices.");
             DevicesRequested?.Invoke(this, EventArgs.Empty);

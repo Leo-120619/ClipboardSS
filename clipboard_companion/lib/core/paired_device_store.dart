@@ -81,6 +81,24 @@ class PairedDeviceStore {
     );
   }
 
+  Future<void> updateHost(String id, String host) async {
+    final canonicalId = canonicalDeviceId(id);
+    final list = devices;
+    final index = list.indexWhere((device) => device.id == canonicalId);
+    if (index == -1) return;
+    final device = list[index];
+    list[index] = PairedDevice(
+      id: device.id,
+      name: device.name,
+      host: host,
+      connected: device.connected,
+    );
+    await _prefs.setString(
+      _devicesKey,
+      jsonEncode(list.map((device) => device.toJson()).toList()),
+    );
+  }
+
   bool isConnected(String id) =>
       devices
           .where((device) => device.id == canonicalDeviceId(id))

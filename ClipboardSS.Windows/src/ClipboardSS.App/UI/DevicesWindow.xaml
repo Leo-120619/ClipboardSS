@@ -59,7 +59,7 @@
                             <DockPanel>
                                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                                     <ui:Button Content="{Binding ConnectActionLabel}" Tag="{Binding Id}" Margin="0,0,8,0" Click="ToggleConnected_OnClick" />
-                                    <ui:Button Content="Send file" Tag="{Binding Id}" Margin="0,0,8,0" Click="SendFile_OnClick" IsEnabled="{Binding Online}" />
+                                    <ui:Button Content="Send file" Tag="{Binding Id}" Margin="0,0,8,0" Click="SendFile_OnClick" IsEnabled="{Binding CanSend}" />
                                     <ui:Button Content="Unpair" Tag="{Binding Id}" Appearance="Danger" Click="Unpair_OnClick" />
                                 </StackPanel>
                                 <StackPanel>

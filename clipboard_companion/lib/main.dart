@@ -1642,7 +1642,11 @@ class _PairedDevicesCard extends StatelessWidget {
                         children: [
                           if (onSendFile != null)
                             TextButton.icon(
-                              onPressed: isOnline(device.id)
+                              onPressed:
+                                  isDeviceConnectionActive(
+                                    enabled: device.connected,
+                                    online: isOnline(device.id),
+                                  )
                                   ? () => onSendFile!(device.id)
                                   : null,
                               icon: const Icon(
@@ -1652,13 +1656,23 @@ class _PairedDevicesCard extends StatelessWidget {
                               label: const Text('Send file'),
                             ),
                           TextButton(
-                            onPressed: () =>
-                                onSetConnected(device.id, !device.connected),
+                            onPressed: () => onSetConnected(
+                              device.id,
+                              !isDeviceConnectionActive(
+                                enabled: device.connected,
+                                online: isOnline(device.id),
+                              ),
+                            ),
                             style: TextButton.styleFrom(
                               foregroundColor: theme.colorScheme.primary,
                             ),
                             child: Text(
-                              device.connected ? 'Disconnect' : 'Connect',
+                              isDeviceConnectionActive(
+                                    enabled: device.connected,
+                                    online: isOnline(device.id),
+                                  )
+                                  ? 'Disconnect'
+                                  : 'Connect',
                             ),
                           ),
                           TextButton(

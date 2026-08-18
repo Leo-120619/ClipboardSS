@@ -11,7 +11,12 @@ struct ScreenTextCapture {
 }
 
 @MainActor
-final class ScreenTextCaptureService {
+protocol ScreenTextCapturing: AnyObject {
+    func captureAllDisplays() async throws -> ScreenTextCapture
+}
+
+@MainActor
+final class ScreenTextCaptureService: ScreenTextCapturing {
     enum ScreenTextCaptureError: LocalizedError {
         case noTextDetected
         case screenRecordingDenied

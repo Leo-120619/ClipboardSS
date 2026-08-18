@@ -85,9 +85,10 @@ public sealed class SyncCoreTests
         store.AddDevice(device, Enumerable.Repeat((byte)7, 32).ToArray());
         store.SetConnected(device.Id, false);
         store.AddDevice(device with { Name = "Mac renamed" }, Enumerable.Repeat((byte)8, 32).ToArray());
+        store.UpdateHost(device.Id, "192.168.0.42");
 
         var reopened = new PairedDeviceStore(path, keys);
-        Assert.Contains(reopened.Devices, item => item.Host == "192.168.0.4");
+        Assert.Contains(reopened.Devices, item => item.Host == "192.168.0.42");
         Assert.False(reopened.IsConnected(device.Id));
         Assert.Equal("Mac renamed", reopened.Devices.Single(item => item.Id == device.Id).Name);
     }

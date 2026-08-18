@@ -80,6 +80,17 @@ public sealed class PairedDeviceStore
         }
     }
 
+    public void UpdateHost(Guid id, string host)
+    {
+        lock (_gate)
+        {
+            var index = _devices.FindIndex(device => device.Id == id);
+            if (index < 0) return;
+            _devices[index] = _devices[index] with { Host = host };
+            Save();
+        }
+    }
+
     public byte[]? GetKey(Guid deviceId)
     {
         lock (_gate)

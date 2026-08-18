@@ -12,14 +12,17 @@ void main() {
     final key = SecretKey(List<int>.filled(32, 7));
 
     await store.addDevice(
-      PairedDevice(
-        id: '550E8400-E29B-41D4-A716-446655440000',
-        name: 'Mac',
-      ),
+      PairedDevice(id: '550E8400-E29B-41D4-A716-446655440000', name: 'Mac'),
       key,
     );
 
     final stored = await store.getKey('550e8400-e29b-41d4-a716-446655440000');
     expect(await stored?.extractBytes(), await key.extractBytes());
+
+    await store.updateHost(
+      '550e8400-e29b-41d4-a716-446655440000',
+      '192.168.0.42',
+    );
+    expect(store.devices.single.host, '192.168.0.42');
   });
 }

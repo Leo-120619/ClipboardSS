@@ -153,6 +153,10 @@ struct PairedDeviceRow: View {
         model.isDeviceOnline(device.id)
     }
 
+    private var isConnected: Bool {
+        AppModel.isDeviceConnectionActive(enabled: device.connected, online: isOnline)
+    }
+
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
@@ -173,8 +177,8 @@ struct PairedDeviceRow: View {
                 }
             }
             Spacer()
-            Button(device.connected ? "Disconnect" : "Connect") {
-                model.setDeviceConnected(device.id, !device.connected)
+            Button(isConnected ? "Disconnect" : "Connect") {
+                model.setDeviceConnected(device.id, !isConnected)
             }
             Button("Send File…") {
                 presentOpenPanel()

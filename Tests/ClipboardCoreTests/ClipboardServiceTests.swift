@@ -62,9 +62,10 @@ struct ClipboardServiceTests {
 
         let dev = PairedDevice(id: UUID(), name: "Mac", host: "192.168.0.4")
         try await store.addDevice(dev, key: SymmetricKey(size: .bits256))
+        try await store.updateHost(dev.id, host: "192.168.0.42")
 
         let reopened = try PairedDeviceStore(storageURL: tmp, keyStorage: InMemoryPairKeyStorage())
-        #expect(await reopened.devices.contains { $0.host == "192.168.0.4" })
+        #expect(await reopened.devices.contains { $0.host == "192.168.0.42" })
     }
 }
 

@@ -13,6 +13,14 @@ import 'crypto_utils.dart';
 import 'file_receiver.dart';
 import 'file_transfer_models.dart';
 
+class ClipServerStartException implements Exception {
+  final String message;
+  const ClipServerStartException(this.message);
+
+  @override
+  String toString() => message;
+}
+
 class ClipServer {
   final DeviceIdentity identity;
   final PairingCoordinator pairingCoordinator;
@@ -33,6 +41,19 @@ class ClipServer {
 
   static String identityBody(String deviceId, String deviceName) =>
       jsonEncode({'deviceId': deviceId, 'deviceName': deviceName, 'v': 1});
+
+  static String startErrorMessage(SocketException error) {
+    final lower = error.message.toLowerCase();
+    final addressInUse =
+        error.osError?.errorCode == 48 ||
+        error.osError?.errorCode == 98 ||
+        error.osError?.errorCode == 10048 ||
+        lower.contains('shared flag') ||
+        lower.contains('address already in use');
+    return addressInUse
+        ? 'Sync port 51888 is already in use.'
+        : 'Could not start sync networking: ${error.message}';
+  }
 
   /// Builds the request handler (routes + pipeline). Exposed for testing without binding
   /// a socket.
@@ -64,10 +85,7 @@ class ClipServer {
     try {
       _server = await io.serve(handler, InternetAddress.anyIPv4, 51888);
     } on SocketException catch (e) {
-      if (e.osError?.errorCode == 48 || e.osError?.errorCode == 98) {
-        throw Exception('Sync port 51888 is in use');
-      }
-      rethrow;
+      throw ClipServerStartException(startErrorMessage(e));
     }
     developer.log('Listening on port ${_server!.port}', name: 'ClipServer');
   }

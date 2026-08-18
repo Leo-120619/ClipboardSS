@@ -4,9 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('send targets union: live peer wins, stored host used otherwise', () {
-    final mdns = [
-      Peer(id: 'a', name: 'Mac', host: '192.168.0.4', port: 51888),
-    ];
+    final mdns = [Peer(id: 'a', name: 'Mac', host: '192.168.0.4', port: 51888)];
     final paired = [
       PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9'),
       PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20'),
@@ -18,6 +16,33 @@ void main() {
     expect(targets.length, 2);
     expect(targets.firstWhere((p) => p.id == 'a').host, '192.168.0.4');
     expect(targets.firstWhere((p) => p.id == 'b').host, '192.168.0.20');
+  });
+
+  test('file target resolution rejects offline and paused devices', () {
+    final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
+    final paused = PairedDevice(
+      id: 'a',
+      name: 'Mac',
+      host: '10.0.0.9',
+      connected: false,
+    );
+
+    expect(
+      resolveVerifiedPeer(device: device, online: false, mdnsPeers: const []),
+      isNull,
+    );
+    expect(
+      resolveVerifiedPeer(device: paused, online: true, mdnsPeers: const []),
+      isNull,
+    );
+    expect(
+      resolveVerifiedPeer(
+        device: device,
+        online: true,
+        mdnsPeers: const [],
+      )?.host,
+      '10.0.0.9',
+    );
   });
 
   test('join candidates try mDNS first then swept peers', () {

@@ -68,10 +68,10 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         Refresh();
     }
 
-    private void ToggleConnected_OnClick(object sender, RoutedEventArgs args)
+    private async void ToggleConnected_OnClick(object sender, RoutedEventArgs args)
     {
         if (sender is Button { Tag: Guid id })
-            _model.SetConnected(id, !_model.IsDeviceConnected(id));
+            await _model.SetConnectedAsync(id, !_model.IsDeviceConnectionActive(id));
         Refresh();
     }
 
@@ -113,7 +113,7 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
                 device.Id,
                 device.Name,
                 device.Host,
-                device.Connected ? "Disconnect" : "Connect",
+                _model.IsDeviceConnectionActive(device.Id),
                 _model.IsDeviceOnline(device.Id)))
             .ToArray();
         TransferList.ItemsSource = _model.Transfers.ToArray();
@@ -129,8 +129,10 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
     }
 }
 
-internal sealed record PairedDeviceRow(Guid Id, string Name, string? Host, string ConnectActionLabel, bool Online)
+internal sealed record PairedDeviceRow(Guid Id, string Name, string? Host, bool Connected, bool Online)
 {
+    public string ConnectActionLabel => Connected ? "Disconnect" : "Connect";
     public string StatusText => Online ? "Online" : "Offline";
     public Brush StatusBrush => Online ? Brushes.LimeGreen : Brushes.Gray;
+    public bool CanSend => Connected;
 }

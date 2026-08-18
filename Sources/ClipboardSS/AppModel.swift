@@ -48,7 +48,7 @@ final class AppModel: ObservableObject {
     private let writer: ClipboardWriter
     private let screenshotCaptureService: ScreenshotCaptureService
     private let ocrService: OCRService
-    private let screenTextCaptureService: ScreenTextCaptureService
+    private let screenTextCaptureService: any ScreenTextCapturing
     private let launchAtLogin: LaunchAtLoginControlling
     private let pasteboard: PasteboardClient
     private var lastBroadcastClipID: UUID?
@@ -66,7 +66,7 @@ final class AppModel: ObservableObject {
         writer: ClipboardWriter,
         screenshotCaptureService: ScreenshotCaptureService,
         ocrService: OCRService,
-        screenTextCaptureService: ScreenTextCaptureService = ScreenTextCaptureService(),
+        screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
         pasteboard: PasteboardClient,
         pairingCoordinator: PairingCoordinator,
@@ -171,9 +171,89 @@ final class AppModel: ObservableObject {
     func setDeviceConnected(_ id: UUID, _ connected: Bool) {
         Task {
             do {
+                if connected { onlineDeviceIds.remove(id) }
                 try await pairingCoordinator.pairedStore.setConnected(id, connected)
                 await refreshPairedDevices()
+                if connected {
+                    _ = await reconnectDevice(id)
+                } else {
+                    lastError = nil
+                }
             } catch { lastError = error.localizedDescription }
+        }
+    }
+
+    nonisolated static func isDeviceConnectionActive(enabled: Bool, online: Bool) -> Bool {
+        enabled && online
+    }
+
+    func isDeviceConnected(_ id: UUID) -> Bool {
+        guard let device = pairedDevices.first(where: { $0.id == id }) else { return false }
+        return Self.isDeviceConnectionActive(enabled: device.connected, online: isDeviceOnline(id))
+    }
+
+    nonisolated static func matchingReconnectPeer(
+        deviceId: UUID,
+        mdnsPeers: [Peer],
+        sweptPeers: [Peer]
+    ) -> Peer? {
+        (mdnsPeers + sweptPeers).first { $0.id == deviceId }
+    }
+
+    nonisolated static func resolveVerifiedPeer(
+        device: PairedDevice,
+        online: Bool,
+        mdnsPeers: [Peer]
+    ) -> Peer? {
+        guard isDeviceConnectionActive(enabled: device.connected, online: online) else { return nil }
+        if let peer = mdnsPeers.first(where: { $0.id == device.id }) { return peer }
+        guard let host = device.host, !host.isEmpty else { return nil }
+        return Peer(id: device.id, name: device.name, host: host, port: 51888)
+    }
+
+    @discardableResult
+    func reconnectDevice(_ id: UUID, reportError: Bool = true) async -> Bool {
+        guard let device = pairedDevices.first(where: { $0.id == id }), device.connected else {
+            return false
+        }
+
+        var candidateHosts = peerBrowser.peers
+            .filter { $0.id == id }
+            .map(\.host)
+        if let host = device.host, !host.isEmpty, !candidateHosts.contains(host) {
+            candidateHosts.append(host)
+        }
+
+        var match: Peer?
+        for host in candidateHosts {
+            if let peer = await SubnetSweeper.probe(host: host, timeoutMs: 500), peer.id == id {
+                match = peer
+                break
+            }
+        }
+        if match == nil {
+            match = Self.matchingReconnectPeer(
+                deviceId: id,
+                mdnsPeers: [],
+                sweptPeers: await SubnetSweeper.sweep()
+            )
+        }
+
+        guard let match else {
+            onlineDeviceIds.remove(id)
+            if reportError { lastError = "That device is not reachable right now." }
+            return false
+        }
+
+        do {
+            try await pairingCoordinator.pairedStore.updateHost(id, host: match.host)
+            await refreshPairedDevices()
+            onlineDeviceIds.insert(id)
+            lastError = nil
+            return true
+        } catch {
+            if reportError { lastError = error.localizedDescription }
+            return false
         }
     }
 
@@ -255,27 +335,29 @@ final class AppModel: ObservableObject {
         return Array(byId.values)
     }
 
-    /// Resolves which paired devices are reachable right now. A device is online when
-    /// mDNS already sees it, or when `probe` confirms its stored host answers with that
-    /// device's id. Independent of `PairedDevice.connected`, which is a local pause
-    /// switch rather than a statement about reachability.
+    /// Resolves which paired devices are reachable right now. mDNS and the stored
+    /// address provide candidates, but `probe` must confirm the expected device id.
+    /// Independent of `PairedDevice.connected`, which is a local pause switch rather
+    /// than a statement about reachability.
     nonisolated static func computeOnlineDeviceIds(
         devices: [PairedDevice],
         mdnsPeers: [Peer],
         probe: @escaping @Sendable (String) async -> Peer?
     ) async -> Set<UUID> {
-        let mdnsIds = Set(mdnsPeers.map(\.id))
-
         return await withTaskGroup(of: UUID?.self) { group in
             for device in devices {
-                if mdnsIds.contains(device.id) {
-                    group.addTask { device.id }
-                    continue
+                var hosts = mdnsPeers.filter { $0.id == device.id }.map(\.host)
+                if let host = device.host, !host.isEmpty, !hosts.contains(host) {
+                    hosts.append(host)
                 }
-                guard let host = device.host, !host.isEmpty else { continue }
+                guard !hosts.isEmpty else { continue }
                 group.addTask {
-                    guard let peer = await probe(host), peer.id == device.id else { return nil }
-                    return device.id
+                    for host in hosts {
+                        if let peer = await probe(host), peer.id == device.id {
+                            return device.id
+                        }
+                    }
+                    return nil
                 }
             }
 
@@ -310,13 +392,27 @@ final class AppModel: ObservableObject {
 
     /// Resolves the reachable `Peer` for a paired device (mDNS first, then stored host).
     func resolvePeer(for deviceId: UUID) -> Peer? {
-        Self.composeSendTargets(mdnsPeers: peerBrowser.peers, pairedDevices: pairedDevices)
-            .first { $0.id == deviceId }
+        guard let device = pairedDevices.first(where: { $0.id == deviceId }) else { return nil }
+        return Self.resolveVerifiedPeer(
+            device: device,
+            online: isDeviceOnline(deviceId),
+            mdnsPeers: peerBrowser.peers
+        )
     }
 
     /// Sends a file to a paired device. If the device is a single paired peer this is what
     /// drag-and-drop calls; the Devices view calls it per row.
     func sendFile(url: URL, to deviceId: UUID) {
+        Task {
+            guard await reconnectDevice(deviceId, reportError: false) else {
+                lastError = "That device is not reachable right now."
+                return
+            }
+            startFileSend(url: url, to: deviceId)
+        }
+    }
+
+    private func startFileSend(url: URL, to deviceId: UUID) {
         guard let peer = resolvePeer(for: deviceId) else {
             lastError = "That device is not reachable right now."
             return
@@ -591,6 +687,7 @@ final class AppModel: ObservableObject {
     }
 
     func startScreenTextSelection() {
+        guard !isSelectingScreenText else { return }
         isSelectingScreenText = true
         lastError = nil
 

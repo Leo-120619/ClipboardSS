@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -29,11 +30,13 @@ class FileSender {
   final DeviceIdentity identity;
   final PairedDeviceStore pairedStore;
   final http.Client _client;
+  final Duration requestTimeout;
 
   FileSender({
     required this.identity,
     required this.pairedStore,
     http.Client? client,
+    this.requestTimeout = const Duration(seconds: 10),
   }) : _client = client ?? http.Client();
 
   Future<void> sendFile({
@@ -169,11 +172,18 @@ class FileSender {
       port: peer.port,
       path: path,
     );
-    final response = await _client.post(
-      uri,
-      headers: {'Content-Type': contentType, ...headers},
-      body: body is Uint8List ? body : Uint8List.fromList(body),
-    );
+    final http.Response response;
+    try {
+      response = await _client
+          .post(
+            uri,
+            headers: {'Content-Type': contentType, ...headers},
+            body: body is Uint8List ? body : Uint8List.fromList(body),
+          )
+          .timeout(requestTimeout);
+    } on TimeoutException {
+      throw FileSendException('$path timed out');
+    }
     if (response.statusCode != 200) {
       throw FileSendException('$path returned ${response.statusCode}');
     }
