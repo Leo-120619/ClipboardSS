@@ -1,0 +1,55 @@
+Running `(cd /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/; TMPDIR=/var/folders/w7/05b_zh096zb7p9fdw6x2j43w0000gn/T/ PATH=/Users/leolml/.pub-cache/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/Library/Apple/usr/bin:/Users/leolml/Development/flutter/bin:/Users/leolml/.codex/tmp/arg0/codex-arg0kFdmEF:/Users/leolml/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/Users/leolml/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Applications/ChatGPT.app/Contents/Resources HOME=/Users/leolml /Users/leolml/Development/flutter/bin/cache/dart-sdk/bin/dart '--packages=/Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/package_config.json' '/Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/objective_c/de310349bc/hook.dill' '--config=/Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/objective_c/de310349bc/input.json' )`.
+INFO: 2026-08-18 11:53:26.181940: Using compiler /Library/Developer/CommandLineTools/usr/bin/clang from BuildInput.cCompiler.cc.
+
+INFO: 2026-08-18 11:53:26.185959: Running: /Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 -c /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/src/include/dart_api_dl.c -fpic -gline-tables-only -I src -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/include/dart_api_dl.c.o
+
+INFO: 2026-08-18 11:53:26.187036: Running: /Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 -c /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/src/objective_c.c -fpic -gline-tables-only -I src -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c.c.o
+
+INFO: 2026-08-18 11:53:26.187207: Running: /Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 -x objective-c -fobjc-arc -c /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/src/input_stream_adapter.m -fpic -gline-tables-only -I src -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/input_stream_adapter.m.o
+
+INFO: 2026-08-18 11:53:26.187329: Running: /Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 -x objective-c -fobjc-arc -c /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/src/objective_c.m -fpic -gline-tables-only -I src -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c.m.o
+
+INFO: 2026-08-18 11:53:26.187452: Running: /Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 -x objective-c -fobjc-arc -c /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/src/observer.m -fpic -gline-tables-only -I src -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/observer.m.o
+
+INFO: 2026-08-18 11:53:26.187624: Running: /Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 -x objective-c -fobjc-arc -c /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/src/ns_number.m -fpic -gline-tables-only -I src -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/ns_number.m.o
+
+INFO: 2026-08-18 11:53:26.187751: Running: /Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 -x objective-c -fobjc-arc -c /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/src/protocol.m -fpic -gline-tables-only -I src -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/protocol.m.o
+
+INFO: 2026-08-18 11:53:26.187870: Running: /Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 -x objective-c -fobjc-arc -c /Users/leolml/.pub-cache/hosted/pub.dev/objective_c-9.4.1/src/objective_c_bindings_generated.m -fpic -gline-tables-only -I src -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c_bindings_generated.m.o
+
+INFO: 2026-08-18 11:53:26.401463: 
+INFO: 2026-08-18 11:53:26.401548: 
+INFO: 2026-08-18 11:53:26.401579: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c.c.o
+INFO: 2026-08-18 11:53:26.401861: 
+INFO: 2026-08-18 11:53:26.401873: 
+INFO: 2026-08-18 11:53:26.401882: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/include/dart_api_dl.c.o
+INFO: 2026-08-18 11:53:26.402380: 
+INFO: 2026-08-18 11:53:26.402396: 
+INFO: 2026-08-18 11:53:26.402406: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/observer.m.o
+
+INFO: 2026-08-18 11:53:26.402799: 
+INFO: 2026-08-18 11:53:26.402820: 
+INFO: 2026-08-18 11:53:26.402830: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/protocol.m.o
+
+INFO: 2026-08-18 11:53:26.715352: 
+INFO: 2026-08-18 11:53:26.715393: 
+INFO: 2026-08-18 11:53:26.715404: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/ns_number.m.o
+
+INFO: 2026-08-18 11:53:26.722862: 
+INFO: 2026-08-18 11:53:26.722902: 
+INFO: 2026-08-18 11:53:26.722913: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c.m.o
+
+INFO: 2026-08-18 11:53:26.726327: 
+INFO: 2026-08-18 11:53:26.726357: 
+INFO: 2026-08-18 11:53:26.726370: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/input_stream_adapter.m.o
+
+INFO: 2026-08-18 11:53:26.748672: 
+INFO: 2026-08-18 11:53:26.748731: 
+INFO: 2026-08-18 11:53:26.748746: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c_bindings_generated.m.o
+
+INFO: 2026-08-18 11:53:26.749083: Running: /Library/Developer/CommandLineTools/usr/bin/clang -shared -Wl,-encryptable -undefined dynamic_lookup -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -target arm64-apple-darwin -mmacos-version-min=13 /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/include/dart_api_dl.c.o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c.c.o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/input_stream_adapter.m.o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c.m.o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/observer.m.o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/ns_number.m.o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/protocol.m.o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/obj/src/objective_c_bindings_generated.m.o -o /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/objective_c.dylib
+
+INFO: 2026-08-18 11:53:26.869457: 
+INFO: 2026-08-18 11:53:26.869518: 
+INFO: 2026-08-18 11:53:26.869532: Generated /Users/leolml/Development/Clipboard SS/clipboard_companion/.dart_tool/hooks_runner/shared/objective_c/build/de310349bc/objective_c.dylib
+

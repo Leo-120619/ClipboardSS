@@ -1,0 +1,1 @@
+ /Users/leolml/Development/Clipboard\ SS/clipboard_companion/.dart_tool/flutter_build/84f2f661824572eddda6a81b585270f5/dart_build_result.json:  /Users/leolml/Development/Clipboard\ SS/clipboard_companion/.dart_tool/package_config.json /Users/leolml/Development/Clipboard\ SS/clipboard_companion/pubspec.yaml /Users/leolml/Development/flutter/bin/cache/dart-sdk/version

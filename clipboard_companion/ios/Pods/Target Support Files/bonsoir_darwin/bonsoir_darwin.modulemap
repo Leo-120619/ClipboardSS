@@ -1,0 +1,6 @@
+framework module bonsoir_darwin {
+  umbrella header "bonsoir_darwin-umbrella.h"
+
+  export *
+  module * { export * }
+}

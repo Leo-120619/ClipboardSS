@@ -1,0 +1,37 @@
+{
+  "name": "bonsoir_darwin",
+  "version": "0.0.1",
+  "summary": "Allows you to discover network services and to broadcast your own. Based on Bonjour and NSD.",
+  "description": "A Zeroconf library that allows you to discover network services and to broadcast your own. Based on Apple Bonjour and Android NSD.",
+  "homepage": "https://github.com/Skyost/Bonsoir",
+  "license": {
+    "file": "../LICENSE"
+  },
+  "authors": {
+    "Skyost": "me@skyost.eu"
+  },
+  "source": {
+    "path": "."
+  },
+  "source_files": "bonsoir_darwin/Sources/bonsoir_darwin/**/*.swift",
+  "ios": {
+    "dependencies": {
+      "Flutter": []
+    }
+  },
+  "osx": {
+    "dependencies": {
+      "FlutterMacOS": []
+    }
+  },
+  "platforms": {
+    "ios": "13.0",
+    "osx": "10.15"
+  },
+  "pod_target_xcconfig": {
+    "DEFINES_MODULE": "YES",
+    "VALID_ARCHS[sdk=iphonesimulator*]": "x86_64"
+  },
+  "swift_versions": "5.0",
+  "swift_version": "5.0"
+}
