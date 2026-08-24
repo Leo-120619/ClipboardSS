@@ -65,13 +65,7 @@ private struct AppModelCoachMarkFixture {
         let pasteboard = CoachMarkFakePasteboard()
         self.store = store
         self.pasteboard = pasteboard
-        self.model = AppModel(
-            store: store,
-            writer: ClipboardWriter(pasteboard: pasteboard, store: store),
-            screenshotCaptureService: ScreenshotCaptureService(),
-            ocrService: OCRService(),
-            pasteboard: pasteboard
-        )
+        self.model = try makeTestAppModel(store: store, pasteboard: pasteboard)
     }
 }
 

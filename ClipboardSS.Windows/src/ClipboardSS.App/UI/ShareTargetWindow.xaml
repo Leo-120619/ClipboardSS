@@ -1,0 +1,38 @@
+<ui:FluentWindow x:Class="ClipboardSS.App.UI.ShareTargetWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        Title="Share with ClipboardSS" Width="460" Height="520"
+        WindowStartupLocation="CenterScreen" ExtendsContentIntoTitleBar="True"
+        WindowBackdropType="Mica" Background="{DynamicResource ApplicationBackgroundBrush}">
+    <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <ui:TitleBar Title="Share with ClipboardSS" />
+        <Grid Grid.Row="1" Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <TextBlock FontSize="24" FontWeight="SemiBold" Text="Choose a device" />
+            <TextBlock x:Name="FilesText" Grid.Row="1" Margin="0,8,0,16" TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+            <StackPanel x:Name="EmptyPanel" Grid.Row="2" Margin="0,0,0,12" Visibility="Collapsed">
+                <TextBlock Text="No paired device is currently reachable." TextWrapping="Wrap" />
+                <ui:Button Margin="0,10,0,0" HorizontalAlignment="Left" Content="Pair or manage devices" Click="Pair_OnClick" />
+            </StackPanel>
+            <ListBox x:Name="TargetList" Grid.Row="3" Background="Transparent" BorderThickness="0">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <ui:Button Margin="0,0,0,8" Padding="14" HorizontalContentAlignment="Stretch"
+                                   Tag="{Binding Id}" Click="Target_OnClick">
+                            <StackPanel><TextBlock FontWeight="SemiBold" Text="{Binding Name}" />
+                                <TextBlock Margin="0,3,0,0" Text="{Binding Host}" FontSize="12"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" /></StackPanel>
+                        </ui:Button>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+            <ui:Button Grid.Row="4" HorizontalAlignment="Right" Content="Cancel" Click="Cancel_OnClick" />
+        </Grid>
+    </Grid>
+</ui:FluentWindow>

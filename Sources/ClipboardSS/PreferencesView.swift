@@ -66,6 +66,24 @@ struct PreferencesView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
+                Text("Received files").font(.headline)
+                Text(ReceiveSettings.resolvedDirectory().path)
+                    .font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
+                HStack {
+                    Button("Change…") {
+                        if let folder = ReceiveSettings.chooseDirectory() {
+                            ReceiveSettings.path = folder.path
+                            ReceiveSettings.mode = .defaultFolder
+                        }
+                    }
+                    Toggle("Ask every time", isOn: Binding(
+                        get: { ReceiveSettings.mode == .askEveryTime },
+                        set: { ReceiveSettings.mode = $0 ? .askEveryTime : .defaultFolder }
+                    ))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Help")
                     .font(.headline)
                 Button("Show Tour") {

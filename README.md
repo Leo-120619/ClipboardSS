@@ -6,6 +6,8 @@
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?style=flat-square&logo=github-sponsors)](https://github.com/sponsors/Leo-120619)
 [![Buy Me A Coffee](https://img.shields.io/badge/Donate-Buy%20Me%20A%20Coffee-ffdd00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/Leo120619)
 
+**[Website →](https://leo-120619.github.io/ClipboardSS/)**
+
 A native macOS clipboard history manager that stores text and images, performs local Optical Character Recognition (OCR), captures custom screen text regions, and provides a built-in image annotation canvas.
 
 ---

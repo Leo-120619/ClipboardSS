@@ -66,6 +66,11 @@ final class ClipboardWindowController {
         model.showPreferences = true
     }
 
+    func showDevices() {
+        show(activating: true)
+        model.showDevices = true
+    }
+
     func performPaste(_ request: PasteRequest) {
         guard AppPermission.accessibility.isGranted else {
             model.lastError = AppPermission.accessibility.deniedMessage

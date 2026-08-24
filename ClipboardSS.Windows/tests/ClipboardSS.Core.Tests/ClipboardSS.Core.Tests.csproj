@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/ClipboardSS.Core/ClipboardSS.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../src/ClipboardSS.App/Settings/AppSettings.cs" Link="AppSettings.cs" />
+    <Compile Include="../../src/ClipboardSS.App/Settings/SettingsStore.cs" Link="SettingsStore.cs" />
+  </ItemGroup>
+</Project>
