@@ -120,4 +120,43 @@ struct ScreenTextSelectionTests {
         #expect(selection.selectedIDs.isEmpty)
         #expect(selection.anchorID == nil)
     }
+
+    @Test("words on one line stay left-to-right even when their tops differ")
+    func mixedHeightWordsKeepLineOrder() {
+        var selection = ScreenTextSelectionState(blocks: [
+            ScreenTextBlock(id: "z-small", text: "small", bounds: CGRect(x: 0, y: 10, width: 36, height: 12), displayID: 1, source: .ocr),
+            ScreenTextBlock(id: "a-big", text: "Big", bounds: CGRect(x: 40, y: 0, width: 40, height: 30), displayID: 1, source: .ocr)
+        ])
+
+        selection.selectAll(displayID: 1)
+
+        #expect(selection.selectedText == "small Big")
+    }
+
+    @Test("blocks sharing an OCR lineID are ordered by x, never by id")
+    func providedLineIDsAreRespected() {
+        var selection = ScreenTextSelectionState(blocks: [
+            ScreenTextBlock(id: "a", text: "world", bounds: CGRect(x: 60, y: 6, width: 50, height: 14), displayID: 1, source: .ocr, lineID: "L1"),
+            ScreenTextBlock(id: "b", text: "hello", bounds: CGRect(x: 0, y: 0, width: 50, height: 20), displayID: 1, source: .ocr, lineID: "L1"),
+            ScreenTextBlock(id: "c", text: "next", bounds: CGRect(x: 0, y: 30, width: 40, height: 20), displayID: 1, source: .ocr, lineID: "L2")
+        ])
+
+        selection.selectAll(displayID: 1)
+
+        #expect(selection.selectedText == "hello world\nnext")
+    }
+
+    @Test("dragging from mid first line to mid last line selects the reading-order range")
+    func dragAcrossLinesSelectsReadingRange() {
+        var selection = ScreenTextSelectionState(blocks: [
+            ScreenTextBlock(id: "1a", text: "one", bounds: CGRect(x: 0, y: 0, width: 30, height: 18), displayID: 1, source: .ocr),
+            ScreenTextBlock(id: "1b", text: "two", bounds: CGRect(x: 40, y: 0, width: 30, height: 18), displayID: 1, source: .ocr),
+            ScreenTextBlock(id: "2a", text: "three", bounds: CGRect(x: 0, y: 30, width: 30, height: 18), displayID: 1, source: .ocr),
+            ScreenTextBlock(id: "2b", text: "four", bounds: CGRect(x: 40, y: 30, width: 30, height: 18), displayID: 1, source: .ocr)
+        ])
+
+        selection.selectRange(from: CGPoint(x: 55, y: 9), to: CGPoint(x: 15, y: 39))
+
+        #expect(selection.selectedText == "two\nthree")
+    }
 }

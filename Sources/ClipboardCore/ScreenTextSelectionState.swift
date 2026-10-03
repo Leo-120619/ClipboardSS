@@ -52,8 +52,7 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
         anchorID: String? = nil,
         joinMode: ScreenTextJoinMode = .lines
     ) {
-        let prepared = Self.sortedForReading(Self.deduplicated(blocks))
-        self.blocks = Self.assignLineIDsIfNeeded(prepared)
+        self.blocks = Self.orderedForReading(Self.deduplicated(blocks))
         self.selectedIDs = selectedIDs
         self.anchorID = anchorID
         self.joinMode = joinMode
@@ -73,8 +72,7 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
     }
 
     public static func joinedText(blocks: [ScreenTextBlock], mode: ScreenTextJoinMode) -> String {
-        let prepared = assignLineIDsIfNeeded(sortedForReading(deduplicated(blocks)))
-        return join(blocks: prepared, mode: mode)
+        join(blocks: orderedForReading(deduplicated(blocks)), mode: mode)
     }
 
     private static func join(blocks: [ScreenTextBlock], mode: ScreenTextJoinMode) -> String {
@@ -207,7 +205,7 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
             if lhs.source != rhs.source {
                 return lhs.source == .accessibility
             }
-            return isOrderedBefore(lhs, rhs)
+            return isPositionedBefore(lhs, rhs)
         }
 
         var accepted: [ScreenTextBlock] = []
@@ -218,21 +216,54 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
             accepted.append(block)
         }
 
-        return sortedForReading(accepted)
+        return accepted.sorted(by: isPositionedBefore)
     }
 
-    private static func sortedForReading(_ blocks: [ScreenTextBlock]) -> [ScreenTextBlock] {
-        blocks.sorted(by: isOrderedBefore)
+    /// Orders blocks top-to-bottom by line, then left-to-right within each line.
+    /// Bounds use a top-left origin, so a smaller minY is higher on screen.
+    static func orderedForReading(_ blocks: [ScreenTextBlock]) -> [ScreenTextBlock] {
+        let lined = assignLineIDsIfNeeded(blocks)
+
+        var lineTops: [String: CGFloat] = [:]
+        for block in lined {
+            let key = lineKey(block)
+            lineTops[key] = min(lineTops[key] ?? .infinity, block.bounds.minY)
+        }
+
+        return lined.sorted { lhs, rhs in
+            if lhs.displayID != rhs.displayID {
+                return lhs.displayID < rhs.displayID
+            }
+            let lhsLine = lineKey(lhs)
+            let rhsLine = lineKey(rhs)
+            if lhsLine != rhsLine {
+                let lhsTop = lineTops[lhsLine] ?? lhs.bounds.minY
+                let rhsTop = lineTops[rhsLine] ?? rhs.bounds.minY
+                if lhsTop != rhsTop {
+                    return lhsTop < rhsTop
+                }
+                return lhsLine < rhsLine
+            }
+            if lhs.bounds.minX != rhs.bounds.minX {
+                return lhs.bounds.minX < rhs.bounds.minX
+            }
+            return lhs.id < rhs.id
+        }
     }
 
-    private static func isOrderedBefore(_ lhs: ScreenTextBlock, _ rhs: ScreenTextBlock) -> Bool {
+    private static func lineKey(_ block: ScreenTextBlock) -> String {
+        "\(block.displayID)|\(block.lineID ?? block.id)"
+    }
+
+    /// Strict positional ordering (no tolerance) so the comparator stays transitive.
+    private static func isPositionedBefore(_ lhs: ScreenTextBlock, _ rhs: ScreenTextBlock) -> Bool {
         if lhs.displayID != rhs.displayID {
             return lhs.displayID < rhs.displayID
         }
-        if abs(lhs.bounds.minY - rhs.bounds.minY) > 4 {
+        if lhs.bounds.minY != rhs.bounds.minY {
             return lhs.bounds.minY < rhs.bounds.minY
         }
-        if abs(lhs.bounds.minX - rhs.bounds.minX) > 4 {
+        if lhs.bounds.minX != rhs.bounds.minX {
             return lhs.bounds.minX < rhs.bounds.minX
         }
         return lhs.id < rhs.id
@@ -284,40 +315,42 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
         return intersectionArea / unionArea
     }
 
+    /// Clusters blocks that have no lineID into lines by vertical center. Blocks that already
+    /// carry a lineID (e.g. words from the same OCR observation) keep it.
     static func assignLineIDsIfNeeded(_ blocks: [ScreenTextBlock]) -> [ScreenTextBlock] {
         guard blocks.contains(where: { $0.lineID == nil }) else {
             return blocks
         }
 
-        let grouped = Dictionary(grouping: blocks.enumerated().map { ($0.offset, $0.element) }) { $0.1.displayID }
+        var assigned = blocks
+        let unassigned = blocks.indices.filter { blocks[$0].lineID == nil }
+        let byDisplay = Dictionary(grouping: unassigned) { blocks[$0].displayID }
 
-        var assigned = Array(repeating: ScreenTextBlock(id: "", text: "", bounds: .zero, displayID: 0, source: .ocr), count: blocks.count)
-        for (displayID, indexed) in grouped {
-            let sorted = indexed.sorted { lhs, rhs in
-                if abs(lhs.1.bounds.minY - rhs.1.bounds.minY) > 4 {
-                    return lhs.1.bounds.minY < rhs.1.bounds.minY
+        for (displayID, indices) in byDisplay {
+            let sorted = indices.sorted { lhs, rhs in
+                let l = blocks[lhs].bounds
+                let r = blocks[rhs].bounds
+                if l.midY != r.midY {
+                    return l.midY < r.midY
                 }
-                return lhs.1.bounds.minX < rhs.1.bounds.minX
+                return l.minX < r.minX
             }
 
             var lineIndex = 0
-            var lineMinY: CGFloat = -.infinity
+            var lineMidY: CGFloat?
             var lineHeight: CGFloat = 0
 
-            for (originalIndex, block) in sorted {
-                var updated = block
-                if updated.lineID == nil {
-                    let threshold = max(4, min(block.bounds.height, lineHeight) * 0.5)
-                    if abs(block.bounds.minY - lineMinY) > threshold {
-                        lineIndex += 1
-                        lineMinY = block.bounds.minY
-                        lineHeight = block.bounds.height
-                    } else {
-                        lineHeight = (lineHeight + block.bounds.height) / 2
-                    }
-                    updated.lineID = "\(displayID):\(lineIndex)"
+            for index in sorted {
+                let bounds = blocks[index].bounds
+                if let midY = lineMidY,
+                   abs(bounds.midY - midY) <= max(4, min(bounds.height, lineHeight) * 0.5) {
+                    lineHeight = max(lineHeight, bounds.height)
+                } else {
+                    lineIndex += 1
+                    lineMidY = bounds.midY
+                    lineHeight = bounds.height
                 }
-                assigned[originalIndex] = updated
+                assigned[index].lineID = "\(displayID):\(lineIndex)"
             }
         }
 

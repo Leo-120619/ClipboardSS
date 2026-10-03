@@ -20,6 +20,7 @@ final class ScreenTextOverlayController {
             }
         )
 
+        let primaryScreenMaxY = NSScreen.screens.first?.frame.maxY ?? 0
         for screen in NSScreen.screens {
             guard let displayID = screen.displayID else {
                 continue
@@ -45,7 +46,7 @@ final class ScreenTextOverlayController {
             window.contentView = NSHostingView(rootView: ScreenTextOverlayView(
                 model: model,
                 displayID: displayID,
-                screenFrame: screen.frame,
+                screenRect: screen.frame.topLeftOrigin(primaryScreenMaxY: primaryScreenMaxY),
                 snapshot: NSImage(cgImage: snapshot, size: screen.frame.size)
             ))
             window.makeKeyAndOrderFront(nil)
@@ -161,7 +162,8 @@ private final class ScreenTextOverlayWindow: NSWindow {
 private struct ScreenTextOverlayView: View {
     @ObservedObject var model: ScreenTextOverlayModel
     let displayID: UInt32
-    let screenFrame: CGRect
+    /// This screen's frame in the top-left-origin global space used by ScreenTextBlock bounds.
+    let screenRect: CGRect
     let snapshot: NSImage
     @State private var dragAnchorPoint: CGPoint?
     @State private var dragShiftExtending = false
@@ -317,8 +319,8 @@ private struct ScreenTextOverlayView: View {
 
     private func localRect(for globalRect: CGRect) -> CGRect {
         CGRect(
-            x: globalRect.minX - screenFrame.minX,
-            y: screenFrame.maxY - globalRect.maxY,
+            x: globalRect.minX - screenRect.minX,
+            y: globalRect.minY - screenRect.minY,
             width: globalRect.width,
             height: globalRect.height
         )
@@ -326,8 +328,8 @@ private struct ScreenTextOverlayView: View {
 
     private func globalPoint(from localPoint: CGPoint) -> CGPoint {
         CGPoint(
-            x: screenFrame.minX + localPoint.x,
-            y: screenFrame.maxY - localPoint.y
+            x: screenRect.minX + localPoint.x,
+            y: screenRect.minY + localPoint.y
         )
     }
 }
