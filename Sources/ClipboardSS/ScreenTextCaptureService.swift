@@ -85,7 +85,7 @@ final class ScreenTextCaptureService {
     private func recognizeText(in image: CGImage, displayID: UInt32, screenRect: CGRect) throws -> [ScreenTextBlock] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = false
 
         let handler = VNImageRequestHandler(cgImage: image)
         try handler.perform([request])

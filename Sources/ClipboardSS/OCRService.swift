@@ -20,7 +20,7 @@ final class OCRService {
 
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
+            request.usesLanguageCorrection = false
 
             let handler = VNImageRequestHandler(cgImage: cgImage)
             try handler.perform([request])
