@@ -55,9 +55,12 @@ final class ScreenTextCaptureService {
                 excludingApplications: excludedApps,
                 exceptingWindows: []
             )
+            // SCDisplay reports its size in points; capture at the backing pixel size so
+            // Retina displays are OCR'd at full resolution instead of a 1x downsample.
+            let scale = screen.backingScaleFactor
             let configuration = SCStreamConfiguration()
-            configuration.width = display.width
-            configuration.height = display.height
+            configuration.width = Int((CGFloat(display.width) * scale).rounded())
+            configuration.height = Int((CGFloat(display.height) * scale).rounded())
             configuration.showsCursor = false
 
             let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
