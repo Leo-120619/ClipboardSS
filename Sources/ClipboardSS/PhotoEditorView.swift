@@ -1030,7 +1030,7 @@ struct PhotoEditorView: View {
         context.saveGState()
         context.concatenate(finalTransform)
         if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            context.draw(cgImage, in: CGRect(origin: .zero, size: originalSize))
+            Self.drawUpright(cgImage, in: CGRect(origin: .zero, size: originalSize), context: context)
         }
         context.restoreGState()
         
@@ -1153,4 +1153,17 @@ struct DrawingPath: Identifiable, Equatable {
     var lineWidth: CGFloat
     var opacity: Double
     var isEraser: Bool
+}
+
+extension PhotoEditorView {
+    /// Draws `image` right side up in a context whose CTM has been flipped to y-down.
+    /// `CGContext.draw` lays images out y-up, so without this local flip the bitmap lands
+    /// upside down while the (y-down) annotation paths stay correct.
+    nonisolated static func drawUpright(_ image: CGImage, in rect: CGRect, context: CGContext) {
+        context.saveGState()
+        context.translateBy(x: rect.minX, y: rect.maxY)
+        context.scaleBy(x: 1, y: -1)
+        context.draw(image, in: CGRect(origin: .zero, size: rect.size))
+        context.restoreGState()
+    }
 }
