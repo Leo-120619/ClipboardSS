@@ -45,6 +45,7 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
     public private(set) var selectedIDs: Set<String>
     public private(set) var anchorID: String?
     public var joinMode: ScreenTextJoinMode
+    private var regionByBlockID: [String: Int]
 
     public init(
         blocks: [ScreenTextBlock],
@@ -53,10 +54,12 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
         joinMode: ScreenTextJoinMode = .lines
     ) {
         let prepared = Self.sortedForReading(Self.deduplicated(blocks))
-        self.blocks = Self.assignLineIDsIfNeeded(prepared)
+        let lineAssigned = Self.assignLineIDsIfNeeded(prepared)
+        self.blocks = lineAssigned
         self.selectedIDs = selectedIDs
         self.anchorID = anchorID
         self.joinMode = joinMode
+        self.regionByBlockID = Self.assignTextRegions(lineAssigned)
     }
 
     public var canCopySelection: Bool {
@@ -120,15 +123,17 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
             select(id)
             return
         }
-        guard let startIndex = blocks.firstIndex(where: { $0.id == anchor }),
-              let endIndex = blocks.firstIndex(where: { $0.id == id })
+        guard let anchorBlock = blocks.first(where: { $0.id == anchor }),
+              let requestedEndBlock = blocks.first(where: { $0.id == id })
         else {
             return
         }
-        let lower = min(startIndex, endIndex)
-        let upper = max(startIndex, endIndex)
-        selectedIDs = Set(blocks[lower...upper].map(\.id))
-        anchorID = anchor
+        let regionBlocks = blocks(inSameRegionAs: anchorBlock)
+        let endBlock = regionByBlockID[requestedEndBlock.id] == regionByBlockID[anchorBlock.id]
+            ? requestedEndBlock
+            : nearestBlock(to: requestedEndBlock.center, among: regionBlocks)
+        guard let endBlock else { return }
+        selectRegionRange(from: anchorBlock, to: endBlock, among: regionBlocks)
     }
 
     public mutating func selectLine(containing id: String) {
@@ -161,45 +166,57 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
         guard !blocks.isEmpty else { return }
 
         let startBlock = nearestBlock(to: startPoint)
-        let endBlock = nearestBlock(to: endPoint)
+        let regionBlocks = startBlock.map { blocks(inSameRegionAs: $0) } ?? []
+        let endBlock = nearestBlock(to: endPoint, among: regionBlocks)
 
-        guard let start = startBlock, let end = endBlock,
-              let startIndex = blocks.firstIndex(where: { $0.id == start.id }),
-              let endIndex = blocks.firstIndex(where: { $0.id == end.id })
-        else {
-            return
-        }
-
-        let lower = min(startIndex, endIndex)
-        let upper = max(startIndex, endIndex)
-
-        selectedIDs = Set(blocks[lower...upper].map(\.id))
-        anchorID = start.id
+        guard let start = startBlock, let end = endBlock else { return }
+        selectRegionRange(from: start, to: end, among: regionBlocks)
     }
 
     public mutating func extendRange(to endPoint: CGPoint) {
         guard let anchor = anchorID ?? selectedIDs.first,
               let anchorBlock = blocks.first(where: { $0.id == anchor }),
-              let endBlock = nearestBlock(to: endPoint),
-              let startIndex = blocks.firstIndex(where: { $0.id == anchorBlock.id }),
-              let endIndex = blocks.firstIndex(where: { $0.id == endBlock.id })
+              let endBlock = nearestBlock(to: endPoint, among: blocks(inSameRegionAs: anchorBlock))
+        else {
+            return
+        }
+        selectRegionRange(from: anchorBlock, to: endBlock, among: blocks(inSameRegionAs: anchorBlock))
+    }
+
+    private func nearestBlock(to point: CGPoint, among candidates: [ScreenTextBlock]? = nil) -> ScreenTextBlock? {
+        (candidates ?? blocks).min { lhs, rhs in
+            Self.squaredDistance(from: point, to: lhs.bounds)
+                < Self.squaredDistance(from: point, to: rhs.bounds)
+        }
+    }
+
+    private static func squaredDistance(from point: CGPoint, to bounds: CGRect) -> CGFloat {
+        let dx = max(bounds.minX - point.x, 0, point.x - bounds.maxX)
+        let dy = max(bounds.minY - point.y, 0, point.y - bounds.maxY)
+        return dx * dx + dy * dy
+    }
+
+    private func blocks(inSameRegionAs block: ScreenTextBlock) -> [ScreenTextBlock] {
+        guard let region = regionByBlockID[block.id] else {
+            return [block]
+        }
+        return blocks.filter { regionByBlockID[$0.id] == region }
+    }
+
+    private mutating func selectRegionRange(
+        from start: ScreenTextBlock,
+        to end: ScreenTextBlock,
+        among regionBlocks: [ScreenTextBlock]
+    ) {
+        guard let startIndex = regionBlocks.firstIndex(where: { $0.id == start.id }),
+              let endIndex = regionBlocks.firstIndex(where: { $0.id == end.id })
         else {
             return
         }
         let lower = min(startIndex, endIndex)
         let upper = max(startIndex, endIndex)
-        selectedIDs = Set(blocks[lower...upper].map(\.id))
-        anchorID = anchorBlock.id
-    }
-
-    private func nearestBlock(to point: CGPoint) -> ScreenTextBlock? {
-        blocks.min { lhs, rhs in
-            let dx0 = lhs.center.x - point.x
-            let dy0 = lhs.center.y - point.y
-            let dx1 = rhs.center.x - point.x
-            let dy1 = rhs.center.y - point.y
-            return (dx0 * dx0 + dy0 * dy0) < (dx1 * dx1 + dy1 * dy1)
-        }
+        selectedIDs = Set(regionBlocks[lower...upper].map(\.id))
+        anchorID = start.id
     }
 
     public static func deduplicated(_ blocks: [ScreenTextBlock]) -> [ScreenTextBlock] {
@@ -301,18 +318,27 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
             }
 
             var lineIndex = 0
-            var lineMinY: CGFloat = -.infinity
+            var lineMidY: CGFloat = -.infinity
             var lineHeight: CGFloat = 0
 
             for (originalIndex, block) in sorted {
                 var updated = block
                 if updated.lineID == nil {
-                    let threshold = max(4, min(block.bounds.height, lineHeight) * 0.5)
-                    if abs(block.bounds.minY - lineMinY) > threshold {
+                    let referenceMinY = lineMidY - lineHeight / 2
+                    let referenceMaxY = lineMidY + lineHeight / 2
+                    let verticalOverlap = max(
+                        0,
+                        min(block.bounds.maxY, referenceMaxY) - max(block.bounds.minY, referenceMinY)
+                    )
+                    let smallerHeight = min(block.bounds.height, lineHeight)
+                    let sharesVisualLine = smallerHeight > 0 && verticalOverlap / smallerHeight >= 0.4
+
+                    if lineIndex == 0 || !sharesVisualLine {
                         lineIndex += 1
-                        lineMinY = block.bounds.minY
+                        lineMidY = block.bounds.midY
                         lineHeight = block.bounds.height
                     } else {
+                        lineMidY = (lineMidY + block.bounds.midY) / 2
                         lineHeight = (lineHeight + block.bounds.height) / 2
                     }
                     updated.lineID = "\(displayID):\(lineIndex)"
@@ -322,5 +348,117 @@ public struct ScreenTextSelectionState: Equatable, Sendable {
         }
 
         return assigned
+    }
+
+    private struct LineFragment {
+        var blocks: [ScreenTextBlock]
+        var bounds: CGRect
+        var displayID: UInt32
+        var lineID: String
+    }
+
+    private static func assignTextRegions(_ blocks: [ScreenTextBlock]) -> [String: Int] {
+        let groupedLines = Dictionary(grouping: blocks) { block in
+            "\(block.displayID)|\(block.lineID ?? block.id)"
+        }
+        var fragments: [LineFragment] = []
+
+        for lineBlocks in groupedLines.values {
+            let sorted = lineBlocks.sorted { $0.bounds.minX < $1.bounds.minX }
+            var current: [ScreenTextBlock] = []
+            var currentBounds = CGRect.null
+
+            for block in sorted {
+                let maximumWordGap = max(24, block.bounds.height * 1.5)
+                if let previous = current.last,
+                   block.bounds.minX - previous.bounds.maxX > maximumWordGap {
+                    fragments.append(LineFragment(
+                        blocks: current,
+                        bounds: currentBounds,
+                        displayID: previous.displayID,
+                        lineID: previous.lineID ?? previous.id
+                    ))
+                    current = []
+                    currentBounds = .null
+                }
+                current.append(block)
+                currentBounds = currentBounds.union(block.bounds)
+            }
+
+            if let last = current.last {
+                fragments.append(LineFragment(
+                    blocks: current,
+                    bounds: currentBounds,
+                    displayID: last.displayID,
+                    lineID: last.lineID ?? last.id
+                ))
+            }
+        }
+
+        fragments.sort { lhs, rhs in
+            if lhs.displayID != rhs.displayID { return lhs.displayID < rhs.displayID }
+            if lhs.bounds.minY != rhs.bounds.minY { return lhs.bounds.minY < rhs.bounds.minY }
+            if lhs.bounds.minX != rhs.bounds.minX { return lhs.bounds.minX < rhs.bounds.minX }
+            return lhs.lineID < rhs.lineID
+        }
+
+        var adjacency = Array(repeating: [Int](), count: fragments.count)
+        for leftIndex in fragments.indices {
+            for rightIndex in fragments.indices where rightIndex > leftIndex {
+                if textFragmentsAreAdjacent(fragments[leftIndex], fragments[rightIndex]) {
+                    adjacency[leftIndex].append(rightIndex)
+                    adjacency[rightIndex].append(leftIndex)
+                }
+            }
+        }
+
+        var result: [String: Int] = [:]
+        var visited: Set<Int> = []
+        var region = 0
+
+        for startIndex in fragments.indices where !visited.contains(startIndex) {
+            var pending = [startIndex]
+            visited.insert(startIndex)
+
+            while let fragmentIndex = pending.popLast() {
+                for block in fragments[fragmentIndex].blocks {
+                    result[block.id] = region
+                }
+                for neighbor in adjacency[fragmentIndex] where !visited.contains(neighbor) {
+                    visited.insert(neighbor)
+                    pending.append(neighbor)
+                }
+            }
+            region += 1
+        }
+
+        return result
+    }
+
+    private static func textFragmentsAreAdjacent(_ lhs: LineFragment, _ rhs: LineFragment) -> Bool {
+        guard lhs.displayID == rhs.displayID, lhs.lineID != rhs.lineID else {
+            return false
+        }
+
+        let verticalGap = max(
+            0,
+            max(lhs.bounds.minY, rhs.bounds.minY) - min(lhs.bounds.maxY, rhs.bounds.maxY)
+        )
+        let maximumLineGap = max(24, max(lhs.bounds.height, rhs.bounds.height) * 1.5)
+        guard verticalGap <= maximumLineGap else {
+            return false
+        }
+
+        let horizontalOverlap = max(
+            0,
+            min(lhs.bounds.maxX, rhs.bounds.maxX) - max(lhs.bounds.minX, rhs.bounds.minX)
+        )
+        let smallerWidth = min(lhs.bounds.width, rhs.bounds.width)
+        let overlapsSubstantially = smallerWidth > 0 && horizontalOverlap / smallerWidth >= 0.2
+        let leftEdgesAlign = abs(lhs.bounds.minX - rhs.bounds.minX) <= max(
+            36,
+            max(lhs.bounds.height, rhs.bounds.height) * 2
+        )
+        return overlapsSubstantially || leftEdgesAlign
     }
 }

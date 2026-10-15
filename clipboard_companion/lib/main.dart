@@ -1156,6 +1156,7 @@ class DevicesScreen extends StatefulWidget {
 
 class _DevicesScreenState extends State<DevicesScreen> {
   final TextEditingController _codeController = TextEditingController();
+  final Set<String> _handledShareBatchIds = <String>{};
   bool _sharePromptVisible = false;
 
   @override
@@ -1321,6 +1322,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: () => Navigator.pop(context, device.id),
               ),
+            ListTile(
+              leading: const Icon(Icons.close_rounded),
+              title: const Text('Cancel'),
+              onTap: () => Navigator.pop(context),
+            ),
           ],
         ),
       ),
@@ -1329,24 +1335,64 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
   void _showIncomingShareIfNeeded(BuildContext context, AppState state) {
     final batch = state.pendingShareBatch;
-    if (batch == null || !state.isReady || _sharePromptVisible) return;
+    if (batch == null ||
+        !shouldPromptForShareBatch(
+          batch: batch,
+          isReady: state.isReady,
+          promptVisible: _sharePromptVisible,
+          handledBatchIds: _handledShareBatchIds,
+        )) {
+      return;
+    }
     _sharePromptVisible = true;
+    _handledShareBatchIds.add(batch.id);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
-      if (!_ensureReachable(context, state)) {
+      // Captured before the awaits below so the failure report never needs a
+      // BuildContext across an async gap.
+      final messenger = ScaffoldMessenger.of(context);
+      try {
+        if (!_ensureReachable(context, state)) {
+          await state.dismissPendingShare();
+          return;
+        }
+        final deviceId = await _chooseReachableDevice(
+          context,
+          state,
+          title: batch.attachments.length == 1
+              ? 'Send ${batch.attachments.first.name}'
+              : 'Send ${batch.attachments.length} shared files',
+        );
+        if (deviceId == null) {
+          // Dismissed on purpose. The batch has to be consumed here: a batch that
+          // stays pending re-opens this sheet on the next rebuild, forever.
+          await state.dismissPendingShare();
+          return;
+        }
+        final result = await state.sendPendingShareTo(deviceId);
+        if (result != null && result.hasFailures) {
+          _reportShareFailures(messenger, state, result);
+        }
+      } finally {
         _sharePromptVisible = false;
-        return;
       }
-      final deviceId = await _chooseReachableDevice(
-        context,
-        state,
-        title: batch.attachments.length == 1
-            ? 'Send ${batch.attachments.first.name}'
-            : 'Send ${batch.attachments.length} shared files',
-      );
-      if (deviceId != null) await state.sendPendingShareTo(deviceId);
-      _sharePromptVisible = false;
     });
+  }
+
+  void _reportShareFailures(
+    ScaffoldMessengerState messenger,
+    AppState state,
+    ShareSendResult result,
+  ) {
+    final reason = state.lastError;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          '${result.failed} of ${result.total} shared files could not be sent.'
+          '${reason == null ? '' : ' $reason'}',
+        ),
+      ),
+    );
   }
 
   void _showReceiveSettings(BuildContext context, AppState state) {

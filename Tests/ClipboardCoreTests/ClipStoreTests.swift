@@ -52,6 +52,19 @@ struct ClipStoreTests {
         #expect(store.items.map(\.id).contains(fresh.id))
     }
 
+    @Test("cleanup does not rewrite metadata when nothing expired")
+    func cleanupWithoutExpiredClipsSkipsSave() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 3_500))
+        let store = try ClipStore(storageDirectory: temporaryDirectory(), now: clock.now)
+        try store.addText("fresh")
+        let metadataURL = store.storageDirectory.appendingPathComponent("clips.json")
+        try FileManager.default.removeItem(at: metadataURL)
+
+        try store.cleanupExpiredClips()
+
+        #expect(FileManager.default.fileExists(atPath: metadataURL.path) == false)
+    }
+
     @Test("stores image clips as files and reloads metadata")
     func storesImageClipsAsFiles() throws {
         let clock = TestClock(Date(timeIntervalSince1970: 4_000))

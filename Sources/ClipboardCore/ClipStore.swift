@@ -112,6 +112,8 @@ public final class ClipStore {
     public func cleanupExpiredClips() throws {
         let cutoff = now().addingTimeInterval(-expirationInterval)
         let expired = items.filter { !$0.isPinned && $0.createdAt < cutoff }
+        // Runs on every clipboard poll; rewriting unchanged metadata each time adds up to GBs of disk writes.
+        guard !expired.isEmpty else { return }
         items.removeAll { !$0.isPinned && $0.createdAt < cutoff }
 
         for clip in expired {

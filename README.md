@@ -59,10 +59,17 @@ Configure a global hotkey to capture screen regions. Captured images open in an 
 - Xcode 15.0 or later.
 - Swift SDK 5.9 or later.
 
+A full Xcode install is required — the Command Line Tools alone are not enough, since
+they ship neither `xcodebuild` nor the SwiftUI macro plugin. You do **not** need to run
+`sudo xcode-select -s`: `scripts/xcode_env.sh` finds an Xcode anywhere on the machine and
+exports `DEVELOPER_DIR` for you. `scripts/build_app.sh` sources it automatically; source
+it yourself for direct SwiftPM commands. Set `DEVELOPER_DIR` beforehand to pin a specific
+Xcode.
+
 ### Run in Development
 To run the application directly from the command line:
 ```bash
-swift run ClipboardSS
+. scripts/xcode_env.sh && swift run ClipboardSS
 ```
 *Note: The default shortcut to open the clipboard window is `Control + Option + V`.*
 

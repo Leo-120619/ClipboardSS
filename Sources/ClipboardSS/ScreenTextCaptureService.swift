@@ -67,7 +67,12 @@ final class ScreenTextCaptureService: ScreenTextCapturing {
 
             let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
             snapshots[display.displayID] = image
-            blocks.append(contentsOf: try recognizeText(in: image, displayID: display.displayID, screenFrame: screen.frame))
+            let displayID = display.displayID
+            let screenFrame = screen.frame
+            // Vision is synchronous and can stall for seconds; keep it off the main actor.
+            blocks.append(contentsOf: try await Task.detached(priority: .userInitiated) {
+                try Self.recognizeText(in: image, displayID: displayID, screenFrame: screenFrame)
+            }.value)
         }
 
         let deduplicated = ScreenTextSelectionState.deduplicated(blocks)
@@ -77,13 +82,8 @@ final class ScreenTextCaptureService: ScreenTextCapturing {
         return ScreenTextCapture(blocks: deduplicated, snapshots: snapshots)
     }
 
-    private func recognizeText(in image: CGImage, displayID: UInt32, screenFrame: CGRect) throws -> [ScreenTextBlock] {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-
-        let handler = VNImageRequestHandler(cgImage: image)
-        try handler.perform([request])
+    nonisolated private static func recognizeText(in image: CGImage, displayID: UInt32, screenFrame: CGRect) throws -> [ScreenTextBlock] {
+        let request = try VisionTextRecognition.perform(on: image)
 
         return request.results?.flatMap { observation -> [ScreenTextBlock] in
             guard let candidate = observation.topCandidates(1).first else {
@@ -123,7 +123,7 @@ final class ScreenTextCaptureService: ScreenTextCapturing {
         } ?? []
     }
 
-    private static func screenBounds(for normalizedBounds: CGRect, in screenFrame: CGRect) -> CGRect {
+    nonisolated private static func screenBounds(for normalizedBounds: CGRect, in screenFrame: CGRect) -> CGRect {
         CGRect(
             x: screenFrame.minX + normalizedBounds.minX * screenFrame.width,
             y: screenFrame.minY + normalizedBounds.minY * screenFrame.height,

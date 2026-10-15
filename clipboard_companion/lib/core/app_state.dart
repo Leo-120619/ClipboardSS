@@ -145,6 +145,33 @@ List<Peer> composeJoinCandidates(List<Peer> mdnsPeers, List<Peer> sweptPeers) {
   return result;
 }
 
+/// Whether the incoming-share prompt should be presented for [batch] right now.
+///
+/// A batch is offered at most once: the prompt is driven from `build`, so a batch
+/// that stays pending after being handled reopens the sheet on every rebuild and
+/// traps the user in a loop they can only escape by killing the app.
+bool shouldPromptForShareBatch({
+  required IncomingShareBatch? batch,
+  required bool isReady,
+  required bool promptVisible,
+  required Set<String> handledBatchIds,
+}) =>
+    batch != null &&
+    isReady &&
+    !promptVisible &&
+    !handledBatchIds.contains(batch.id);
+
+/// Outcome of sending one shared batch, so the UI can report partial failures.
+class ShareSendResult {
+  final int sent;
+  final int failed;
+
+  const ShareSendResult({required this.sent, required this.failed});
+
+  int get total => sent + failed;
+  bool get hasFailures => failed > 0;
+}
+
 class AppState extends ChangeNotifier {
   static const MethodChannel _permissionsChannel = MethodChannel(
     'clipboard_companion/permissions',
@@ -238,19 +265,20 @@ class AppState extends ChangeNotifier {
       final initial = await _shareChannel.invokeMapMethod<Object?, Object?>(
         'getInitialShare',
       );
-      if (initial != null) _stageIncomingShare(initial);
+      if (initial != null) stageIncomingShare(initial);
     }
     notifyListeners();
   }
 
   Future<Object?> _handleShareMethod(MethodCall call) async {
     if (call.method == 'incomingShare' && call.arguments is Map) {
-      _stageIncomingShare(Map<Object?, Object?>.from(call.arguments as Map));
+      stageIncomingShare(Map<Object?, Object?>.from(call.arguments as Map));
     }
     return null;
   }
 
-  void _stageIncomingShare(Map<Object?, Object?> value) {
+  @visibleForTesting
+  void stageIncomingShare(Map<Object?, Object?> value) {
     final batch = IncomingShareBatch.fromMap(value);
     if (batch.attachments.isEmpty ||
         _consumedShareBatchIds.contains(batch.id) ||
@@ -270,26 +298,36 @@ class AppState extends ChangeNotifier {
     await _shareChannel.invokeMethod<void>('completeShare', {'id': batch.id});
   }
 
-  Future<void> sendPendingShareTo(String deviceId) async {
+  /// Sends every attachment of the pending batch, then consumes the batch.
+  ///
+  /// The batch is consumed whether or not the sends worked: failures are already
+  /// reported through [transfers] and [lastError], and leaving a handled batch
+  /// pending makes the share prompt reopen on every rebuild.
+  Future<ShareSendResult?> sendPendingShareTo(String deviceId) async {
     final batch = pendingShareBatch;
-    if (batch == null || isSendingBatch) return;
+    if (batch == null || isSendingBatch) return null;
     isSendingBatch = true;
     notifyListeners();
+    var sent = 0;
+    var failed = 0;
     try {
-      var allSucceeded = true;
       for (final attachment in batch.attachments) {
         if (!attachment.file.existsSync()) {
-          allSucceeded = false;
+          failed++;
           continue;
         }
-        allSucceeded =
-            await sendFileTo(attachment.file, deviceId) && allSucceeded;
+        if (await sendFileTo(attachment.file, deviceId)) {
+          sent++;
+        } else {
+          failed++;
+        }
       }
-      if (allSucceeded) await dismissPendingShare();
     } finally {
       isSendingBatch = false;
+      await dismissPendingShare();
       notifyListeners();
     }
+    return ShareSendResult(sent: sent, failed: failed);
   }
 
   Future<void> sendFilesTo(List<File> files, String deviceId) async {

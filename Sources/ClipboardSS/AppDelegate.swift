@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.applicationIconImage = ClipboardSSLogo.image(size: NSSize(width: 128, height: 128))
+        VisionTextRecognition.warmUp()
         let receivedFileNotifications = ReceivedFileNotificationService()
         receivedFileNotifications.initialize()
         self.receivedFileNotifications = receivedFileNotifications

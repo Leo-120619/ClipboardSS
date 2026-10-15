@@ -18,12 +18,7 @@ final class OCRService {
                 throw OCRError.cgImageFailed
             }
 
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-
-            let handler = VNImageRequestHandler(cgImage: cgImage)
-            try handler.perform([request])
+            let request = try VisionTextRecognition.perform(on: cgImage)
 
             return request.results?.compactMap { observation in
                 guard let text = observation.topCandidates(1).first?.string, !text.isEmpty else {

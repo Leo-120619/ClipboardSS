@@ -39,6 +39,8 @@ final class AppModel: ObservableObject {
     private let fileSender: FileSender
     private let fileReceiver: FileReceiver
     private var notifiedReceiveIds: Set<String> = []
+    /// Folder answer shared by the files of one multi-file share.
+    private var receiveBatch = ReceiveBatchDestination()
     private var sendTokens: [UUID: CancellationToken] = [:]
     private var livenessTask: Task<Void, Never>?
     private static let livenessInterval = Duration.seconds(5)
@@ -559,7 +561,8 @@ final class AppModel: ObservableObject {
             default: ReceiveSettings.mode = .defaultFolder
             }
         case .askEveryTime:
-            guard let folder = ReceiveSettings.chooseDirectory(), let source = transfers[index].destinationURL else { return }
+            guard let source = transfers[index].destinationURL,
+                  case let .folder(folder) = batchReceiveDestination() else { return }
             let destination = folder.appendingPathComponent(source.lastPathComponent)
             do {
                 try FileManager.default.moveItem(at: source, to: destination)
@@ -567,6 +570,17 @@ final class AppModel: ObservableObject {
             } catch { lastError = error.localizedDescription }
         case .defaultFolder: break
         }
+    }
+
+    /// Asks where to save once per share: files that arrive back-to-back reuse the
+    /// first answer instead of opening a folder picker each.
+    private func batchReceiveDestination() -> ReceiveBatchDestination.Decision {
+        if let decision = receiveBatch.decision(now: Date()) { return decision }
+        let decision: ReceiveBatchDestination.Decision =
+            ReceiveSettings.chooseDirectory().map { .folder($0) } ?? .declined
+        // Timed from when the picker closes, not from when it opened.
+        receiveBatch.record(decision, now: Date())
+        return decision
     }
 
     /// Periodically reaps idle receiver sessions; wired to the app's poll timer.
