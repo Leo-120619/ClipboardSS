@@ -63,7 +63,7 @@ enum VisionTextRecognition {
     private static func recognize(_ image: CGImage, level: VNRequestTextRecognitionLevel) throws -> VNRecognizeTextRequest {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = level
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = false
         try VNImageRequestHandler(cgImage: image).perform([request])
         return request
     }
