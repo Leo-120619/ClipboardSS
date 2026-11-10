@@ -317,8 +317,10 @@ class FileReceiver {
       return FileTransferResponse(400, {'status': 'writeFailed'});
     }
 
-    session.received.add(chunkIndex);
-    session.bytesWritten += plaintext.length;
+    // A concurrent identical chunk may have landed during the awaited write.
+    if (session.received.add(chunkIndex)) {
+      session.bytesWritten += plaintext.length;
+    }
     session.lastActivity = now();
     _emit(
       FileTransferReceiveEvent(

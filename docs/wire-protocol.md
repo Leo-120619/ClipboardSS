@@ -249,8 +249,9 @@ All on port `51888`, same host as the clip server.
    `400 {"status":"stale"}` · `409 {"status":"replayed"}` · `403 {"status":"declined"}`
    (reserved for a future accept prompt; v1 auto-accepts) · `409` duplicate active
    transferId · `400 {"status":"tooLarge"}` when `fileSize` exceeds free space on the
-   receiver's transfers volume, minus the bytes still owed to every active session
-   (Σ `fileSize − bytes written`), minus **500 MB** (524,288,000 bytes). When free space is
+   receiver's transfers volume, minus the bytes active sessions still owe but have not yet
+   allocated on disk (Swift/Dart: Σ `fileSize − bytes written`; Windows preallocates each
+   `.part` to `fileSize`, so the term is 0 there), minus **500 MB** (524,288,000 bytes). When free space is
    already under that floor, even a zero-byte offer is rejected `tooLarge`; when the
    receiver cannot determine free space, transfers are not blocked ·
    `429 {"status":"tooManyTransfers"}` when the sending device already holds **8** active

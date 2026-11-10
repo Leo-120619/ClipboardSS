@@ -70,9 +70,9 @@ public sealed class FileReceiver : IDisposable
                 offer.ChunkCount != offer.FileSize / offer.ChunkSize + (offer.FileSize % offer.ChunkSize == 0 ? 0 : 1)) return new(400, "invalidOffer");
             if (_sessions.Values.Count(s => s.SourceDeviceId == sourceDeviceId) >= FileTransferConstants.MaxSessionsPerDevice)
                 return new(429, "tooManyTransfers");
-            // Same rule as Swift/Dart: space still owed to active sessions counts as used.
-            var committed = _sessions.Values.Sum(s => s.Offer.FileSize - s.BytesReceived);
-            if (offer.FileSize > _freeSpace() - committed - FileTransferConstants.FreeSpaceReserve) return new(400, "tooLarge");
+            // The committed term (bytes owed but not yet allocated on disk) is zero here: every
+            // active session was preallocated by SetLength, so free space already excludes it.
+            if (offer.FileSize > _freeSpace() - FileTransferConstants.FreeSpaceReserve) return new(400, "tooLarge");
             var path = Path.Combine(_tempDirectory, id + ".part");
             var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.RandomAccess);
             try { stream.SetLength(offer.FileSize); }

@@ -185,7 +185,11 @@ public sealed class FileTransferTests
     public async Task ConcurrentOffersCannotOvercommitFreeSpace()
     {
         using var temp = new TemporaryDirectory();
-        using var receiver = NewReceiver(temp, freeSpace: FileTransferConstants.FreeSpaceReserve + 1000);
+        var parts = Path.Combine(temp.Path, "parts");
+        // Models NTFS preallocation explicitly (SetLength is sparse on APFS): every byte of a .part is allocated.
+        long FreeSpace() => FileTransferConstants.FreeSpaceReserve + 1000 -
+            Directory.GetFiles(parts, "*.part").Sum(path => new FileInfo(path).Length);
+        using var receiver = new FileReceiver(parts, () => Path.Combine(temp.Path, "downloads"), freeSpaceProvider: FreeSpace);
         Assert.Equal(200, (await receiver.OfferAsync(Offer("first", 600, "h"), PairKey, Peer)).StatusCode);
         var second = await receiver.OfferAsync(Offer("second", 600, "h"), PairKey, Peer);
         Assert.Equal((400, "tooLarge"), (second.StatusCode, second.Status));
