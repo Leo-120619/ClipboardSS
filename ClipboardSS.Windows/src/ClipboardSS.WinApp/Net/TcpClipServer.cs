@@ -146,48 +146,12 @@ public sealed class TcpClipServer(ClipServerRouter router, int port = 51888) : I
         deadline.CancelAfter(RequestDeadline);
         try
         {
-            return await ReadRequestAsync(stream, deadline.Token);
+            return await HttpRequestReader.ReadAsync(stream, deadline.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             Debug.WriteLine("TcpClipServer: request deadline exceeded; dropping connection");
             return null;
         }
-    }
-
-    /// <summary>
-    /// Parses the head once (capped at <see cref="HttpCodec.MaxHeaderSize"/>), then reads
-    /// exactly the declared Content-Length into a single preallocated buffer.
-    /// </summary>
-    private static async Task<HttpRequest> ReadRequestAsync(
-        NetworkStream stream,
-        CancellationToken cancellationToken)
-    {
-        // Room for the largest allowed head plus its terminator; anything bigger is rejected
-        // by TryParseHead before this fills up.
-        var headBuffer = new byte[HttpCodec.MaxHeaderSize + 4];
-        var filled = 0;
-        HttpHead head;
-        while (!HttpCodec.TryParseHead(headBuffer.AsSpan(0, filled), out head))
-        {
-            var count = await stream.ReadAsync(headBuffer.AsMemory(filled), cancellationToken);
-            if (count == 0)
-            {
-                throw new HttpCodecException(HttpCodecError.Incomplete);
-            }
-
-            filled += count;
-        }
-
-        var body = new byte[head.ContentLength];
-        var alreadyRead = Math.Min(filled - head.HeaderLength, body.Length);
-        headBuffer.AsSpan(head.HeaderLength, alreadyRead).CopyTo(body);
-        if (alreadyRead < body.Length)
-        {
-            // Throws EndOfStreamException (-> 400) if the peer closes early.
-            await stream.ReadExactlyAsync(body.AsMemory(alreadyRead), cancellationToken);
-        }
-
-        return new HttpRequest(head.Method, head.Path, head.Headers, body);
     }
 }

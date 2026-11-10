@@ -116,4 +116,105 @@ public sealed class HttpCodecTests
             HttpCodecError.PayloadTooLarge,
             Assert.Throws<HttpCodecException>(() => HttpCodec.TryParseHead(huge, out _)).Error);
     }
+
+    private static byte[] HeadOfLength(int length)
+    {
+        const string prefix = "GET /v1/id HTTP/1.1\r\nX-Pad: ";
+        return Encoding.ASCII.GetBytes(prefix + new string('a', length - prefix.Length) + "\r\n\r\n");
+    }
+
+    [Fact]
+    public void HeadOfExactlyMaxHeaderSize_IsAccepted()
+    {
+        var data = HeadOfLength(HttpCodec.MaxHeaderSize);
+
+        Assert.True(HttpCodec.TryParseHead(data, out var head));
+        Assert.Equal(HttpCodec.MaxHeaderSize + 4, head.HeaderLength);
+        Assert.Equal("/v1/id", HttpCodec.ParseRequest(data).Path);
+    }
+
+    [Fact]
+    public void HeadOneByteOverMaxHeaderSize_IsRejected()
+    {
+        var data = HeadOfLength(HttpCodec.MaxHeaderSize + 1);
+
+        Assert.Equal(
+            HttpCodecError.HeadersTooLarge,
+            Assert.Throws<HttpCodecException>(() => HttpCodec.TryParseHead(data, out _)).Error);
+        Assert.Equal(
+            HttpCodecError.HeadersTooLarge,
+            Assert.Throws<HttpCodecException>(() => HttpCodec.ParseRequest(data)).Error);
+    }
+
+    /// <summary>Serves a fixed byte sequence a few bytes per read, synchronously, then EOF.</summary>
+    private sealed class TricklingStream(byte[] data, int maxPerRead) : Stream
+    {
+        private int _position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            var count = Math.Min(Math.Min(buffer.Length, maxPerRead), data.Length - _position);
+            data.AsSpan(_position, count).CopyTo(buffer);
+            _position += count;
+            return count;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(Read(buffer.Span));
+    }
+
+    [Fact]
+    public async Task ReadRequest_ReassemblesBodySplitAcrossManyReads()
+    {
+        var body = new byte[300 * 1024];
+        new Random(7).NextBytes(body);
+        var data = HttpCodec.EncodeRequest(
+            new HttpRequest("POST", "/v1/clip", new Dictionary<string, string>(), body),
+            "peer");
+
+        var request = await HttpRequestReader.ReadAsync(new TricklingStream(data, 1000), CancellationToken.None);
+
+        Assert.Equal("POST", request.Method);
+        Assert.Equal("/v1/clip", request.Path);
+        Assert.Equal(body, request.Body);
+    }
+
+    [Fact]
+    public async Task ReadRequest_DoesNotPreallocateDeclaredContentLength()
+    {
+        var data = Encoding.ASCII.GetBytes(
+            $"POST /v1/clip HTTP/1.1\r\nContent-Length: {HttpCodec.MaxBodySize}\r\n\r\nonly-a-few-bytes");
+        var stream = new TricklingStream(data, 64 * 1024);
+
+        // The fake stream completes synchronously, so the whole read stays on this thread.
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        await Assert.ThrowsAsync<EndOfStreamException>(
+            () => HttpRequestReader.ReadAsync(stream, CancellationToken.None));
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        // Memory must track bytes received, not the 20 MB the peer merely declared.
+        Assert.True(allocated < 1024 * 1024, $"allocated {allocated} bytes");
+    }
+
+    [Fact]
+    public async Task ReadRequest_EofBeforeHeadEnds_IsIncomplete()
+    {
+        var stream = new TricklingStream("POST /v1/clip HTTP/1.1\r\nContent-Le"u8.ToArray(), 8);
+
+        var error = await Assert.ThrowsAsync<HttpCodecException>(
+            () => HttpRequestReader.ReadAsync(stream, CancellationToken.None));
+        Assert.Equal(HttpCodecError.Incomplete, error.Error);
+    }
 }
