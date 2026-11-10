@@ -113,12 +113,13 @@ public partial class App : System.Windows.Application
     }
 
     /// <summary>One-time notice for state files that were unreadable at launch and moved aside.</summary>
-    private static void ShowCorruptStateNotice(params string?[] quarantinedPaths)
+    private static void ShowCorruptStateNotice(bool pairingLost, params string?[] quarantinedPaths)
     {
         var names = quarantinedPaths.OfType<string>().Select(Path.GetFileName).ToArray();
         if (names.Length == 0) return;
+        var repair = pairingLost ? "\n\nPair your devices again." : "";
         MessageBox.Show(
-            $"Some saved ClipboardSS data could not be read, so ClipboardSS started with empty data instead. The unreadable files were kept as:\n\n{string.Join("\n", names)}",
+            $"Some saved ClipboardSS data could not be read, so ClipboardSS started with empty data instead. The unreadable files were kept as:\n\n{string.Join("\n", names)}{repair}",
             "ClipboardSS",
             MessageBoxButton.OK,
             MessageBoxImage.Warning);
@@ -214,7 +215,12 @@ public partial class App : System.Windows.Application
         MainWindow = _mainWindow;
         _ = _pasteInjector.RememberForegroundWindow();
         _mainWindow.Show();
-        ShowCorruptStateNotice(_settings.QuarantinedFilePath, store.QuarantinedFilePath, pairedStore.QuarantinedFilePath);
+        ShowCorruptStateNotice(
+            pairingLost: pairedStore.QuarantinedFilePath is not null
+                || (_settings.DeviceIdReset && pairedStore.Devices.Count > 0),
+            _settings.QuarantinedFilePath,
+            store.QuarantinedFilePath,
+            pairedStore.QuarantinedFilePath);
         if (!hotKeyResult.Succeeded)
         {
             var failure = hotKeyResult.Failures[0];

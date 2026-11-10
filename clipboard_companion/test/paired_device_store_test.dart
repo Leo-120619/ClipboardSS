@@ -32,8 +32,9 @@ void main() {
       SharedPreferences.setMockInitialValues({'paired_devices': '{"trunc'});
       final prefs = await SharedPreferences.getInstance();
 
-      final store = PairedDeviceStore(
-        prefs,
+      final store = PairedDeviceStore(prefs);
+      expect(store.devices, isEmpty);
+      await store.quarantineIfCorrupt(
         now: () => DateTime.fromMillisecondsSinceEpoch(1000 * 1000),
       );
 
@@ -54,6 +55,7 @@ void main() {
     );
 
     final reloaded = PairedDeviceStore(prefs);
+    await reloaded.quarantineIfCorrupt();
 
     expect(reloaded.devices.single.name, 'Mac');
     expect(reloaded.quarantinedKey, isNull);

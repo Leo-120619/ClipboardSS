@@ -7,13 +7,19 @@ import 'models.dart';
 class PairedDeviceStore {
   final SharedPreferences _prefs;
 
-  /// Where an unreadable device list was moved at startup, so the UI can tell the user once.
-  late final String? quarantinedKey;
+  PairedDeviceStore(this._prefs);
 
-  PairedDeviceStore(this._prefs, {DateTime Function() now = DateTime.now}) {
-    quarantinedKey = _decodeDevices() == null
-        ? quarantineCorruptPref(_prefs, _devicesKey, now())
-        : null;
+  /// Where an unreadable device list was moved at startup, so the UI can tell the user once.
+  String? get quarantinedKey => _quarantinedKey;
+  String? _quarantinedKey;
+
+  /// Call once at startup: moves an undecodable device list aside (an unreadable list
+  /// already reads as empty) and records where it went.
+  Future<void> quarantineIfCorrupt({
+    DateTime Function() now = DateTime.now,
+  }) async {
+    if (_decodeDevices() != null) return;
+    _quarantinedKey = await quarantineCorruptPref(_prefs, _devicesKey, now());
   }
 
   static const String _devicesKey = 'paired_devices';

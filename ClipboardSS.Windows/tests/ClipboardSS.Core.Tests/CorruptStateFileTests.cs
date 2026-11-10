@@ -54,6 +54,25 @@ public sealed class CorruptStateFileTests
         Assert.Equal(quarantined, store.QuarantinedFilePath);
         Assert.Equal(Truncated, File.ReadAllText(quarantined));
         Assert.Equal(store.Current.DeviceId, new SettingsStore(directory.Path).Current.DeviceId);
+        Assert.True(store.DeviceIdReset);
+    }
+
+    [Fact]
+    public void TruncatedSettingsFileKeepsItsDeviceIdAndName()
+    {
+        using var directory = new TemporaryDirectory();
+        var deviceId = Guid.Parse("550e8400-e29b-41d4-a716-446655440000");
+        File.WriteAllText(
+            Path.Combine(directory.Path, "settings.json"),
+            "{\n  \"DeviceID\" : \"550E8400-E29B-41D4-A716-446655440000\",\n  \"deviceName\": \"Desk \\\"PC\\\"\",\n  \"launchAt");
+
+        var store = new SettingsStore(directory.Path, () => At);
+
+        Assert.NotNull(store.QuarantinedFilePath);
+        Assert.False(store.DeviceIdReset);
+        Assert.Equal(deviceId, store.Current.DeviceId);
+        Assert.Equal("Desk \"PC\"", store.Current.DeviceName);
+        Assert.Equal(deviceId, new SettingsStore(directory.Path).Current.DeviceId);
     }
 
     [Fact]

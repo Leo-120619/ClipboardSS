@@ -180,7 +180,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 windowController.show()
             }
 
-            Self.showCorruptStateNotice(for: [store.quarantinedFileURL, pairedStore.quarantinedFileURL])
+            Self.showCorruptStateNotice(
+                for: [store.quarantinedFileURL, pairedStore.quarantinedFileURL],
+                pairingLost: pairedStore.quarantinedFileURL != nil
+            )
         } catch {
             NSAlert(error: error).runModal()
             NSApplication.shared.terminate(nil)
@@ -284,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// One-time notice for state files that were unreadable at launch and moved aside.
-    private static func showCorruptStateNotice(for quarantined: [URL?]) {
+    private static func showCorruptStateNotice(for quarantined: [URL?], pairingLost: Bool) {
         let names = quarantined.compactMap { $0?.lastPathComponent }
         guard !names.isEmpty else { return }
         let alert = NSAlert()
@@ -292,6 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = "Some saved ClipboardSS data could not be read"
         alert.informativeText = "ClipboardSS started with empty data instead. The unreadable files were kept as:\n\n"
             + names.joined(separator: "\n")
+            + (pairingLost ? "\n\nPair your devices again." : "")
         alert.runModal()
     }
 

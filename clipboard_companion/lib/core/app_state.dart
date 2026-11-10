@@ -277,6 +277,7 @@ class AppState extends ChangeNotifier {
 
     // 2. Setup stores
     pairedStore = PairedDeviceStore(prefs);
+    await pairedStore.quarantineIfCorrupt();
     if (pairedStore.quarantinedKey != null) {
       // One-time notice: the unreadable list was moved aside, so this shows once.
       lastError =
