@@ -9,6 +9,7 @@ import 'package:clipboard_companion/core/models.dart';
 import 'package:clipboard_companion/core/paired_device_store.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'fake_pair_key_storage.dart';
 import 'package:uuid/uuid.dart';
 
 /// Device id of the receiving side in file-transfer tests (envelope recipient).
@@ -25,7 +26,7 @@ class MutableClock {
 Future<PairedDeviceStore> makePairedStore(String peerId, SecretKey key) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
-  final store = PairedDeviceStore(prefs);
+  final store = PairedDeviceStore(prefs, keyStorage: FakePairKeyStorage());
   await store.addDevice(PairedDevice(id: peerId, name: 'Peer'), key);
   return store;
 }

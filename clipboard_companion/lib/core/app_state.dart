@@ -277,6 +277,11 @@ class AppState extends ChangeNotifier {
 
     // 2. Setup stores
     pairedStore = PairedDeviceStore(prefs);
+    try {
+      await pairedStore.migrateLegacyKeys();
+    } catch (_) {
+      // Keys stay in prefs and getKey retries the move on next use.
+    }
     _loadClips();
     if (Platform.isAndroid || Platform.isIOS) {
       _shareChannel.setMethodCallHandler(_handleShareMethod);

@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'fake_pair_key_storage.dart';
 
 const _targetId = '4d967c79-47dc-4e1f-a3bd-d3160b082da7';
 const _initiatorA = '550e8400-e29b-41d4-a716-446655440000';
@@ -29,7 +30,10 @@ class _Harness {
 
   static Future<_Harness> create() async {
     SharedPreferences.setMockInitialValues({});
-    final store = PairedDeviceStore(await SharedPreferences.getInstance());
+    final store = PairedDeviceStore(
+      await SharedPreferences.getInstance(),
+      keyStorage: FakePairKeyStorage(),
+    );
     late _Harness harness;
     final coordinator = PairingCoordinator(
       identity: DeviceIdentity(id: _targetId, name: 'Phone'),
@@ -200,7 +204,10 @@ void main() {
 
   test('initiatorSurfacesAlreadyPairedConflict', () async {
     SharedPreferences.setMockInitialValues({});
-    final store = PairedDeviceStore(await SharedPreferences.getInstance());
+    final store = PairedDeviceStore(
+      await SharedPreferences.getInstance(),
+      keyStorage: FakePairKeyStorage(),
+    );
     final targetSession = PairingSession();
     await targetSession.init();
     final coordinator = PairingCoordinator(
