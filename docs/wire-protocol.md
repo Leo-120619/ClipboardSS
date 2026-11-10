@@ -249,7 +249,10 @@ All on port `51888`, same host as the clip server.
    `400 {"status":"stale"}` · `409 {"status":"replayed"}` · `403 {"status":"declined"}`
    (reserved for a future accept prompt; v1 auto-accepts) · `409` duplicate active
    transferId · `400 {"status":"tooLarge"}` when `fileSize` exceeds free space on the
-   receiver's transfers volume minus **500 MB** (524,288,000 bytes) ·
+   receiver's transfers volume, minus the bytes still owed to every active session
+   (Σ `fileSize − bytes written`), minus **500 MB** (524,288,000 bytes). When free space is
+   already under that floor, even a zero-byte offer is rejected `tooLarge`; when the
+   receiver cannot determine free space, transfers are not blocked ·
    `429 {"status":"tooManyTransfers"}` when the sending device already holds **8** active
    sessions (counted per authenticated `sourceDeviceId`).
 
@@ -285,7 +288,9 @@ authenticate a chunk body before treating a repeated index as an idempotent dupl
 4. **`POST /v1/file/cancel`** — envelope-sealed `{"transferId": "...", "sentAt": "..."}`;
    idempotent `200`. Like every envelope endpoint, also `400 stale` / `409 replayed`.
    `401` from a paused device; `404` when the session belongs to a different device (the
-   session is left intact). Cancelled ids are remembered for **600 s** (chunks for them get
+   session is left intact). On an unpaired sender or AEAD failure, Windows (C#) answers
+   `401` while Swift and Dart answer `200`; cancel is best-effort and senders ignore the
+   reply. Cancelled ids are remembered for **600 s** (chunks for them get
    `410`), then pruned.
 
 ### Semantics

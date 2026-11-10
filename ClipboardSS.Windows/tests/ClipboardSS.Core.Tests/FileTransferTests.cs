@@ -182,6 +182,17 @@ public sealed class FileTransferTests
     }
 
     [Fact]
+    public async Task ConcurrentOffersCannotOvercommitFreeSpace()
+    {
+        using var temp = new TemporaryDirectory();
+        using var receiver = NewReceiver(temp, freeSpace: FileTransferConstants.FreeSpaceReserve + 1000);
+        Assert.Equal(200, (await receiver.OfferAsync(Offer("first", 600, "h"), PairKey, Peer)).StatusCode);
+        var second = await receiver.OfferAsync(Offer("second", 600, "h"), PairKey, Peer);
+        Assert.Equal((400, "tooLarge"), (second.StatusCode, second.Status));
+        Assert.Equal(200, (await receiver.OfferAsync(Offer("third", 400, "h"), PairKey, Peer)).StatusCode);
+    }
+
+    [Fact]
     public async Task NinthConcurrentSessionIsRejected()
     {
         Assert.Equal(8, FileTransferConstants.MaxSessionsPerDevice);

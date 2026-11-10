@@ -63,6 +63,8 @@ public actor FileReceiver {
         let tempURL: URL
         let handle: FileHandle
         var receivedIndices: Set<Int>
+        /// Plaintext bytes of the distinct chunks already on disk.
+        var bytesWritten: Int64 = 0
         var lastActivity: Date
     }
 
@@ -160,7 +162,9 @@ public actor FileReceiver {
         guard activeForDevice < FileTransferConstants.maxSessionsPerDevice else {
             return .json(429, ["status": "tooManyTransfers"])
         }
-        guard offer.fileSize <= freeSpaceProvider() - FileTransferConstants.freeSpaceReserve else {
+        // Space still owed to active sessions counts as used: nothing is preallocated.
+        let committed = sessions.values.reduce(Int64(0)) { $0 + ($1.offer.fileSize - $1.bytesWritten) }
+        guard offer.fileSize <= freeSpaceProvider() - committed - FileTransferConstants.freeSpaceReserve else {
             return .json(400, ["status": "tooLarge"])
         }
 
@@ -229,6 +233,7 @@ public actor FileReceiver {
         }
 
         session.receivedIndices.insert(chunkIndex)
+        session.bytesWritten += Int64(plaintext.count)
         session.lastActivity = now()
         sessions[transferId] = session
         emit(.progress(transferId: transferId, received: session.receivedIndices.count, total: session.offer.chunkCount))
@@ -261,7 +266,11 @@ public actor FileReceiver {
 
         try? session.handle.close()
 
-        let computedHash = (try? ContentHasher.fileHash(contentsOf: session.tempURL)) ?? ""
+        guard let computedHash = try? ContentHasher.fileHash(contentsOf: session.tempURL) else {
+            destroy(finish.transferId, session: session)
+            emit(.failed(transferId: finish.transferId, reason: "hash read failed"))
+            return .json(422, ["status": "error"])
+        }
         guard computedHash == session.offer.fileHash else {
             destroy(finish.transferId, session: session)
             emit(.failed(transferId: finish.transferId, reason: "hash mismatch"))

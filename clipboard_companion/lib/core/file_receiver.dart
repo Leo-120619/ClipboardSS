@@ -48,6 +48,9 @@ class _Session {
   final File tempFile;
   final RandomAccessFile raf;
   final Set<int> received = {};
+
+  /// Plaintext bytes of the distinct chunks already on disk.
+  int bytesWritten = 0;
   DateTime lastActivity;
 
   _Session({
@@ -87,7 +90,7 @@ class FileReceiver {
   /// Offers past validation whose session is still being set up: holding the id
   /// here before the first `await` keeps a concurrent identical offer from
   /// opening (and leaking) a second handle.
-  final _pendingOffers = <String, String>{}; // transferId -> sourceDeviceId
+  final _pendingOffers = <String, ({String source, int size})>{};
 
   /// Cancelled transfer id -> when it was cancelled; pruned after
   /// [FileTransferConstants.cancelledRetention].
@@ -194,19 +197,29 @@ class FileReceiver {
     final source = envelope.sourceDeviceId;
     final activeForDevice =
         _sessions.values.where((s) => s.sourceDeviceId == source).length +
-        _pendingOffers.values.where((id) => id == source).length;
+        _pendingOffers.values.where((p) => p.source == source).length;
     if (activeForDevice >= FileTransferConstants.maxSessionsPerDevice) {
       return FileTransferResponse(429, {'status': 'tooManyTransfers'});
     }
 
-    _pendingOffers[offer.transferId] = source;
+    _pendingOffers[offer.transferId] = (source: source, size: offer.fileSize);
     final tempFile = File(
       '${transfersDirectory.path}/${offer.transferId}.part',
     );
     RandomAccessFile? raf;
     try {
       final freeSpace = await freeSpaceProvider();
-      if (offer.fileSize > freeSpace - FileTransferConstants.freeSpaceReserve) {
+      // Space still owed to active (and other in-flight) sessions counts as
+      // used: nothing is preallocated.
+      var committed = 0;
+      for (final s in _sessions.values) {
+        committed += s.offer.fileSize - s.bytesWritten;
+      }
+      for (final entry in _pendingOffers.entries) {
+        if (entry.key != offer.transferId) committed += entry.value.size;
+      }
+      if (offer.fileSize >
+          freeSpace - committed - FileTransferConstants.freeSpaceReserve) {
         return FileTransferResponse(400, {'status': 'tooLarge'});
       }
       await transfersDirectory.create(recursive: true);
@@ -305,6 +318,7 @@ class FileReceiver {
     }
 
     session.received.add(chunkIndex);
+    session.bytesWritten += plaintext.length;
     session.lastActivity = now();
     _emit(
       FileTransferReceiveEvent(
@@ -357,7 +371,7 @@ class FileReceiver {
       return FileTransferResponse(409, {'status': 'incomplete'});
     }
 
-    String? computed;
+    final String computed;
     try {
       await session.raf.close();
       final tempPath = session.tempFile.path;
@@ -365,7 +379,15 @@ class FileReceiver {
         () => ContentHasher.fileHashOfFile(File(tempPath)),
       );
     } catch (_) {
-      computed = null;
+      await _destroy(finish.transferId, session);
+      _emit(
+        FileTransferReceiveEvent(
+          'failed',
+          finish.transferId,
+          reason: 'hash read failed',
+        ),
+      );
+      return FileTransferResponse(422, {'status': 'error'});
     }
     if (computed != session.offer.fileHash) {
       await _destroy(finish.transferId, session);

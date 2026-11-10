@@ -464,6 +464,7 @@ void main() {
         Directory dest,
         MutableClock clock,
         PairedDeviceStore store,
+        Directory transfers,
       })
     >
     makeRobust({
@@ -473,17 +474,24 @@ void main() {
       final store = await makePairedStore(peerId, key);
       await store.addDevice(PairedDevice(id: otherId, name: 'Other'), otherKey);
       final dest = makeTempDir('dest');
+      final transfers = makeTempDir('transfers');
       final clock = MutableClock(DateTime(2026, 1, 1, 12));
       final receiver = FileReceiver(
         pairedStore: store,
         localDeviceId: receiverId,
-        transfersDirectory: makeTempDir('transfers'),
+        transfersDirectory: transfers,
         destinationProvider: () => dest,
         now: clock.now,
         freeSpaceProvider: () async => freeSpace,
         chunkWriter: chunkWriter,
       );
-      return (receiver: receiver, dest: dest, clock: clock, store: store);
+      return (
+        receiver: receiver,
+        dest: dest,
+        clock: clock,
+        store: store,
+        transfers: transfers,
+      );
     }
 
     Future<ClipEnvelope> finishFor(
@@ -654,6 +662,47 @@ void main() {
       expect(
         (await r.receiver.handleOffer(await offerOfSize(1000))).statusCode,
         200,
+      );
+    });
+
+    test('concurrent offers cannot overcommit free space', () async {
+      final r = await makeRobust(
+        freeSpace: FileTransferConstants.freeSpaceReserve + 1000,
+      );
+      expect(
+        (await r.receiver.handleOffer(await offerOfSize(600))).statusCode,
+        200,
+      );
+      final second = await r.receiver.handleOffer(await offerOfSize(600));
+      expect(second.statusCode, 400);
+      expect(statusOf(second), 'tooLarge');
+      expect(
+        (await r.receiver.handleOffer(await offerOfSize(400))).statusCode,
+        200,
+      );
+    });
+
+    test('a hash read failure at finish returns 422 error', () async {
+      final r = await makeRobust();
+      final t = await prepareTransfer(
+        data: [1, 2, 3, 4],
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      await r.receiver.handleOffer(t.offer);
+      await r.receiver.handleChunk(t.transferId, 0, t.chunks[0]);
+      await File('${r.transfers.path}/${t.transferId}.part').delete();
+      final response = await r.receiver.handleFinish(
+        await finishFor(t.transferId),
+      );
+      expect(response.statusCode, 422);
+      expect(statusOf(response), 'error');
+      expect(
+        (await r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        )).statusCode,
+        404,
       );
     });
 

@@ -16,6 +16,7 @@ struct FileReceiverTests {
         let destinationDir: URL
         let clock: MutableClock
         let store: PairedDeviceStore
+        let transfersDir: URL
     }
 
     private func makeFixture(
@@ -29,17 +30,18 @@ struct FileReceiverTests {
         let clock = MutableClock(now)
         let destinationDir = try temporaryDirectory()
         let localId = UUID()
+        let transfersDir = try temporaryDirectory().appendingPathComponent("Transfers")
         let receiver = FileReceiver(
             pairedStore: store,
             localDeviceId: localId,
-            transfersDirectory: try temporaryDirectory().appendingPathComponent("Transfers"),
+            transfersDirectory: transfersDir,
             destinationProvider: { destinationDir },
             now: clock.now,
             idleTimeout: 60,
             freeSpaceProvider: { freeSpace },
             chunkWriter: chunkWriter
         )
-        return Fixture(receiver: receiver, peerId: peerId, localId: localId, key: key, destinationDir: destinationDir, clock: clock, store: store)
+        return Fixture(receiver: receiver, peerId: peerId, localId: localId, key: key, destinationDir: destinationDir, clock: clock, store: store, transfersDir: transfersDir)
     }
 
     /// Builds an offer for `data` split at `chunkSize`, returning the offer + sealed chunks.
@@ -267,6 +269,29 @@ struct FileReceiverTests {
         #expect(tooLarge.statusCode == 400)
         #expect(status(tooLarge) == "tooLarge")
         #expect(await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 1_000)).statusCode == 200)
+    }
+
+    @Test("bytes still owed to active sessions count against free space")
+    func concurrentOffersCannotOvercommitFreeSpace() async throws {
+        let fixture = try await makeFixture(freeSpace: FileTransferConstants.freeSpaceReserve + 1_000)
+        #expect(await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 600)).statusCode == 200)
+        let second = await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 600))
+        #expect(second.statusCode == 400)
+        #expect(status(second) == "tooLarge")
+        #expect(await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 400)).statusCode == 200)
+    }
+
+    @Test("a hash read failure at finish returns 422 error and drops the session")
+    func hashReadFailureIsError() async throws {
+        let fixture = try await makeFixture()
+        let (offer, chunks, id) = try makeTransfer(fixture, data: Data([1, 2, 3, 4]), chunkSize: 4)
+        _ = await fixture.receiver.handleOffer(envelope: offer)
+        _ = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0])
+        try FileManager.default.removeItem(at: fixture.transfersDir.appendingPathComponent("\(id).part"))
+        let response = await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id))
+        #expect(response.statusCode == 422)
+        #expect(status(response) == "error")
+        #expect(await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id)).statusCode == 404)
     }
 
     @Test("a ninth concurrent session from one device gets 429")
