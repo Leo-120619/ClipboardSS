@@ -52,6 +52,7 @@ Peer? resolveVerifiedPeer({
   required PairedDevice device,
   required bool online,
   required List<Peer> mdnsPeers,
+  Set<String> outdatedDeviceIds = const {},
 }) {
   if (!isDeviceConnectionActive(enabled: device.connected, online: online)) {
     return null;
@@ -62,11 +63,25 @@ Peer? resolveVerifiedPeer({
   }
   final host = device.host;
   if (host == null || host.isEmpty) return null;
+  return storedHostPeer(device, host, outdatedDeviceIds);
+}
+
+/// A peer at the device's stored host, carrying the protocol version the last
+/// `/v1/id` probe saw (older when it is in [outdatedDeviceIds]).
+Peer storedHostPeer(
+  PairedDevice device,
+  String host,
+  Set<String> outdatedDeviceIds,
+) {
+  final canonical = canonicalDeviceId(device.id);
   return Peer(
     id: canonical,
     name: device.name,
     host: host,
     port: SubnetSweeper.fixedPort,
+    protocolVersion: outdatedDeviceIds.contains(canonical)
+        ? 1
+        : wireProtocolVersion,
   );
 }
 
@@ -87,18 +102,14 @@ bool deviceNeedsUpdate({
 
 List<Peer> composeSendTargets(
   List<Peer> mdnsPeers,
-  List<PairedDevice> pairedDevices,
-) {
+  List<PairedDevice> pairedDevices, {
+  Set<String> outdatedDeviceIds = const {},
+}) {
   final byId = <String, Peer>{};
   for (final device in pairedDevices.where((device) => device.connected)) {
     final host = device.host;
     if (host != null && host.isNotEmpty) {
-      byId[device.id] = Peer(
-        id: device.id,
-        name: device.name,
-        host: host,
-        port: 51888,
-      );
+      byId[device.id] = storedHostPeer(device, host, outdatedDeviceIds);
     }
   }
   final pairedById = {for (final device in pairedDevices) device.id: device};
@@ -701,7 +712,11 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     // Broadcast
-    final targets = composeSendTargets(peerBrowser.peers, pairedStore.devices);
+    final targets = composeSendTargets(
+      peerBrowser.peers,
+      pairedStore.devices,
+      outdatedDeviceIds: outdatedDeviceIds,
+    );
     return clipSender.broadcast(clip, targets);
   }
 
@@ -718,6 +733,7 @@ class AppState extends ChangeNotifier {
       device: device,
       online: isDeviceOnline(canonical),
       mdnsPeers: peerBrowser.peers,
+      outdatedDeviceIds: outdatedDeviceIds,
     );
   }
 
@@ -725,12 +741,13 @@ class AppState extends ChangeNotifier {
       pairedStore.devices.where((d) => resolvePeer(d.id) != null).toList();
 
   Future<bool> sendFileTo(File file, String deviceId) async {
+    final connected = await reconnectDevice(deviceId, reportError: false);
+    // Checked after the reconnect probe, which records the advertised version.
     if (isDeviceOutdated(deviceId)) {
       lastError = updateOtherDeviceMessage;
       notifyListeners();
       return false;
     }
-    final connected = await reconnectDevice(deviceId, reportError: false);
     final peer = connected ? resolvePeer(deviceId) : null;
     if (peer == null) {
       lastError = 'That device is not reachable right now.';

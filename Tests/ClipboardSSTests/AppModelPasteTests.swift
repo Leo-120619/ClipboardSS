@@ -75,6 +75,21 @@ struct AppModelPasteTests {
         #expect(targets.first { $0.id == id2 }?.host == "192.168.0.20")
     }
 
+    @Test("a stored-host target recorded as outdated carries the older protocol version")
+    func outdatedStoredHostTargetNeedsUpdate() {
+        let oldId = UUID()
+        let newId = UUID()
+        let paired = [
+            PairedDevice(id: oldId, name: "Old", host: "192.168.0.30"),
+            PairedDevice(id: newId, name: "New", host: "192.168.0.31"),
+        ]
+
+        let targets = AppModel.composeSendTargets(mdnsPeers: [], pairedDevices: paired, outdatedDeviceIds: [oldId])
+
+        #expect(targets.first { $0.id == oldId }?.needsUpdate == true)
+        #expect(targets.first { $0.id == newId }?.needsUpdate == false)
+    }
+
     @Test("join candidates try mDNS first then swept peers")
     func joinCandidateUnion() {
         let id1 = UUID()

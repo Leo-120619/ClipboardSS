@@ -39,6 +39,16 @@ public sealed class DeviceLivenessTests
     }
 
     [Fact]
+    public void FileTargetFromStoredHostKeepsProbedOlderVersion()
+    {
+        var id = Guid.NewGuid();
+        var device = new PairedDevice(id, "Mac", "10.0.0.9");
+
+        Assert.True(AppModel.ResolveVerifiedPeer(device, true, [], new HashSet<Guid> { id })?.NeedsUpdate);
+        Assert.False(AppModel.ResolveVerifiedPeer(device, true, [])?.NeedsUpdate);
+    }
+
+    [Fact]
     public async Task MdnsPeerMustAnswerWithMatchingIdentityToBeOnline()
     {
         var id = Guid.NewGuid();

@@ -18,6 +18,38 @@ void main() {
     expect(targets.firstWhere((p) => p.id == 'b').host, '192.168.0.20');
   });
 
+  test('stored-host targets recorded as outdated carry the older version', () {
+    final paired = [
+      PairedDevice(id: 'old', name: 'Old', host: '192.168.0.30'),
+      PairedDevice(id: 'new', name: 'New', host: '192.168.0.31'),
+    ];
+
+    final targets = composeSendTargets(
+      const [],
+      paired,
+      outdatedDeviceIds: {'old'},
+    );
+
+    expect(targets.firstWhere((p) => p.id == 'old').needsUpdate, isTrue);
+    expect(targets.firstWhere((p) => p.id == 'new').needsUpdate, isFalse);
+  });
+
+  test(
+    'a file target resolved from the stored host keeps the probed version',
+    () {
+      final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
+      expect(
+        resolveVerifiedPeer(
+          device: device,
+          online: true,
+          mdnsPeers: const [],
+          outdatedDeviceIds: {'a'},
+        )?.needsUpdate,
+        isTrue,
+      );
+    },
+  );
+
   test('file target resolution rejects offline and paused devices', () {
     final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
     final paused = PairedDevice(

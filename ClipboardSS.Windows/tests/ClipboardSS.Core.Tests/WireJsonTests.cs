@@ -55,6 +55,7 @@ public sealed class WireJsonTests
     {
         var envelope = new ClipEnvelope
         {
+            V = 2,
             SourceDeviceId = Guid.Parse("550E8400-E29B-41D4-A716-446655440000"),
             Nonce = "AA==",
             Ciphertext = "AQ==",
@@ -63,5 +64,13 @@ public sealed class WireJsonTests
         Assert.Equal(
             "{\"v\":2,\"sourceDeviceId\":\"550e8400-e29b-41d4-a716-446655440000\",\"nonce\":\"AA==\",\"ciphertext\":\"AQ==\"}",
             JsonSerializer.Serialize(envelope, WireJson.Options));
+    }
+
+    [Fact]
+    public void EnvelopeWithoutVersionIsRejected()
+    {
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<ClipEnvelope>(
+            "{\"sourceDeviceId\":\"550e8400-e29b-41d4-a716-446655440000\",\"nonce\":\"AA==\",\"ciphertext\":\"AQ==\"}",
+            WireJson.Options));
     }
 }

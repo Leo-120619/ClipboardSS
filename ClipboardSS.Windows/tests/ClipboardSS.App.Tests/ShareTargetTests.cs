@@ -53,6 +53,20 @@ public sealed class ShareTargetTests
         Assert.Equal(connected, targets[0].Id);
     }
 
+    [Fact]
+    public void ComposeSendTargetsStampsOutdatedStoredHostPeers()
+    {
+        var oldId = Guid.NewGuid();
+        var newId = Guid.NewGuid();
+        var targets = AppModel.ComposeSendTargets(
+            [],
+            [new PairedDevice(oldId, "Old", "10.0.0.30"), new PairedDevice(newId, "New", "10.0.0.31")],
+            new HashSet<Guid> { oldId });
+
+        Assert.True(targets.Single(peer => peer.Id == oldId).NeedsUpdate);
+        Assert.False(targets.Single(peer => peer.Id == newId).NeedsUpdate);
+    }
+
     private static string FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

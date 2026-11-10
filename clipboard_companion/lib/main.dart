@@ -1134,9 +1134,7 @@ String _relativeTime(DateTime createdAt) {
 }
 
 String _sendSummaryMessage(ClipSendSummary summary) {
-  if (summary.needsUpdateCount > 0 && summary.successCount == 0) {
-    return updateOtherDeviceMessage;
-  }
+  if (summary.needsUpdateCount > 0) return updateOtherDeviceMessage;
   if (!summary.hasVisiblePeers || !summary.hasPairedTargets) {
     return 'No paired devices nearby';
   }

@@ -36,6 +36,14 @@ struct AppModelLivenessTests {
         #expect(AppModel.resolveVerifiedPeer(device: enabled, online: true, mdnsPeers: [])?.host == "10.0.0.9")
     }
 
+    @Test("a file target resolved from the stored host keeps the probed older version")
+    func verifiedFileTargetCarriesProbedVersion() {
+        let device = PairedDevice(id: macId, name: "Mac", host: "10.0.0.9")
+        let peer = AppModel.resolveVerifiedPeer(device: device, online: true, mdnsPeers: [], outdatedDeviceIds: [macId])
+        #expect(peer?.needsUpdate == true)
+        #expect(AppModel.resolveVerifiedPeer(device: device, online: true, mdnsPeers: [])?.needsUpdate == false)
+    }
+
     @Test("a device visible over mDNS is online only after its address responds")
     func mdnsPeerIsProbed() async {
         let probed = Probed()

@@ -223,12 +223,25 @@ final class AppModel: ObservableObject {
     nonisolated static func resolveVerifiedPeer(
         device: PairedDevice,
         online: Bool,
-        mdnsPeers: [Peer]
+        mdnsPeers: [Peer],
+        outdatedDeviceIds: Set<UUID> = []
     ) -> Peer? {
         guard isDeviceConnectionActive(enabled: device.connected, online: online) else { return nil }
         if let peer = mdnsPeers.first(where: { $0.id == device.id }) { return peer }
         guard let host = device.host, !host.isEmpty else { return nil }
-        return Peer(id: device.id, name: device.name, host: host, port: 51888)
+        return storedHostPeer(device, host: host, outdatedDeviceIds: outdatedDeviceIds)
+    }
+
+    /// A peer at the device's stored host, carrying the protocol version the last
+    /// `/v1/id` probe saw (older when it is in `outdatedDeviceIds`).
+    nonisolated static func storedHostPeer(_ device: PairedDevice, host: String, outdatedDeviceIds: Set<UUID>) -> Peer {
+        Peer(
+            id: device.id,
+            name: device.name,
+            host: host,
+            port: 51888,
+            protocolVersion: outdatedDeviceIds.contains(device.id) ? 1 : ClipEnvelope.currentVersion
+        )
     }
 
     @discardableResult
@@ -355,11 +368,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    nonisolated static func composeSendTargets(mdnsPeers: [Peer], pairedDevices: [PairedDevice]) -> [Peer] {
+    nonisolated static func composeSendTargets(
+        mdnsPeers: [Peer],
+        pairedDevices: [PairedDevice],
+        outdatedDeviceIds: Set<UUID> = []
+    ) -> [Peer] {
         var byId: [UUID: Peer] = [:]
         for device in pairedDevices where device.connected {
             if let host = device.host {
-                byId[device.id] = Peer(id: device.id, name: device.name, host: host, port: 51888)
+                byId[device.id] = storedHostPeer(device, host: host, outdatedDeviceIds: outdatedDeviceIds)
             }
         }
         let connectedIds = Set(pairedDevices.filter(\.connected).map(\.id))
@@ -414,7 +431,11 @@ final class AppModel: ObservableObject {
     }
 
     private func broadcast(clip: ClipItem) async {
-        let targets = Self.composeSendTargets(mdnsPeers: peerBrowser.peers, pairedDevices: pairedDevices)
+        let targets = Self.composeSendTargets(
+            mdnsPeers: peerBrowser.peers,
+            pairedDevices: pairedDevices,
+            outdatedDeviceIds: outdatedDeviceIds
+        )
         do {
             let result = try await clipSender.broadcast(clip: clip, to: targets)
             if result.needsUpdateCount > 0 {
@@ -433,7 +454,8 @@ final class AppModel: ObservableObject {
         return Self.resolveVerifiedPeer(
             device: device,
             online: isDeviceOnline(deviceId),
-            mdnsPeers: peerBrowser.peers
+            mdnsPeers: peerBrowser.peers,
+            outdatedDeviceIds: outdatedDeviceIds
         )
     }
 

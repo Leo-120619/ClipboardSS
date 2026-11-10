@@ -266,14 +266,28 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     public static Peer? ResolveVerifiedPeer(
         PairedDevice device,
         bool online,
-        IEnumerable<Peer> mdnsPeers)
+        IEnumerable<Peer> mdnsPeers,
+        IReadOnlySet<Guid>? outdatedDeviceIds = null)
     {
         if (!IsDeviceConnectionActive(device.Connected, online)) return null;
         var live = mdnsPeers.FirstOrDefault(peer => peer.Id == device.Id);
         if (live is not null) return live;
         return string.IsNullOrWhiteSpace(device.Host)
             ? null
-            : new Peer(device.Id, device.Name, device.Host, 51888);
+            : StoredHostPeer(device, device.Host!, outdatedDeviceIds);
+    }
+
+    /// <summary>
+    /// A peer at the device's stored host, carrying the protocol version the last <c>/v1/id</c>
+    /// probe saw (older when it is in <paramref name="outdatedDeviceIds"/>).
+    /// </summary>
+    public static Peer StoredHostPeer(PairedDevice device, string host, IReadOnlySet<Guid>? outdatedDeviceIds) =>
+        new(device.Id, device.Name, host, 51888,
+            outdatedDeviceIds?.Contains(device.Id) == true ? 1 : WireProtocol.Version);
+
+    private HashSet<Guid> OutdatedDeviceSnapshot()
+    {
+        lock (_outdatedDevices) return [.. _outdatedDevices];
     }
 
     public async Task<bool> ReconnectDeviceAsync(
@@ -399,11 +413,13 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     private async Task SendFileCoreAsync(string path, Guid deviceId)
     {
+        var reachable = await ReconnectDeviceAsync(deviceId, false);
+        // Checked after the reconnect probe, which records the advertised version.
         if (DeviceNeedsUpdate(deviceId)) throw new PeerNeedsUpdateException();
-        if (!await ReconnectDeviceAsync(deviceId, false))
+        if (!reachable)
             throw new InvalidOperationException("The device is not currently reachable.");
         var device = PairedDevices.First(item => item.Id == deviceId);
-        var peer = ResolveVerifiedPeer(device, IsDeviceOnline(deviceId), VisiblePeers)
+        var peer = ResolveVerifiedPeer(device, IsDeviceOnline(deviceId), VisiblePeers, OutdatedDeviceSnapshot())
             ?? throw new InvalidOperationException("The device is not currently reachable.");
         var cancellation = new CancellationTokenSource();
         var transferId = Guid.NewGuid().ToString("D").ToLowerInvariant();
@@ -483,7 +499,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     public static IReadOnlyList<Peer> ComposeSendTargets(
         IEnumerable<Peer> mdnsPeers,
-        IEnumerable<PairedDevice> pairedDevices)
+        IEnumerable<PairedDevice> pairedDevices,
+        IReadOnlySet<Guid>? outdatedDeviceIds = null)
     {
         var devices = pairedDevices.ToArray();
         var byId = new Dictionary<Guid, Peer>();
@@ -491,7 +508,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         {
             if (!device.Connected) continue;
             if (!string.IsNullOrWhiteSpace(device.Host))
-                byId[device.Id] = new Peer(device.Id, device.Name, device.Host, 51888);
+                byId[device.Id] = StoredHostPeer(device, device.Host!, outdatedDeviceIds);
         }
         var connectedIds = devices.Where(device => device.Connected).Select(device => device.Id).ToHashSet();
         foreach (var peer in mdnsPeers)
@@ -577,7 +594,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         {
             var result = await _sender.BroadcastAsync(
                 clip,
-                ComposeSendTargets(VisiblePeers, PairedDevices),
+                ComposeSendTargets(VisiblePeers, PairedDevices, OutdatedDeviceSnapshot()),
                 cancellationToken);
             if (result.NeedsUpdateCount > 0) LastError = WireProtocol.UpdateOtherDeviceMessage;
         }
