@@ -22,6 +22,43 @@ class ClipServerStartException implements Exception {
   String toString() => message;
 }
 
+/// Largest request body any route accepts (mirrors the Mac and Windows HTTP codecs).
+const int maxRequestBodySize = 20 * 1024 * 1024;
+
+/// Thrown by [readBodyCapped] when a request body is larger than allowed.
+class BodyTooLargeException implements Exception {
+  const BodyTooLargeException();
+
+  @override
+  String toString() => 'Request body too large';
+}
+
+/// Reads a request body without ever buffering more than [max] bytes (shelf has no cap of
+/// its own). Rejects up front when `Content-Length` already exceeds [max], and stops reading
+/// as soon as the running total does.
+Future<Uint8List> readBodyCapped(
+  Request request, {
+  int max = maxRequestBodySize,
+}) async {
+  final declared = request.contentLength;
+  if (declared != null && declared > max) {
+    throw const BodyTooLargeException();
+  }
+  final builder = BytesBuilder(copy: false);
+  await for (final chunk in request.read()) {
+    if (builder.length + chunk.length > max) {
+      throw const BodyTooLargeException();
+    }
+    builder.add(chunk);
+  }
+  return builder.takeBytes();
+}
+
+Future<dynamic> _readJsonCapped(Request request) async =>
+    jsonDecode(utf8.decode(await readBodyCapped(request)));
+
+Response _payloadTooLarge() => Response(413, body: 'Payload Too Large');
+
 class ClipServer {
   final DeviceIdentity identity;
   final PairingCoordinator pairingCoordinator;
@@ -98,8 +135,7 @@ class ClipServer {
 
   Future<Response> _handlePairStart(Request request) async {
     try {
-      final bodyStr = await request.readAsString();
-      final body = jsonDecode(bodyStr);
+      final body = await _readJsonCapped(request);
 
       final initiatorId = body['deviceId'] as String;
       final initiatorName = body['deviceName'] as String;
@@ -128,6 +164,8 @@ class ClipServer {
     } on PairingRejectedException catch (e) {
       developer.log('Pair start rejected: ${e.reason}', name: 'ClipServer');
       return Response.forbidden('Rejected');
+    } on BodyTooLargeException {
+      return _payloadTooLarge();
     } catch (e) {
       developer.log('Pair start error: $e', name: 'ClipServer');
       return Response.internalServerError(body: e.toString());
@@ -136,8 +174,7 @@ class ClipServer {
 
   Future<Response> _handlePairConfirm(Request request) async {
     try {
-      final bodyStr = await request.readAsString();
-      final body = jsonDecode(bodyStr);
+      final body = await _readJsonCapped(request);
 
       final initiatorId = body['deviceId'] as String;
       final proof = body['proof'] as String;
@@ -158,6 +195,8 @@ class ClipServer {
         case PairConfirmOutcome.rejected:
           return Response(401, body: 'Invalid proof');
       }
+    } on BodyTooLargeException {
+      return _payloadTooLarge();
     } catch (e) {
       developer.log('Pair confirm error: $e', name: 'ClipServer');
       return Response(400, body: e.toString());
@@ -166,8 +205,7 @@ class ClipServer {
 
   Future<Response> _handleClip(Request request) async {
     try {
-      final bodyStr = await request.readAsString();
-      final body = jsonDecode(bodyStr);
+      final body = await _readJsonCapped(request);
 
       final envelope = ClipEnvelope.fromJson(body);
 
@@ -188,6 +226,8 @@ class ClipServer {
       onClipReceived(payload);
 
       return Response.ok('OK');
+    } on BodyTooLargeException {
+      return _payloadTooLarge();
     } catch (e) {
       developer.log('Clip handle error: $e', name: 'ClipServer');
       return Response(400, body: e.toString());
@@ -206,10 +246,10 @@ class ClipServer {
     final receiver = fileReceiver;
     if (receiver == null) return Response.notFound('Not Found');
     try {
-      final envelope = ClipEnvelope.fromJson(
-        jsonDecode(await request.readAsString()),
-      );
+      final envelope = ClipEnvelope.fromJson(await _readJsonCapped(request));
       return _fileResponse(await receiver.handleOffer(envelope));
+    } on BodyTooLargeException {
+      return _payloadTooLarge();
     } catch (e) {
       return Response(400, body: jsonEncode({'status': 'error'}));
     }
@@ -230,11 +270,13 @@ class ClipServer {
         ) ??
         -1;
     // shelf has no body cap; enforce one manually (chunk plaintext + tag + slack).
-    final body = await _readRawBody(
-      request,
-      FileTransferConstants.chunkSize + 4096,
-    );
-    if (body == null) {
+    final Uint8List body;
+    try {
+      body = await readBodyCapped(
+        request,
+        max: FileTransferConstants.chunkSize + 4096,
+      );
+    } on BodyTooLargeException {
       return _fileResponse(FileTransferResponse(400, {'status': 'tooLarge'}));
     }
     return _fileResponse(await receiver.handleChunk(transferId, index, body));
@@ -244,10 +286,10 @@ class ClipServer {
     final receiver = fileReceiver;
     if (receiver == null) return Response.notFound('Not Found');
     try {
-      final envelope = ClipEnvelope.fromJson(
-        jsonDecode(await request.readAsString()),
-      );
+      final envelope = ClipEnvelope.fromJson(await _readJsonCapped(request));
       return _fileResponse(await receiver.handleFinish(envelope));
+    } on BodyTooLargeException {
+      return _payloadTooLarge();
     } catch (e) {
       return Response(400, body: jsonEncode({'status': 'error'}));
     }
@@ -257,22 +299,12 @@ class ClipServer {
     final receiver = fileReceiver;
     if (receiver == null) return Response.notFound('Not Found');
     try {
-      final envelope = ClipEnvelope.fromJson(
-        jsonDecode(await request.readAsString()),
-      );
+      final envelope = ClipEnvelope.fromJson(await _readJsonCapped(request));
       return _fileResponse(await receiver.handleCancel(envelope));
+    } on BodyTooLargeException {
+      return _payloadTooLarge();
     } catch (e) {
       return Response(400, body: jsonEncode({'status': 'error'}));
     }
-  }
-
-  /// Reads the raw request body, returning null if it exceeds [maxBytes].
-  Future<List<int>?> _readRawBody(Request request, int maxBytes) async {
-    final builder = BytesBuilder(copy: false);
-    await for (final chunk in request.read()) {
-      builder.add(chunk);
-      if (builder.length > maxBytes) return null;
-    }
-    return builder.takeBytes();
   }
 }

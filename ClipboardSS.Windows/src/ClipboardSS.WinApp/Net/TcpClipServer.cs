@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using ClipboardSS.Core.Protocol;
@@ -6,7 +7,13 @@ namespace ClipboardSS.App.Net;
 
 public sealed class TcpClipServer(ClipServerRouter router, int port = 51888) : IAsyncDisposable
 {
+    /// <summary>Time an accepted connection has to deliver one complete request.</summary>
+    private static readonly TimeSpan RequestDeadline = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan AcceptRetryDelay = TimeSpan.FromMilliseconds(100);
+    private const int MaxConcurrentConnections = 64;
+
     private readonly TcpListener _listener = new(IPAddress.Any, port);
+    private readonly SemaphoreSlim _connectionSlots = new(MaxConcurrentConnections, MaxConcurrentConnections);
     private CancellationTokenSource? _cancellation;
     private Task? _acceptLoop;
 
@@ -58,68 +65,129 @@ public sealed class TcpClipServer(ClipServerRouter router, int port = 51888) : I
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            var client = await _listener.AcceptTcpClientAsync(cancellationToken);
+            TcpClient client;
+            try
+            {
+                client = await _listener.AcceptTcpClientAsync(cancellationToken);
+            }
+            catch (SocketException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                // A failed accept (e.g. a peer resetting mid-handshake) must not end the listener.
+                Debug.WriteLine($"TcpClipServer: accept failed ({exception.SocketErrorCode}); continuing");
+                await Task.Delay(AcceptRetryDelay, cancellationToken);
+                continue;
+            }
+
+            if (!_connectionSlots.Wait(0))
+            {
+                // At capacity: close the excess connection immediately rather than queueing it.
+                client.Dispose();
+                continue;
+            }
+
             _ = HandleClientAsync(client, cancellationToken);
         }
     }
 
     private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
     {
-        using (client)
-        await using (var stream = client.GetStream())
+        try
         {
-            HttpResponse response;
-            try
+            using (client)
+            await using (var stream = client.GetStream())
             {
-                var request = HttpCodec.ParseRequest(await ReadRequestAsync(stream, cancellationToken));
                 var remoteHost = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? string.Empty;
-                response = await router.RouteAsync(request, remoteHost, cancellationToken);
-            }
-            catch (HttpCodecException exception) when (exception.Error == HttpCodecError.PayloadTooLarge)
-            {
-                response = new HttpResponse(413, new Dictionary<string, string>(), "Payload Too Large"u8.ToArray());
-            }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
-            {
-                response = new HttpResponse(400, new Dictionary<string, string>(), "Bad Request"u8.ToArray());
-            }
+                HttpResponse response;
+                try
+                {
+                    var request = await ReadRequestWithDeadlineAsync(stream, cancellationToken);
+                    if (request is null) return;
+                    response = await router.RouteAsync(request, remoteHost, cancellationToken);
+                }
+                catch (HttpCodecException exception) when (exception.Error == HttpCodecError.PayloadTooLarge)
+                {
+                    response = new HttpResponse(413, new Dictionary<string, string>(), "Payload Too Large"u8.ToArray());
+                }
+                catch (HttpCodecException exception) when (exception.Error == HttpCodecError.HeadersTooLarge)
+                {
+                    response = new HttpResponse(
+                        431,
+                        new Dictionary<string, string>(),
+                        "Request Header Fields Too Large"u8.ToArray());
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    response = new HttpResponse(400, new Dictionary<string, string>(), "Bad Request"u8.ToArray());
+                }
 
-            var bytes = HttpCodec.EncodeResponse(response);
-            await stream.WriteAsync(bytes, cancellationToken);
+                var bytes = HttpCodec.EncodeResponse(response);
+                await stream.WriteAsync(bytes, cancellationToken);
+            }
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The peer went away while we were responding; nothing else to do.
+        }
+        finally
+        {
+            _connectionSlots.Release();
         }
     }
 
-    private static async Task<byte[]> ReadRequestAsync(
+    /// <summary>
+    /// Reads one request, giving up (null, connection dropped without a reply) if it is not
+    /// complete within <see cref="RequestDeadline"/>.
+    /// </summary>
+    private static async Task<HttpRequest?> ReadRequestWithDeadlineAsync(
         NetworkStream stream,
         CancellationToken cancellationToken)
     {
-        using var buffer = new MemoryStream();
-        var chunk = new byte[64 * 1024];
-        while (true)
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(RequestDeadline);
+        try
         {
-            var count = await stream.ReadAsync(chunk, cancellationToken);
+            return await ReadRequestAsync(stream, deadline.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            Debug.WriteLine("TcpClipServer: request deadline exceeded; dropping connection");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Parses the head once (capped at <see cref="HttpCodec.MaxHeaderSize"/>), then reads
+    /// exactly the declared Content-Length into a single preallocated buffer.
+    /// </summary>
+    private static async Task<HttpRequest> ReadRequestAsync(
+        NetworkStream stream,
+        CancellationToken cancellationToken)
+    {
+        // Room for the largest allowed head plus its terminator; anything bigger is rejected
+        // by TryParseHead before this fills up.
+        var headBuffer = new byte[HttpCodec.MaxHeaderSize + 4];
+        var filled = 0;
+        HttpHead head;
+        while (!HttpCodec.TryParseHead(headBuffer.AsSpan(0, filled), out head))
+        {
+            var count = await stream.ReadAsync(headBuffer.AsMemory(filled), cancellationToken);
             if (count == 0)
             {
-                var finalBytes = buffer.ToArray();
-                _ = HttpCodec.ParseRequest(finalBytes);
-                return finalBytes;
+                throw new HttpCodecException(HttpCodecError.Incomplete);
             }
 
-            buffer.Write(chunk, 0, count);
-            if (buffer.Length > HttpCodec.MaxBodySize + (64 * 1024))
-            {
-                throw new HttpCodecException(HttpCodecError.PayloadTooLarge);
-            }
-
-            var bytes = buffer.ToArray();
-            try
-            {
-                _ = HttpCodec.ParseRequest(bytes);
-                return bytes;
-            }
-            catch (HttpCodecException exception) when (exception.Error == HttpCodecError.Incomplete)
-            {
-            }
+            filled += count;
         }
+
+        var body = new byte[head.ContentLength];
+        var alreadyRead = Math.Min(filled - head.HeaderLength, body.Length);
+        headBuffer.AsSpan(head.HeaderLength, alreadyRead).CopyTo(body);
+        if (alreadyRead < body.Length)
+        {
+            // Throws EndOfStreamException (-> 400) if the peer closes early.
+            await stream.ReadExactlyAsync(body.AsMemory(alreadyRead), cancellationToken);
+        }
+
+        return new HttpRequest(head.Method, head.Path, head.Headers, body);
     }
 }
