@@ -4,24 +4,6 @@ import Combine
 import ClipboardCore
 import OSLog
 
-func logToFile(_ message: String) {
-    guard ProcessInfo.processInfo.environment["CLIPBOARDSS_DEBUG_LOG"] == "1" else { return }
-
-    let logMessage = "[\(Date())] \(message)\n"
-    if let data = logMessage.data(using: .utf8) {
-        let fileURL = URL(fileURLWithPath: "/tmp/clipboardss_debug.log")
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            if let fileHandle = try? FileHandle(forWritingTo: fileURL) {
-                fileHandle.seekToEndOfFile()
-                fileHandle.write(data)
-                fileHandle.closeFile()
-            }
-        } else {
-            try? data.write(to: fileURL)
-        }
-    }
-}
-
 @MainActor
 public final class PeerBrowser: ObservableObject {
     @Published public private(set) var peers: [Peer] = []

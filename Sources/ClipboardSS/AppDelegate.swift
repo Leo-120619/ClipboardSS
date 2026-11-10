@@ -100,6 +100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let windowController = ClipboardWindowController(model: model)
             let hotKeyManager = HotKeyManager()
+            hotKeyManager.onRegistrationFailuresChanged = { [weak model] failures in
+                model?.hotKeyRegistrationFailures = failures
+            }
 
             self.model = model
             self.screenTextOverlayController = screenTextOverlayController
@@ -198,18 +201,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitorTimer?.invalidate()
     }
 
+    /// One timer tick. A failed capture (retried once by the monitor on the next tick)
+    /// must not skip the rest of the tick's housekeeping.
     private func pollClipboard() {
         do {
             if let clip = try clipboardMonitor?.poll() {
                 model?.broadcastCaptured(clip)
             }
-            try model?.cleanupExpiredClips()
-            model?.collectTransferGarbage()
-            model?.refresh()
-            processShareOutbox()
         } catch {
-            print("Background clipboard polling failed: \(error.localizedDescription)")
+            print("Clipboard capture failed: \(error.localizedDescription)")
         }
+        do {
+            try model?.cleanupExpiredClips()
+        } catch {
+            print("Clip cleanup failed: \(error.localizedDescription)")
+        }
+        model?.collectTransferGarbage()
+        model?.refresh()
+        processShareOutbox()
     }
 
     /// Handles a `clipboardss://` open triggered by the share extension. The payload is

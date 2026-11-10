@@ -1,26 +1,6 @@
 import Foundation
 import CryptoKit
 
-func logToFile(_ message: String) {
-    guard ProcessInfo.processInfo.environment["CLIPBOARDSS_DEBUG_LOG"] == "1" else { return }
-
-    let logPath = "/tmp/clipboardss_debug.log"
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
-    let dateString = formatter.string(from: Date())
-    let line = "[\(dateString)] \(message)\n"
-    
-    if let fileHandle = FileHandle(forWritingAtPath: logPath) {
-        fileHandle.seekToEndOfFile()
-        if let data = line.data(using: .utf8) {
-            fileHandle.write(data)
-        }
-        fileHandle.closeFile()
-    } else {
-        try? line.write(toFile: logPath, atomically: true, encoding: .utf8)
-    }
-}
-
 public enum EnvelopeError: Error, Equatable {
     case encryptionFailed
     case decryptionFailed

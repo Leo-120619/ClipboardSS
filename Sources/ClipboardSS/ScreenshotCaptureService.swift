@@ -1,7 +1,14 @@
 import Foundation
 
+/// Captures a user-selected screen region to a temporary PNG and returns its URL.
+/// The caller owns the file and must delete it.
 @MainActor
-final class ScreenshotCaptureService {
+protocol ScreenshotCapturing: AnyObject {
+    func captureRegion() async throws -> URL
+}
+
+@MainActor
+final class ScreenshotCaptureService: ScreenshotCapturing {
     enum CaptureError: LocalizedError {
         case cancelled
         case screenRecordingDenied

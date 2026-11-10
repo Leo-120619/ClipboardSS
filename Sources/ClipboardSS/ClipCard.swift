@@ -208,12 +208,35 @@ private struct ImagePreview: View {
     let baseDirectory: URL
 
     var body: some View {
-        if let image = NSImage(contentsOf: clip.resolvedImageURL(baseDirectory: baseDirectory)) {
+        if let image = ThumbnailCache.shared.image(at: clip.resolvedImageURL(baseDirectory: baseDirectory)) {
             Image(nsImage: image)
                 .resizable()
                 .scaledToFit()
                 .frame(maxHeight: 140)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+    }
+}
+
+/// Decoded clip images by file path. The history view re-renders on every 0.75 s poll;
+/// without this each render decoded every visible image from disk again. Image files
+/// are written once under a fresh UUID name and never modified, so the path is a safe key.
+@MainActor
+final class ThumbnailCache {
+    static let shared = ThumbnailCache()
+    private let cache = NSCache<NSString, NSImage>()
+
+    init(countLimit: Int = 200) {
+        cache.countLimit = countLimit
+    }
+
+    func image(at url: URL) -> NSImage? {
+        let key = url.path as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        cache.setObject(image, forKey: key)
+        return image
     }
 }

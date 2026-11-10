@@ -113,12 +113,11 @@ final class SnippetPaster {
         pendingPaste?.cancel()
         pendingPaste = nil
 
-        // If a previous snippet paste is still waiting to restore, keep the
-        // original clipboard from before the first paste.
-        if let pendingRestore {
-            pendingRestore.cancel()
-            self.pendingRestore = nil
-        } else {
+        // A previous snippet paste may still be waiting for Command-V or to
+        // restore; keep the original clipboard from before the first paste.
+        pendingRestore?.cancel()
+        pendingRestore = nil
+        if savedItems == nil {
             savedItems = Self.copyItems(from: pasteboard)
         }
 

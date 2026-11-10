@@ -1,38 +1,81 @@
 import Foundation
 import Network
+import SystemConfiguration
 import ClipboardCore
 
 enum SubnetSweeper {
-    static func hostAddresses(ownIPv4: String, netmask: String) -> [String] {
-        let ipParts = ownIPv4.split(separator: ".").compactMap { UInt8($0) }
-        let maskParts = netmask.split(separator: ".").compactMap { UInt8($0) }
-        guard ipParts.count == 4, maskParts.count == 4 else { return [] }
+    /// Widest subnet swept: a /22 (1022 hosts). Larger LANs sweep the /22 around us.
+    static let maxPrefixWidth = 22
 
-        let prefix = [ipParts[0], ipParts[1], ipParts[2]]
+    /// Host addresses of the subnet given by `netmask` (capped at a /22), excluding
+    /// the network, broadcast and own addresses.
+    static func hostAddresses(ownIPv4: String, netmask: String) -> [String] {
+        guard let ip = ipv4Value(ownIPv4), let mask = ipv4Value(netmask) else { return [] }
+        let cappedMask = mask | (UInt32.max << UInt32(32 - maxPrefixWidth))
+        let network = ip & cappedMask
+        let broadcast = network | ~cappedMask
+        guard broadcast > network + 1 else { return [] }
+
         var result: [String] = []
-        for last in 1...254 {
-            let addr = "\(prefix[0]).\(prefix[1]).\(prefix[2]).\(last)"
-            if addr == ownIPv4 { continue }
-            result.append(addr)
+        for address in (network + 1)..<broadcast where address != ip {
+            result.append(ipv4String(address))
         }
         return result
+    }
+
+    private static func ipv4Value(_ string: String) -> UInt32? {
+        let parts = string.split(separator: ".", omittingEmptySubsequences: false).compactMap { UInt8($0) }
+        guard parts.count == 4 else { return nil }
+        return parts.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    }
+
+    private static func ipv4String(_ value: UInt32) -> String {
+        "\(value >> 24).\((value >> 16) & 0xFF).\((value >> 8) & 0xFF).\(value & 0xFF)"
     }
 }
 
 extension SubnetSweeper {
+    struct InterfaceAddress: Equatable {
+        let name: String
+        let ip: String
+        let mask: String
+    }
+
+    /// The primary (default-route) interface's address, else the first candidate.
+    static func selectInterface(_ candidates: [InterfaceAddress], primaryInterface: String?) -> InterfaceAddress? {
+        if let primaryInterface, let primary = candidates.first(where: { $0.name == primaryInterface }) {
+            return primary
+        }
+        return candidates.first
+    }
+
+    /// Name of the interface carrying the default IPv4 route, e.g. "en0" or "en7".
+    static func primaryIPv4InterfaceName() -> String? {
+        guard let store = SCDynamicStoreCreate(nil, "ClipboardSS" as CFString, nil, nil),
+              let global = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any]
+        else { return nil }
+        return global["PrimaryInterface"] as? String
+    }
+
     static func ownIPv4AndMask() -> (ip: String, mask: String)? {
-        var result: (String, String)?
+        let selected = selectInterface(activeIPv4Interfaces(), primaryInterface: primaryIPv4InterfaceName())
+        return selected.map { ($0.ip, $0.mask) }
+    }
+
+    /// Up, non-loopback IPv4 interfaces in system order.
+    static func activeIPv4Interfaces() -> [InterfaceAddress] {
+        var result: [InterfaceAddress] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
         defer { freeifaddrs(ifaddr) }
 
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let flags = Int32(ptr.pointee.ifa_flags)
             guard (flags & IFF_UP) == IFF_UP, (flags & IFF_LOOPBACK) == 0 else { continue }
+            guard ptr.pointee.ifa_addr != nil, ptr.pointee.ifa_netmask != nil else { continue }
             guard ptr.pointee.ifa_addr.pointee.sa_family == UInt8(AF_INET) else { continue }
 
             let name = String(cString: ptr.pointee.ifa_name)
-            guard name == "en0" else { continue }
 
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             var mask = [CChar](repeating: 0, count: Int(NI_MAXHOST))
@@ -60,7 +103,7 @@ extension SubnetSweeper {
             let maskString = mask.withUnsafeBufferPointer { buffer in
                 String(cString: buffer.baseAddress!)
             }
-            result = (hostString, maskString)
+            result.append(InterfaceAddress(name: name, ip: hostString, mask: maskString))
         }
 
         return result

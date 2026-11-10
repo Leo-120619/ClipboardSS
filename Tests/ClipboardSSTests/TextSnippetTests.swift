@@ -148,6 +148,25 @@ struct SnippetPasterTests {
 
         try await fixture.waitUntil { fixture.pasteboard.string(forType: .string) == "original" }
     }
+
+    @Test("a second snippet press before Command-V goes out keeps the original clipboard")
+    func secondSnippetPasteKeepsOriginalClipboard() async throws {
+        let fixture = SnippetPasterFixture()
+        defer { fixture.release() }
+        fixture.pasteboard.clearContents()
+        fixture.pasteboard.setString("original", forType: .string)
+        fixture.modifiersDown = true
+
+        // Both presses land while the hot key's modifiers are still held, so the
+        // first paste is still waiting and no restore is scheduled yet.
+        fixture.paster.paste("first")
+        fixture.paster.paste("second")
+        fixture.modifiersDown = false
+
+        try await fixture.waitUntil { fixture.pasteCount == 1 }
+        try await fixture.waitUntil { fixture.pasteboard.string(forType: .string) != "second" }
+        #expect(fixture.pasteboard.string(forType: .string) == "original")
+    }
 }
 
 @MainActor

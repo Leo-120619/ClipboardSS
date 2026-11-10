@@ -58,6 +58,8 @@ public final class ClipboardMonitor {
     private let pasteboard: PasteboardClient
     private let store: ClipStore
     private var lastChangeCount: Int?
+    /// The change count whose capture already failed once; its next failure is final.
+    private var retriedChangeCount: Int?
 
     public init(pasteboard: PasteboardClient, store: ClipStore) {
         self.pasteboard = pasteboard
@@ -74,6 +76,7 @@ public final class ClipboardMonitor {
     /// Records a new local copy and returns its clip, or nil when the
     /// pasteboard has not changed, the change was the app's own write, or the
     /// item is sensitive or empty. Only the returned clip should be broadcast.
+    /// A change whose capture throws is retried once on the next poll, then dropped.
     @discardableResult
     public func poll() throws -> ClipItem? {
         let currentChangeCount = pasteboard.currentChangeCount()
@@ -81,8 +84,20 @@ public final class ClipboardMonitor {
             return nil
         }
 
+        let previousChangeCount = lastChangeCount
         lastChangeCount = currentChangeCount
-        let snapshot = pasteboard.readSnapshot()
+        do {
+            return try capture(pasteboard.readSnapshot())
+        } catch {
+            if retriedChangeCount != currentChangeCount {
+                retriedChangeCount = currentChangeCount
+                lastChangeCount = previousChangeCount
+            }
+            throw error
+        }
+    }
+
+    private func capture(_ snapshot: ClipboardSnapshot) throws -> ClipItem? {
         guard !snapshot.isSensitive else {
             return nil
         }

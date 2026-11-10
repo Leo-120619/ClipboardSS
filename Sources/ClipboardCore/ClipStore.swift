@@ -23,17 +23,26 @@ public final class ClipStore {
     private let metadataURL: URL
     private let imageDirectory: URL
     private let expirationInterval: TimeInterval
+    private let maxUnpinnedClips: Int
+    private let maxImageBytes: Int
+
+    public static let defaultMaxUnpinnedClips = 500
+    public static let defaultMaxImageBytes = 500 * 1024 * 1024
 
     public init(
         storageDirectory: URL,
         now: @escaping () -> Date = Date.init,
         fileManager: FileManager = .default,
-        expirationInterval: TimeInterval = 7 * 24 * 60 * 60
+        expirationInterval: TimeInterval = 7 * 24 * 60 * 60,
+        maxUnpinnedClips: Int = ClipStore.defaultMaxUnpinnedClips,
+        maxImageBytes: Int = ClipStore.defaultMaxImageBytes
     ) throws {
         self.storageDirectory = storageDirectory
         self.now = now
         self.fileManager = fileManager
         self.expirationInterval = expirationInterval
+        self.maxUnpinnedClips = maxUnpinnedClips
+        self.maxImageBytes = maxImageBytes
         self.metadataURL = storageDirectory.appendingPathComponent("clips.json")
         self.imageDirectory = storageDirectory.appendingPathComponent("Images", isDirectory: true)
 
@@ -123,8 +132,9 @@ public final class ClipStore {
             return
         }
 
-        let clip = items.remove(at: index)
-        try deleteImageFileIfNeeded(for: clip)
+        // File first: if it cannot be removed, memory and clips.json still agree.
+        try deleteImageFileIfNeeded(for: items[index])
+        items.remove(at: index)
         try save()
     }
 
@@ -133,13 +143,25 @@ public final class ClipStore {
         let expired = items.filter { !$0.isPinned && $0.createdAt < cutoff }
         // Runs on every clipboard poll; rewriting unchanged metadata each time adds up to GBs of disk writes.
         guard !expired.isEmpty else { return }
-        items.removeAll { !$0.isPinned && $0.createdAt < cutoff }
 
+        // Drop only the clips whose files are gone, so a failed delete is retried next time.
+        var removed: Set<UUID> = []
+        var firstError: Error?
         for clip in expired {
-            try deleteImageFileIfNeeded(for: clip)
+            do {
+                try deleteImageFileIfNeeded(for: clip)
+                removed.insert(clip.id)
+            } catch {
+                firstError = firstError ?? error
+            }
         }
-
-        try save()
+        if !removed.isEmpty {
+            items.removeAll { removed.contains($0.id) }
+            try save()
+        }
+        if let firstError {
+            throw firstError
+        }
     }
 
     public func clips(matching query: String, filter: ClipFilter = .all) -> [ClipItem] {
@@ -168,8 +190,37 @@ public final class ClipStore {
         }
 
         items.insert(clip, at: 0)
+        enforceHistoryCaps()
         try save()
         return clip
+    }
+
+    /// Evicts the oldest unpinned clips (the tail of `items`) until at most
+    /// `maxUnpinnedClips` unpinned clips remain and images use at most `maxImageBytes`.
+    /// Pinned clips are never evicted. A clip whose image cannot be deleted is kept.
+    private func enforceHistoryCaps() {
+        var unpinnedCount = items.lazy.filter { !$0.isPinned }.count
+        var imageBytes = items.reduce(0) { $0 + imageFileSize(of: $1) }
+        var index = items.count - 1
+        while index > 0, unpinnedCount > maxUnpinnedClips || imageBytes > maxImageBytes {
+            let clip = items[index]
+            let overCount = unpinnedCount > maxUnpinnedClips
+            if !clip.isPinned, overCount || clip.imagePath != nil {
+                let size = imageFileSize(of: clip)
+                if (try? deleteImageFileIfNeeded(for: clip)) != nil {
+                    items.remove(at: index)
+                    unpinnedCount -= 1
+                    imageBytes -= size
+                }
+            }
+            index -= 1
+        }
+    }
+
+    private func imageFileSize(of clip: ClipItem) -> Int {
+        guard let imagePath = clip.imagePath else { return 0 }
+        let path = storageDirectory.appendingPathComponent(imagePath).path
+        return (try? fileManager.attributesOfItem(atPath: path)[.size] as? NSNumber)?.intValue ?? 0
     }
 
     private func refreshExistingClip(_ existing: ClipItem) throws -> ClipItem {

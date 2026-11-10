@@ -53,6 +53,13 @@ final class AppModel: ObservableObject {
     private var notifiedReceiveIds: Set<String> = []
     /// Folder answer shared by the files of one multi-file share.
     private var receiveBatch = ReceiveBatchDestination()
+    /// Receive-folder preference and folder picker; replaced in tests.
+    var receiveModeProvider: () -> ReceiveSettings.Mode = { ReceiveSettings.mode }
+    var chooseReceiveDirectory: () -> URL? = { ReceiveSettings.chooseDirectory() }
+    /// True while a receive prompt is on screen. Its modal loop keeps delivering events,
+    /// so files finishing meanwhile wait in `receivesAwaitingPrompt` for its answer.
+    private var isShowingReceivePrompt = false
+    private var receivesAwaitingPrompt: [String] = []
     private var sendTokens: [UUID: CancellationToken] = [:]
     private var livenessTask: Task<Void, Never>?
     /// Where shared files are staged while they are being sent.
@@ -71,12 +78,16 @@ final class AppModel: ObservableObject {
     nonisolated static let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
     nonisolated static let coachMarkStepCount = CoachMarkStep.steps.count
     private let writer: ClipboardWriter
-    private let screenshotCaptureService: ScreenshotCaptureService
+    private let screenshotCaptureService: any ScreenshotCapturing
     private let ocrService: OCRService
     private let screenTextCaptureService: any ScreenTextCapturing
     private let launchAtLogin: LaunchAtLoginControlling
     private let pasteboard: PasteboardClient
     private let clipboardMonitor: ClipboardMonitor?
+    /// Why the last shortcut change was refused, shown in Preferences.
+    @Published var shortcutMessage: String?
+    /// Shortcuts the system refused to register (another app may own them).
+    @Published var hotKeyRegistrationFailures: [KeyboardShortcut] = []
     var onClipboardShortcutChanged: ((KeyboardShortcut) -> Void)?
     var onScreenshotShortcutChanged: ((KeyboardShortcut?) -> Void)?
     var onScreenTextShortcutChanged: ((KeyboardShortcut?) -> Void)?
@@ -96,7 +107,7 @@ final class AppModel: ObservableObject {
     init(
         store: ClipStore,
         writer: ClipboardWriter,
-        screenshotCaptureService: ScreenshotCaptureService,
+        screenshotCaptureService: any ScreenshotCapturing,
         ocrService: OCRService,
         screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
@@ -719,11 +730,7 @@ final class AppModel: ObservableObject {
                 transfers[i].progress = 1.0
                 transfers[i].status = .completed
                 transfers[i].destinationURL = url
-                postProcessReceivedFile(at: i)
-                if let finalURL = transfers[i].destinationURL,
-                   notifiedReceiveIds.insert(transferId).inserted {
-                    onReceivedFileCompleted?(finalURL)
-                }
+                postProcessReceivedFile(transferId: transferId)
             }
         case let .failed(transferId, reason):
             if let i = index(ofKey: transferId) {
@@ -744,45 +751,81 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    private func postProcessReceivedFile(at index: Int) {
-        switch ReceiveSettings.mode {
+    /// Applies the receive-folder preference to a finished file, then notifies once.
+    /// Works by transfer id: prompts run a modal loop during which `transfers` can change.
+    private func postProcessReceivedFile(transferId: String) {
+        guard !isShowingReceivePrompt else {
+            receivesAwaitingPrompt.append(transferId)
+            return
+        }
+        switch receiveModeProvider() {
         case .unset:
-            let alert = NSAlert()
-            alert.messageText = "Where should received files be saved?"
-            alert.informativeText = "They are currently saved to \(ReceiveSettings.resolvedDirectory().path)."
-            alert.addButton(withTitle: "Keep saving here")
-            alert.addButton(withTitle: "Choose a folder…")
-            alert.addButton(withTitle: "Ask every time")
-            switch alert.runModal() {
-            case .alertSecondButtonReturn:
-                if let folder = ReceiveSettings.chooseDirectory() {
-                    ReceiveSettings.path = folder.path
-                    ReceiveSettings.mode = .defaultFolder
-                }
-            case .alertThirdButtonReturn: ReceiveSettings.mode = .askEveryTime
-            default: ReceiveSettings.mode = .defaultFolder
-            }
+            isShowingReceivePrompt = true
+            askForReceivePreference()
+            isShowingReceivePrompt = false
         case .askEveryTime:
-            guard let source = transfers[index].destinationURL,
-                  case let .folder(folder) = batchReceiveDestination() else { return }
-            let destination = folder.appendingPathComponent(source.lastPathComponent)
-            do {
-                try FileManager.default.moveItem(at: source, to: destination)
-                transfers[index].destinationURL = destination
-            } catch { lastError = error.localizedDescription }
-        case .defaultFolder: break
+            var decision = receiveBatch.decision(now: Date())
+            if decision == nil {
+                isShowingReceivePrompt = true
+                let answer: ReceiveBatchDestination.Decision =
+                    chooseReceiveDirectory().map { .folder($0) } ?? .declined
+                // Timed from when the picker closes, not from when it opened.
+                receiveBatch.record(answer, now: Date())
+                isShowingReceivePrompt = false
+                decision = answer
+            }
+            if case let .folder(folder) = decision {
+                moveReceivedFile(transferId: transferId, to: folder)
+            }
+        case .defaultFolder:
+            break
+        }
+        notifyReceivedFile(transferId: transferId)
+
+        // Files that finished while the prompt was up reuse its answer.
+        let waiting = receivesAwaitingPrompt
+        receivesAwaitingPrompt = []
+        for id in waiting {
+            postProcessReceivedFile(transferId: id)
         }
     }
 
-    /// Asks where to save once per share: files that arrive back-to-back reuse the
-    /// first answer instead of opening a folder picker each.
-    private func batchReceiveDestination() -> ReceiveBatchDestination.Decision {
-        if let decision = receiveBatch.decision(now: Date()) { return decision }
-        let decision: ReceiveBatchDestination.Decision =
-            ReceiveSettings.chooseDirectory().map { .folder($0) } ?? .declined
-        // Timed from when the picker closes, not from when it opened.
-        receiveBatch.record(decision, now: Date())
-        return decision
+    private func askForReceivePreference() {
+        let alert = NSAlert()
+        alert.messageText = "Where should received files be saved?"
+        alert.informativeText = "They are currently saved to \(ReceiveSettings.resolvedDirectory().path)."
+        alert.addButton(withTitle: "Keep saving here")
+        alert.addButton(withTitle: "Choose a folder…")
+        alert.addButton(withTitle: "Ask every time")
+        switch alert.runModal() {
+        case .alertSecondButtonReturn:
+            if let folder = chooseReceiveDirectory() {
+                ReceiveSettings.path = folder.path
+                ReceiveSettings.mode = .defaultFolder
+            }
+        case .alertThirdButtonReturn: ReceiveSettings.mode = .askEveryTime
+        default: ReceiveSettings.mode = .defaultFolder
+        }
+    }
+
+    /// Moves a received file into `folder`, renaming it if the name is already taken there.
+    private func moveReceivedFile(transferId: String, to folder: URL) {
+        guard let i = index(ofKey: transferId), let source = transfers[i].destinationURL else { return }
+        guard source.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL else { return }
+        let destination = FileReceiver.uniqueDestination(directory: folder, fileName: source.lastPathComponent)
+        do {
+            try FileManager.default.moveItem(at: source, to: destination)
+            transfers[i].destinationURL = destination
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func notifyReceivedFile(transferId: String) {
+        guard let i = index(ofKey: transferId),
+              let finalURL = transfers[i].destinationURL,
+              notifiedReceiveIds.insert(transferId).inserted else { return }
+        onReceivedFileCompleted?(finalURL)
     }
 
     /// Periodically reaps idle receiver sessions; wired to the app's poll timer.
@@ -895,24 +938,33 @@ final class AppModel: ObservableObject {
     }
 
     func captureScreenshot() {
+        guard !isCapturingScreenshot else { return }
         isCapturingScreenshot = true
         lastError = nil
 
         Task {
             do {
-                let url = try await screenshotCaptureService.captureRegion()
-                let imageData = try Data(contentsOf: url)
+                let tempURL = try await screenshotCaptureService.captureRegion()
+                let imageData = try Self.consumeTemporaryFile(at: tempURL)
                 let clip = try store.addImageData(imageData, fileExtension: "png", previewText: "Screenshot")
                 broadcastCaptured(clip)
-                let blocks = try await ocrService.recognizeText(in: url)
-                screenshotReview = ScreenshotReview(imageURL: url, selection: OCRSelectionState(blocks: blocks))
                 refresh()
+                // OCR and the review read the stored copy; the temp PNG is already gone.
+                let imageURL = clip.resolvedImageURL(baseDirectory: store.storageDirectory)
+                let blocks = try await ocrService.recognizeText(in: imageURL)
+                screenshotReview = ScreenshotReview(imageURL: imageURL, selection: OCRSelectionState(blocks: blocks))
             } catch {
                 lastError = error.localizedDescription
             }
 
             isCapturingScreenshot = false
         }
+    }
+
+    /// Reads a capture's temporary file and deletes it, whether or not the read succeeds.
+    private static func consumeTemporaryFile(at url: URL) throws -> Data {
+        defer { try? FileManager.default.removeItem(at: url) }
+        return try Data(contentsOf: url)
     }
 
     func startScreenTextSelection() {
@@ -933,18 +985,49 @@ final class AppModel: ObservableObject {
     }
 
     func setClipboardShortcut(_ shortcut: KeyboardShortcut) {
+        guard acceptShortcut(shortcut, for: .clipboard) else { return }
         clipboardShortcut = shortcut
         onClipboardShortcutChanged?(shortcut)
     }
 
     func setScreenshotShortcut(_ shortcut: KeyboardShortcut?) {
+        guard acceptShortcut(shortcut, for: .screenshot) else { return }
         screenshotShortcut = shortcut
         onScreenshotShortcutChanged?(shortcut)
     }
 
     func setScreenTextShortcut(_ shortcut: KeyboardShortcut?) {
+        guard acceptShortcut(shortcut, for: .screenText) else { return }
         screenTextShortcut = shortcut
         onScreenTextShortcutChanged?(shortcut)
+    }
+
+    private enum BuiltInShortcut { case clipboard, screenshot, screenText }
+
+    /// Checks a new built-in shortcut against Command-V, the other built-ins and the
+    /// snippets. Sets `shortcutMessage` to the reason when it is refused.
+    private func acceptShortcut(_ shortcut: KeyboardShortcut?, for slot: BuiltInShortcut) -> Bool {
+        guard let shortcut else {
+            shortcutMessage = nil
+            return true
+        }
+        let name = shortcut.displayName
+        let taken: [(BuiltInShortcut, KeyboardShortcut?, String)] = [
+            (.clipboard, clipboardShortcut, "opens the clipboard window"),
+            (.screenshot, screenshotShortcut, "is the screenshot shortcut"),
+            (.screenText, screenTextShortcut, "is the screen text shortcut"),
+        ]
+        var conflict: String?
+        if shortcut.isReservedSystemShortcut {
+            conflict = "\(name) is the system Paste shortcut. Choose a different shortcut."
+        } else if let other = taken.first(where: { $0.0 != slot && $0.1 == shortcut }) {
+            conflict = "\(name) already \(other.2). Choose a different shortcut."
+        } else if let snippet = snippets.first(where: { $0.shortcut == shortcut }) {
+            let snippetName = snippet.name.isEmpty ? "a snippet" : "the snippet “\(snippet.name)”"
+            conflict = "\(name) is already used by \(snippetName). Choose a different shortcut."
+        }
+        shortcutMessage = conflict
+        return conflict == nil
     }
 
     func addSnippet() {
@@ -969,6 +1052,9 @@ final class AppModel: ObservableObject {
     /// if it is free. Built-in shortcuts and other snippets' shortcuts are taken.
     func snippetShortcutConflict(_ shortcut: KeyboardShortcut, excluding id: UUID) -> String? {
         let name = shortcut.displayName
+        if shortcut.isReservedSystemShortcut {
+            return "\(name) is the system Paste shortcut. Choose a different shortcut."
+        }
         if shortcut == clipboardShortcut {
             return "\(name) already opens the clipboard window. Choose a different shortcut."
         }

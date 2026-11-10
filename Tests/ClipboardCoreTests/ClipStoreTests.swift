@@ -131,6 +131,76 @@ struct ClipStoreTests {
         let images = try FileManager.default.contentsOfDirectory(atPath: storage.appendingPathComponent("Images").path)
         #expect(images.count == 1)
     }
+
+    @Test("history keeps at most the unpinned-clip and image-byte caps, evicting oldest unpinned first")
+    func historyIsCappedByCountAndSize() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 5_000))
+        let store = try ClipStore(
+            storageDirectory: temporaryDirectory(),
+            now: clock.now,
+            maxUnpinnedClips: 3,
+            maxImageBytes: 10
+        )
+
+        let pinned = try store.addText("pinned")
+        try store.setPinned(pinned.id, true)
+        var texts: [ClipItem] = []
+        for index in 0..<5 {
+            clock.advance(by: 1)
+            texts.append(try store.addText("text \(index)"))
+        }
+
+        // Count cap: the three newest unpinned clips survive; the pinned one is never evicted.
+        #expect(store.items.map(\.id) == [texts[4].id, texts[3].id, texts[2].id, pinned.id])
+
+        // Size cap: 4 + 4 + 4 bytes of images exceeds 10, so the oldest image goes, file included.
+        let pinnedImage = try store.addImageData(Data([1, 1, 1, 1]), fileExtension: "png")
+        try store.setPinned(pinnedImage.id, true)
+        clock.advance(by: 1)
+        let oldImage = try store.addImageData(Data([2, 2, 2, 2]), fileExtension: "png")
+        clock.advance(by: 1)
+        let newImage = try store.addImageData(Data([3, 3, 3, 3]), fileExtension: "png")
+
+        let ids = store.items.map(\.id)
+        #expect(ids.contains(pinnedImage.id))
+        #expect(ids.contains(newImage.id))
+        #expect(!ids.contains(oldImage.id))
+        #expect(!FileManager.default.fileExists(
+            atPath: oldImage.resolvedImageURL(baseDirectory: store.storageDirectory).path
+        ))
+        #expect(store.items.filter { !$0.isPinned }.count <= 3)
+
+        let reloaded = try ClipStore(storageDirectory: store.storageDirectory, now: clock.now)
+        #expect(reloaded.items.map(\.id) == store.items.map(\.id))
+    }
+
+    @Test("defaults cap history at 500 unpinned clips and 500 MB of images")
+    func historyCapDefaults() {
+        #expect(ClipStore.defaultMaxUnpinnedClips == 500)
+        #expect(ClipStore.defaultMaxImageBytes == 500 * 1024 * 1024)
+    }
+
+    @Test("a failed file delete leaves memory and disk metadata in agreement")
+    func failedFileDeleteLeavesStoreConsistent() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 6_000))
+        let fileManager = FailingRemoveFileManager()
+        let store = try ClipStore(storageDirectory: temporaryDirectory(), now: clock.now, fileManager: fileManager)
+        let image = try store.addImageData(Data([9, 9, 9, 9]), fileExtension: "png")
+
+        fileManager.failRemoves = true
+        #expect(throws: (any Error).self) { try store.delete(image.id) }
+        #expect(store.items.map(\.id) == [image.id])
+
+        clock.advance(by: (8 * 24 * 60 * 60) + 1)
+        #expect(throws: (any Error).self) { try store.cleanupExpiredClips() }
+        #expect(store.items.map(\.id) == [image.id])
+        let reloaded = try ClipStore(storageDirectory: store.storageDirectory, now: clock.now)
+        #expect(reloaded.items.map(\.id) == [image.id])
+
+        fileManager.failRemoves = false
+        try store.cleanupExpiredClips()
+        #expect(store.items.isEmpty)
+    }
 }
 
 private final class TestClock {
@@ -154,4 +224,15 @@ func temporaryDirectory() throws -> URL {
         .appendingPathComponent("ClipboardSSTests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+private final class FailingRemoveFileManager: FileManager, @unchecked Sendable {
+    var failRemoves = false
+
+    override func removeItem(at URL: URL) throws {
+        if failRemoves {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        try super.removeItem(at: URL)
+    }
 }
