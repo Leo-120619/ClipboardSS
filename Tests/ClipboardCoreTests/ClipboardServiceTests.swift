@@ -72,6 +72,38 @@ struct ClipboardServiceTests {
         #expect(store.items.map(\.text) == ["user copy"])
     }
 
+    @Test("monitor never stores a concealed or transient pasteboard item")
+    func testPollSkipsSensitiveSnapshot() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: temporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+
+        pasteboard.changeCount = 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "hunter2", imageData: nil, isSensitive: true)
+        try monitor.poll()
+        try monitor.poll()
+
+        #expect(store.items.isEmpty)
+    }
+
+    @Test("monitor captures the next normal copy after a sensitive one")
+    func testPollCapturesNextNormalCopyAfterSensitiveOne() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: temporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+
+        pasteboard.changeCount = 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "hunter2", imageData: Data([1, 2, 3]), isSensitive: true)
+        try monitor.poll()
+
+        pasteboard.changeCount = 2
+        pasteboard.snapshot = ClipboardSnapshot(text: "normal copy", imageData: nil)
+        try monitor.poll()
+        try monitor.poll()
+
+        #expect(store.items.map(\.text) == ["normal copy"])
+    }
+
     @Test("PairedDevice persists optional host and legacy records decode")
     func pairedDeviceHostRoundTrip() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -124,6 +124,8 @@ final class SnippetPaster {
 
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        // Tell other clipboard managers not to record this temporary write.
+        pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
         writtenChangeCount = pasteboard.changeCount
         onPasteboardWritten?()
 

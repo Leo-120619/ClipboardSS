@@ -92,6 +92,19 @@ struct SnippetPasterTests {
         #expect(fixture.ignoredWrites == 2)
     }
 
+    @Test("marks the snippet write as transient so clipboard managers skip it")
+    func snippetWriteIsTransient() {
+        let fixture = SnippetPasterFixture()
+        defer { fixture.release() }
+        fixture.modifiersDown = true
+
+        fixture.paster.paste("snippet")
+
+        let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+        #expect(fixture.pasteboard.types?.contains(transient) == true)
+        #expect(fixture.pasteboard.string(forType: .string) == "snippet")
+    }
+
     @Test("sends Command-V anyway once the modifier wait times out")
     func timesOutModifierWait() async throws {
         let fixture = SnippetPasterFixture()

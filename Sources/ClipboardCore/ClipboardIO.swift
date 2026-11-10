@@ -3,10 +3,15 @@ import Foundation
 public struct ClipboardSnapshot: Equatable, Sendable {
     public var text: String?
     public var imageData: Data?
+    /// True when the source app marked the item as concealed, transient or
+    /// auto-generated (nspasteboard.org markers), e.g. a copied password.
+    /// Such items must never be stored or synced.
+    public var isSensitive: Bool
 
-    public init(text: String?, imageData: Data?) {
+    public init(text: String?, imageData: Data?, isSensitive: Bool = false) {
         self.text = text
         self.imageData = imageData
+        self.isSensitive = isSensitive
     }
 }
 
@@ -74,6 +79,9 @@ public final class ClipboardMonitor {
 
         lastChangeCount = currentChangeCount
         let snapshot = pasteboard.readSnapshot()
+        guard !snapshot.isSensitive else {
+            return
+        }
 
         if let imageData = snapshot.imageData, !imageData.isEmpty {
             try store.addImageData(imageData, fileExtension: "png", previewText: "Image")
