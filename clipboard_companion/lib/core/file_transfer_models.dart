@@ -9,6 +9,16 @@ class FileTransferConstants {
   static const String transferIdHeader = 'X-Transfer-Id';
   static const String chunkIndexHeader = 'X-Chunk-Index';
   static const Duration idleTimeout = Duration(seconds: 60);
+
+  /// Free space an offer must leave on the transfers volume: 500 MB (MiB,
+  /// 524,288,000 bytes).
+  static const int freeSpaceReserve = 500 * 1024 * 1024;
+
+  /// Most concurrent receive sessions one source device may hold.
+  static const int maxSessionsPerDevice = 8;
+
+  /// How long a cancelled transfer id is remembered (chunks for it get 410).
+  static const Duration cancelledRetention = Duration(seconds: 600);
 }
 
 String _iso8601(DateTime date) =>

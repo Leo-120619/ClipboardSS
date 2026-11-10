@@ -159,19 +159,19 @@ public sealed class EnvelopeV2Tests
             throw new InvalidOperationException("not expected");
         }
 
-        public Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, CancellationToken cancellationToken)
+        public Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, Guid sourceDeviceId, CancellationToken cancellationToken)
         {
             Touched = true;
             return Task.FromResult(new FileReceiveResult(200, "ready"));
         }
 
-        public Task<FileReceiveResult> HandleFileFinishAsync(string transferId, CancellationToken cancellationToken)
+        public Task<FileReceiveResult> HandleFileFinishAsync(string transferId, Guid sourceDeviceId, CancellationToken cancellationToken)
         {
             Touched = true;
             return Task.FromResult(new FileReceiveResult(200, "complete"));
         }
 
-        public Task<FileReceiveResult> HandleFileCancelAsync(string transferId, CancellationToken cancellationToken)
+        public Task<FileReceiveResult> HandleFileCancelAsync(string transferId, Guid sourceDeviceId, CancellationToken cancellationToken)
         {
             Touched = true;
             return Task.FromResult(new FileReceiveResult(200, "cancelled"));

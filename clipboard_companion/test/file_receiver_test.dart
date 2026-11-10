@@ -3,9 +3,12 @@ import 'dart:io';
 import 'package:clipboard_companion/core/crypto_utils.dart';
 import 'package:clipboard_companion/core/file_receiver.dart';
 import 'package:clipboard_companion/core/file_transfer_models.dart';
+import 'package:clipboard_companion/core/file_transfer_crypto.dart';
 import 'package:clipboard_companion/core/models.dart';
+import 'package:clipboard_companion/core/paired_device_store.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:uuid/uuid.dart';
 import 'file_transfer_test_support.dart';
 
 void main() {
@@ -165,27 +168,6 @@ void main() {
     final response = await receiver.handleFinish(finish);
     expect(response.statusCode, 409);
     expect(statusOf(response), 'incomplete');
-  });
-
-  test('corrupted chunk tears the session down with 400', () async {
-    final (receiver, _, _) = await makeReceiver();
-    final t = await prepareTransfer(
-      data: data,
-      chunkSize: 4,
-      peerId: peerId,
-      key: key,
-    );
-    await receiver.handleOffer(t.offer);
-    final corrupt = List<int>.from(t.chunks[0]);
-    corrupt[0] ^= 0xFF;
-    expect(
-      (await receiver.handleChunk(t.transferId, 0, corrupt)).statusCode,
-      400,
-    );
-    expect(
-      (await receiver.handleChunk(t.transferId, 1, t.chunks[1])).statusCode,
-      404,
-    );
   });
 
   test('hash mismatch returns 422 and deletes the temp file', () async {
@@ -469,6 +451,314 @@ void main() {
       );
       expect((await receiver.handleOffer(forged)).statusCode, 401);
       expect((await receiver.handleOffer(t.offer)).statusCode, 200);
+    });
+  });
+
+  group('robustness', () {
+    const otherId = 'dddddddd-0000-0000-0000-000000000000';
+    final otherKey = SecretKey(List<int>.filled(32, 3));
+
+    Future<
+      ({
+        FileReceiver receiver,
+        Directory dest,
+        MutableClock clock,
+        PairedDeviceStore store,
+      })
+    >
+    makeRobust({
+      int freeSpace = 1 << 40,
+      Future<void> Function(RandomAccessFile, int, List<int>)? chunkWriter,
+    }) async {
+      final store = await makePairedStore(peerId, key);
+      await store.addDevice(PairedDevice(id: otherId, name: 'Other'), otherKey);
+      final dest = makeTempDir('dest');
+      final clock = MutableClock(DateTime(2026, 1, 1, 12));
+      final receiver = FileReceiver(
+        pairedStore: store,
+        localDeviceId: receiverId,
+        transfersDirectory: makeTempDir('transfers'),
+        destinationProvider: () => dest,
+        now: clock.now,
+        freeSpaceProvider: () async => freeSpace,
+        chunkWriter: chunkWriter,
+      );
+      return (receiver: receiver, dest: dest, clock: clock, store: store);
+    }
+
+    Future<ClipEnvelope> finishFor(
+      String id, {
+      String from = peerId,
+      SecretKey? sealKey,
+    }) => sealControl(
+      FileFinishPayload(id).toJson(),
+      from,
+      sealKey ?? key,
+      purpose: EnvelopePurpose.fileFinish,
+    );
+
+    Future<ClipEnvelope> cancelFor(
+      String id, {
+      String from = peerId,
+      SecretKey? sealKey,
+    }) => sealControl(
+      FileCancelPayload(id).toJson(),
+      from,
+      sealKey ?? key,
+      purpose: EnvelopePurpose.fileCancel,
+    );
+
+    Future<ClipEnvelope> offerOfSize(
+      int size, {
+      String from = peerId,
+      SecretKey? sealKey,
+      String? transferId,
+    }) {
+      const chunkSize = FileTransferConstants.chunkSize;
+      return sealControl(
+        FileOfferPayload(
+          transferId: transferId ?? const Uuid().v4(),
+          fileName: 'big.bin',
+          fileSize: size,
+          mimeType: 'application/octet-stream',
+          fileHash: 'h',
+          chunkSize: chunkSize,
+          chunkCount: (size + chunkSize - 1) ~/ chunkSize,
+          createdAt: DateTime.now(),
+          sourceDeviceName: 'Peer',
+        ).toJson(),
+        from,
+        sealKey ?? key,
+        purpose: EnvelopePurpose.fileOffer,
+      );
+    }
+
+    test('junkChunkDoesNotDestroySession', () async {
+      final r = await makeRobust();
+      final t = await prepareTransfer(
+        data: data,
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      expect((await r.receiver.handleOffer(t.offer)).statusCode, 200);
+
+      final corrupt = List<int>.from(t.chunks[0]);
+      corrupt[0] ^= 0xFF;
+      final junk = await r.receiver.handleChunk(t.transferId, 0, corrupt);
+      expect(junk.statusCode, 400);
+      expect(statusOf(junk), 'authFailed');
+      final badIndex = await r.receiver.handleChunk(
+        t.transferId,
+        99,
+        t.chunks[0],
+      );
+      expect(badIndex.statusCode, 400);
+      expect(statusOf(badIndex), 'badIndex');
+      final fileKey = await FileTransferCrypto.deriveFileKey(key, t.transferId);
+      final short = await FileTransferCrypto.sealChunk([9], fileKey, 0);
+      final badSize = await r.receiver.handleChunk(t.transferId, 0, short);
+      expect(badSize.statusCode, 400);
+      expect(statusOf(badSize), 'badSize');
+
+      for (var i = 0; i < t.chunks.length; i++) {
+        expect(
+          (await r.receiver.handleChunk(
+            t.transferId,
+            i,
+            t.chunks[i],
+          )).statusCode,
+          200,
+        );
+      }
+      expect(
+        (await r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        )).statusCode,
+        200,
+      );
+      expect(await File('${r.dest.path}/file.bin').readAsBytes(), data);
+    });
+
+    test('finishFromDifferentPairedDeviceIsRejected', () async {
+      final r = await makeRobust();
+      final t = await prepareTransfer(
+        data: [1, 2, 3, 4],
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      await r.receiver.handleOffer(t.offer);
+      await r.receiver.handleChunk(t.transferId, 0, t.chunks[0]);
+
+      expect(
+        (await r.receiver.handleFinish(
+          await finishFor(t.transferId, from: otherId, sealKey: otherKey),
+        )).statusCode,
+        404,
+      );
+      expect(
+        (await r.receiver.handleCancel(
+          await cancelFor(t.transferId, from: otherId, sealKey: otherKey),
+        )).statusCode,
+        404,
+      );
+      expect(
+        (await r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        )).statusCode,
+        200,
+      );
+    });
+
+    test('finishWhilePausedIsRejected', () async {
+      final r = await makeRobust();
+      final t = await prepareTransfer(
+        data: [1, 2, 3, 4],
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      await r.receiver.handleOffer(t.offer);
+      await r.receiver.handleChunk(t.transferId, 0, t.chunks[0]);
+
+      await r.store.setConnected(peerId, false);
+      final paused = await r.receiver.handleFinish(
+        await finishFor(t.transferId),
+      );
+      expect(paused.statusCode, 401);
+      expect(statusOf(paused), 'paused');
+      expect(
+        (await r.receiver.handleCancel(
+          await cancelFor(t.transferId),
+        )).statusCode,
+        401,
+      );
+
+      await r.store.setConnected(peerId, true);
+      expect(
+        (await r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        )).statusCode,
+        200,
+      );
+    });
+
+    test('offerLargerThanFreeSpaceIsRejected', () async {
+      const reserve = FileTransferConstants.freeSpaceReserve;
+      expect(reserve, 500 * 1024 * 1024);
+      final r = await makeRobust(freeSpace: reserve + 1000);
+      final tooLarge = await r.receiver.handleOffer(await offerOfSize(1001));
+      expect(tooLarge.statusCode, 400);
+      expect(statusOf(tooLarge), 'tooLarge');
+      expect(
+        (await r.receiver.handleOffer(await offerOfSize(1000))).statusCode,
+        200,
+      );
+    });
+
+    test('ninthConcurrentSessionIsRejected', () async {
+      expect(FileTransferConstants.maxSessionsPerDevice, 8);
+      final r = await makeRobust();
+      for (var i = 0; i < 8; i++) {
+        expect(
+          (await r.receiver.handleOffer(await offerOfSize(1))).statusCode,
+          200,
+        );
+      }
+      final ninth = await r.receiver.handleOffer(await offerOfSize(1));
+      expect(ninth.statusCode, 429);
+      expect(statusOf(ninth), 'tooManyTransfers');
+      // The limit is per device.
+      expect(
+        (await r.receiver.handleOffer(
+          await offerOfSize(1, from: otherId, sealKey: otherKey),
+        )).statusCode,
+        200,
+      );
+    });
+
+    test('failedWriteDoesNotMarkChunkReceived', () async {
+      var failures = 1;
+      final r = await makeRobust(
+        chunkWriter: (raf, offset, bytes) async {
+          if (failures > 0) {
+            failures--;
+            throw const FileSystemException('disk full');
+          }
+          await raf.setPosition(offset);
+          await raf.writeFrom(bytes);
+        },
+      );
+      final t = await prepareTransfer(
+        data: [1, 2, 3, 4],
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      await r.receiver.handleOffer(t.offer);
+
+      final failed = await r.receiver.handleChunk(t.transferId, 0, t.chunks[0]);
+      expect(failed.statusCode, 400);
+      expect(statusOf(failed), 'writeFailed');
+      expect(
+        (await r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        )).statusCode,
+        409,
+      );
+      expect(
+        (await r.receiver.handleChunk(t.transferId, 0, t.chunks[0])).statusCode,
+        200,
+      );
+      expect(
+        (await r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        )).statusCode,
+        200,
+      );
+      expect(await File('${r.dest.path}/file.bin').readAsBytes(), [1, 2, 3, 4]);
+    });
+
+    test('cancelledIdsArePruned', () async {
+      final r = await makeRobust();
+      final t = await prepareTransfer(
+        data: [1, 2, 3, 4],
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      await r.receiver.handleOffer(t.offer);
+      expect(
+        (await r.receiver.handleCancel(
+          await cancelFor(t.transferId),
+        )).statusCode,
+        200,
+      );
+      r.clock.advance(const Duration(seconds: 599));
+      await r.receiver.garbageCollect();
+      expect(
+        (await r.receiver.handleChunk(t.transferId, 0, t.chunks[0])).statusCode,
+        410,
+      );
+      r.clock.advance(const Duration(seconds: 2));
+      await r.receiver.garbageCollect();
+      expect(r.receiver.cancelledTransferCount, 0);
+      expect(
+        (await r.receiver.handleChunk(t.transferId, 0, t.chunks[0])).statusCode,
+        404,
+      );
+    });
+
+    test('concurrent identical offers create one session', () async {
+      final r = await makeRobust();
+      final id = const Uuid().v4();
+      final results = await Future.wait([
+        r.receiver.handleOffer(await offerOfSize(1, transferId: id)),
+        r.receiver.handleOffer(await offerOfSize(1, transferId: id)),
+      ]);
+      expect(results.map((e) => e.statusCode).toList()..sort(), [200, 409]);
+      expect(r.receiver.activeSessionCount, 1);
     });
   });
 }

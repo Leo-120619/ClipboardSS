@@ -36,6 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   bonsoir: ^7.1.4
   cryptography: ^2.9.0
+  ffi: ^2.1.0
   uuid: ^4.5.3
   http: ^1.6.0
   shelf: ^1.4.2

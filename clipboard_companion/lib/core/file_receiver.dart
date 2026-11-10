@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'content_hasher.dart';
 import 'crypto_utils.dart';
 import 'file_transfer_crypto.dart';
@@ -9,6 +10,7 @@ import 'file_transfer_models.dart';
 import 'models.dart';
 import 'paired_device_store.dart';
 import 'replay_guard.dart';
+import 'volume_free_space.dart';
 
 /// UI-facing event emitted as a transfer progresses on the receiving side.
 class FileTransferReceiveEvent {
@@ -73,8 +75,23 @@ class FileReceiver {
   /// Shared with the clip endpoint in production (one guard per process).
   final ReplayGuard replayGuard;
 
+  /// Bytes available on the transfers volume.
+  final Future<int> Function() freeSpaceProvider;
+
+  /// Writes one chunk's plaintext at a byte offset (a seam for tests).
+  final Future<void> Function(RandomAccessFile raf, int offset, List<int> bytes)
+  chunkWriter;
+
   final _sessions = <String, _Session>{};
-  final _cancelled = <String>{};
+
+  /// Offers past validation whose session is still being set up: holding the id
+  /// here before the first `await` keeps a concurrent identical offer from
+  /// opening (and leaking) a second handle.
+  final _pendingOffers = <String, String>{}; // transferId -> sourceDeviceId
+
+  /// Cancelled transfer id -> when it was cancelled; pruned after
+  /// [FileTransferConstants.cancelledRetention].
+  final _cancelled = <String, DateTime>{};
   final _events = StreamController<FileTransferReceiveEvent>.broadcast();
 
   FileReceiver({
@@ -85,11 +102,34 @@ class FileReceiver {
     DateTime Function()? now,
     this.idleTimeout = FileTransferConstants.idleTimeout,
     ReplayGuard? replayGuard,
+    Future<int> Function()? freeSpaceProvider,
+    Future<void> Function(RandomAccessFile raf, int offset, List<int> bytes)?
+    chunkWriter,
   }) : localDeviceId = canonicalDeviceId(localDeviceId),
        now = now ?? DateTime.now,
-       replayGuard = replayGuard ?? ReplayGuard();
+       replayGuard = replayGuard ?? ReplayGuard(),
+       freeSpaceProvider =
+           freeSpaceProvider ?? (() => volumeFreeSpace(transfersDirectory)),
+       chunkWriter = chunkWriter ?? _defaultChunkWriter;
+
+  static Future<void> _defaultChunkWriter(
+    RandomAccessFile raf,
+    int offset,
+    List<int> bytes,
+  ) async {
+    await raf.setPosition(offset);
+    await raf.writeFrom(bytes);
+  }
 
   Stream<FileTransferReceiveEvent> get events => _events.stream;
+
+  /// Active sessions (test hook).
+  @visibleForTesting
+  int get activeSessionCount => _sessions.length;
+
+  /// Remembered cancelled ids (test hook for pruning).
+  @visibleForTesting
+  int get cancelledTransferCount => _cancelled.length;
 
   Future<void> dispose() async => _events.close();
 
@@ -147,23 +187,37 @@ class FileReceiver {
       return FileTransferResponse(400, {'status': 'invalidOffer'});
     }
 
-    if (_sessions.containsKey(offer.transferId)) {
+    if (_sessions.containsKey(offer.transferId) ||
+        _pendingOffers.containsKey(offer.transferId)) {
       return FileTransferResponse(409, {'status': 'duplicate'});
     }
+    final source = envelope.sourceDeviceId;
+    final activeForDevice =
+        _sessions.values.where((s) => s.sourceDeviceId == source).length +
+        _pendingOffers.values.where((id) => id == source).length;
+    if (activeForDevice >= FileTransferConstants.maxSessionsPerDevice) {
+      return FileTransferResponse(429, {'status': 'tooManyTransfers'});
+    }
 
+    _pendingOffers[offer.transferId] = source;
+    final tempFile = File(
+      '${transfersDirectory.path}/${offer.transferId}.part',
+    );
+    RandomAccessFile? raf;
     try {
+      final freeSpace = await freeSpaceProvider();
+      if (offer.fileSize > freeSpace - FileTransferConstants.freeSpaceReserve) {
+        return FileTransferResponse(400, {'status': 'tooLarge'});
+      }
       await transfersDirectory.create(recursive: true);
-      final tempFile = File(
-        '${transfersDirectory.path}/${offer.transferId}.part',
-      );
-      final raf = await tempFile.open(mode: FileMode.write);
+      raf = await tempFile.open(mode: FileMode.write);
       final fileKey = await FileTransferCrypto.deriveFileKey(
         key,
         offer.transferId,
       );
       _sessions[offer.transferId] = _Session(
         offer: offer,
-        sourceDeviceId: envelope.sourceDeviceId,
+        sourceDeviceId: source,
         fileKey: fileKey,
         tempFile: tempFile,
         raf: raf,
@@ -180,18 +234,29 @@ class FileReceiver {
       );
       return FileTransferResponse(200, {'status': 'ready'});
     } catch (_) {
+      try {
+        await raf?.close();
+      } catch (_) {}
+      try {
+        if (await tempFile.exists()) await tempFile.delete();
+      } catch (_) {}
       return FileTransferResponse(400, {'status': 'error'});
+    } finally {
+      _pendingOffers.remove(offer.transferId);
     }
   }
 
   // MARK: - Chunk
 
+  /// Chunks are unauthenticated at the HTTP layer (anyone who sees
+  /// `X-Transfer-Id` can post one), so a rejected chunk never touches the
+  /// session: it stays intact for the real sender.
   Future<FileTransferResponse> handleChunk(
     String transferId,
     int chunkIndex,
     List<int> body,
   ) async {
-    if (_cancelled.contains(transferId)) {
+    if (_cancelled.containsKey(transferId)) {
       return FileTransferResponse(410, {'status': 'cancelled'});
     }
     final session = _sessions[transferId];
@@ -199,7 +264,6 @@ class FileReceiver {
       return FileTransferResponse(404, {'status': 'unknown'});
 
     if (chunkIndex < 0 || chunkIndex >= session.offer.chunkCount) {
-      await _teardown(transferId, 'bad chunk index');
       return FileTransferResponse(400, {'status': 'badIndex'});
     }
 
@@ -211,14 +275,12 @@ class FileReceiver {
         chunkIndex,
       );
     } catch (_) {
-      await _teardown(transferId, 'chunk authentication failed');
       return FileTransferResponse(400, {'status': 'authFailed'});
     }
     final expectedSize = chunkIndex == session.offer.chunkCount - 1
         ? session.offer.fileSize - chunkIndex * session.offer.chunkSize
         : session.offer.chunkSize;
     if (plaintext.length != expectedSize) {
-      await _teardown(transferId, 'bad chunk size');
       return FileTransferResponse(400, {'status': 'badSize'});
     }
 
@@ -230,11 +292,15 @@ class FileReceiver {
       });
     }
 
+    // The index counts as received only once its bytes are on disk; a retry
+    // rewrites it.
     try {
-      await session.raf.setPosition(chunkIndex * session.offer.chunkSize);
-      await session.raf.writeFrom(plaintext);
+      await chunkWriter(
+        session.raf,
+        chunkIndex * session.offer.chunkSize,
+        plaintext,
+      );
     } catch (_) {
-      await _teardown(transferId, 'write failed');
       return FileTransferResponse(400, {'status': 'writeFailed'});
     }
 
@@ -260,6 +326,9 @@ class FileReceiver {
     if (envelope.v != wireProtocolVersion) return _upgradeRequired();
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key == null) return FileTransferResponse(401, {'status': 'unpaired'});
+    if (!pairedStore.isConnected(envelope.sourceDeviceId)) {
+      return FileTransferResponse(401, {'status': 'paused'});
+    }
 
     final Map<String, dynamic> json;
     FileFinishPayload finish;
@@ -277,20 +346,27 @@ class FileReceiver {
     final rejected = _replayRejection(envelope, json);
     if (rejected != null) return rejected;
 
+    // Another paired device must not learn of, or finish, this device's
+    // transfer.
     final session = _sessions[finish.transferId];
-    if (session == null)
+    if (session == null || session.sourceDeviceId != envelope.sourceDeviceId) {
       return FileTransferResponse(404, {'status': 'unknown'});
+    }
 
     if (session.received.length != session.offer.chunkCount) {
       return FileTransferResponse(409, {'status': 'incomplete'});
     }
 
-    await session.raf.close();
-
-    final tempPath = session.tempFile.path;
-    final computed = await Isolate.run(
-      () => ContentHasher.fileHashOfFile(File(tempPath)),
-    );
+    String? computed;
+    try {
+      await session.raf.close();
+      final tempPath = session.tempFile.path;
+      computed = await Isolate.run(
+        () => ContentHasher.fileHashOfFile(File(tempPath)),
+      );
+    } catch (_) {
+      computed = null;
+    }
     if (computed != session.offer.fileHash) {
       await _destroy(finish.transferId, session);
       _emit(
@@ -336,6 +412,9 @@ class FileReceiver {
     if (envelope.v != wireProtocolVersion) return _upgradeRequired();
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key != null) {
+      if (!pairedStore.isConnected(envelope.sourceDeviceId)) {
+        return FileTransferResponse(401, {'status': 'paused'});
+      }
       final Map<String, dynamic> json;
       final FileCancelPayload cancel;
       try {
@@ -352,9 +431,14 @@ class FileReceiver {
       }
       final rejected = _replayRejection(envelope, json);
       if (rejected != null) return rejected;
+      final session = _sessions[cancel.transferId];
+      if (session != null &&
+          session.sourceDeviceId != envelope.sourceDeviceId) {
+        return FileTransferResponse(404, {'status': 'unknown'});
+      }
       try {
-        _cancelled.add(cancel.transferId);
-        final session = _sessions[cancel.transferId];
+        _pruneCancelled();
+        _cancelled[cancel.transferId] = now();
         if (session != null) {
           await _destroy(cancel.transferId, session);
           _emit(FileTransferReceiveEvent('cancelled', cancel.transferId));
@@ -368,6 +452,8 @@ class FileReceiver {
 
   // MARK: - Garbage collection
 
+  /// Drops sessions idle longer than [idleTimeout], deleting their temp files,
+  /// and forgets cancelled ids older than the cancelled-id retention.
   Future<void> garbageCollect() async {
     final cutoff = now().subtract(idleTimeout);
     final stale = _sessions.entries
@@ -379,15 +465,15 @@ class FileReceiver {
         FileTransferReceiveEvent('failed', entry.key, reason: 'idle timeout'),
       );
     }
+    _pruneCancelled();
+  }
+
+  void _pruneCancelled() {
+    final cutoff = now().subtract(FileTransferConstants.cancelledRetention);
+    _cancelled.removeWhere((_, cancelledAt) => !cancelledAt.isAfter(cutoff));
   }
 
   // MARK: - Internals
-
-  Future<void> _teardown(String transferId, String reason) async {
-    final session = _sessions[transferId];
-    if (session != null) await _destroy(transferId, session);
-    _emit(FileTransferReceiveEvent('failed', transferId, reason: reason));
-  }
 
   Future<void> _destroy(String transferId, _Session session) async {
     try {

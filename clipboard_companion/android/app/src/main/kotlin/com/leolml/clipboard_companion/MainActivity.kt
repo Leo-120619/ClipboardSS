@@ -13,6 +13,7 @@ import android.provider.MediaStore
 import android.content.ContentValues
 import android.os.Environment
 import android.os.Build
+import android.os.StatFs
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.plugin.common.MethodChannel
@@ -31,6 +32,7 @@ class MainActivity : FlutterActivity() {
     private val imagesChannelName = "clipboard_companion/images"
     private val shareChannelName = "clipboard_companion/incoming_share"
     private val downloadsChannelName = "clipboard_companion/android_downloads"
+    private val storageChannelName = "clipboard_companion/storage"
     private val nearbyWifiRequestCode = 4107
     private var pendingPermissionResult: MethodChannel.Result? = null
     private var shareChannel: MethodChannel? = null
@@ -106,6 +108,17 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, imagesChannelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "copyImageToClipboard" -> copyImageToClipboard(call.argument("imageBase64"), call.argument("extension"), result)
+                else -> result.notImplemented()
+            }
+        }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, storageChannelName).setMethodCallHandler { call, result ->
+            when (call.method) {
+                // Free bytes on the volume holding `path` (incoming file-transfer quota).
+                "freeSpace" -> try {
+                    result.success(StatFs(call.argument<String>("path") ?: filesDir.path).availableBytes)
+                } catch (e: Exception) {
+                    result.error("freeSpace", e.message, null)
+                }
                 else -> result.notImplemented()
             }
         }

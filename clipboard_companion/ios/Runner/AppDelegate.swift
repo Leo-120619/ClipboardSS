@@ -5,6 +5,7 @@ import UIKit
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let imagesChannelName = "clipboard_companion/images"
   private let shareChannelName = "clipboard_companion/incoming_share"
+  private let storageChannelName = "clipboard_companion/storage"
   private let appGroup = "group.com.leolml.clipboardCompanion"
   private var shareChannel: FlutterMethodChannel?
 
@@ -31,6 +32,27 @@ import UIKit
           extension: args?["extension"] as? String,
           result: result
         )
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    let storageChannel = FlutterMethodChannel(
+      name: storageChannelName,
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    storageChannel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "freeSpace":
+        // Free bytes on the volume holding `path` (incoming file-transfer quota).
+        let path = (call.arguments as? [String: Any])?["path"] as? String ?? NSTemporaryDirectory()
+        let values = try? URL(fileURLWithPath: path).resourceValues(
+          forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        )
+        if let bytes = values?.volumeAvailableCapacityForImportantUsage {
+          result(NSNumber(value: bytes))
+        } else {
+          result(FlutterError(code: "freeSpace", message: "unavailable", details: nil))
+        }
       default:
         result(FlutterMethodNotImplemented)
       }

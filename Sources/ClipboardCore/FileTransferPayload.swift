@@ -11,6 +11,12 @@ public enum FileTransferConstants {
     public static let fileKeySalt = "ClipboardSS_FileKey"
     /// Receiver session idle timeout before garbage collection.
     public static let idleTimeout: TimeInterval = 60
+    /// Free space an offer must leave on the transfers volume: 500 MB (MiB, 524,288,000 bytes).
+    public static let freeSpaceReserve: Int64 = 500 * 1024 * 1024
+    /// Most concurrent receive sessions one source device may hold.
+    public static let maxSessionsPerDevice = 8
+    /// How long a cancelled transfer id is remembered (chunks for it get 410).
+    public static let cancelledRetention: TimeInterval = 600
     /// HTTP header carrying the transfer id on chunk requests (read lowercased).
     public static let transferIdHeader = "X-Transfer-Id"
     /// HTTP header carrying the chunk index on chunk requests (read lowercased).

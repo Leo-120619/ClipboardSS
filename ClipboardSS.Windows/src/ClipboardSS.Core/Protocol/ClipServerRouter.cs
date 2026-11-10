@@ -24,13 +24,14 @@ public interface IClipServerBackend
     byte[]? GetPairKey(Guid deviceId);
     bool IsConnected(Guid deviceId) => true;
     ReceiveResult Receive(ClipPayload payload);
-    Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, CancellationToken cancellationToken) =>
+    /// <param name="sourceDeviceId">The envelope's authenticated sender; it owns the session.</param>
+    Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, Guid sourceDeviceId, CancellationToken cancellationToken) =>
         Task.FromResult(new FileReceiveResult(404, "unsupported"));
     Task<FileReceiveResult> HandleFileChunkAsync(string transferId, int chunkIndex, byte[] body, CancellationToken cancellationToken) =>
         Task.FromResult(new FileReceiveResult(404, "unsupported"));
-    Task<FileReceiveResult> HandleFileFinishAsync(string transferId, CancellationToken cancellationToken) =>
+    Task<FileReceiveResult> HandleFileFinishAsync(string transferId, Guid sourceDeviceId, CancellationToken cancellationToken) =>
         Task.FromResult(new FileReceiveResult(404, "unsupported"));
-    Task<FileReceiveResult> HandleFileCancelAsync(string transferId, CancellationToken cancellationToken) =>
+    Task<FileReceiveResult> HandleFileCancelAsync(string transferId, Guid sourceDeviceId, CancellationToken cancellationToken) =>
         Task.FromResult(new FileReceiveResult(404, "unsupported"));
     Task<PairStartResponse> HandlePairStartAsync(
         PairStartRequest request,
@@ -115,22 +116,24 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
                 {
                     var offer = EnvelopeCrypto.OpenStamped<FileOfferPayload>(envelope, EnvelopePurpose.FileOffer, identity.Id, key);
                     if (ReplayRejection(envelope, offer.SentAt) is { } rejected) return rejected;
-                    result = await backend.HandleFileOfferAsync(offer.Payload, key, cancellationToken);
+                    result = await backend.HandleFileOfferAsync(offer.Payload, key, envelope.SourceDeviceId, cancellationToken);
                 }
                 else if (request.Path == "/v1/file/finish")
                 {
                     var finish = EnvelopeCrypto.OpenStamped<FileFinishPayload>(envelope, EnvelopePurpose.FileFinish, identity.Id, key);
                     if (ReplayRejection(envelope, finish.SentAt) is { } rejected) return rejected;
-                    result = await backend.HandleFileFinishAsync(finish.Payload.TransferId, cancellationToken);
+                    result = await backend.HandleFileFinishAsync(finish.Payload.TransferId, envelope.SourceDeviceId, cancellationToken);
                 }
                 else
                 {
                     var cancel = EnvelopeCrypto.OpenStamped<FileCancelPayload>(envelope, EnvelopePurpose.FileCancel, identity.Id, key);
                     if (ReplayRejection(envelope, cancel.SentAt) is { } rejected) return rejected;
-                    result = await backend.HandleFileCancelAsync(cancel.Payload.TransferId, cancellationToken);
+                    result = await backend.HandleFileCancelAsync(cancel.Payload.TransferId, envelope.SourceDeviceId, cancellationToken);
                 }
                 return FileResponse(result);
             }
+            // AEAD (or inner-JSON) failure: same 401 as Swift and Dart.
+            catch (EnvelopeCryptoException) { return TextResponse(401, "Unauthorized"); }
             catch (Exception) when (!cancellationToken.IsCancellationRequested) { return TextResponse(400, "Bad Request"); }
         }
 

@@ -248,7 +248,10 @@ All on port `51888`, same host as the clip server.
    Responses: `200 {"status":"ready"}` · `401` unpaired · `426` upgradeRequired ·
    `400 {"status":"stale"}` · `409 {"status":"replayed"}` · `403 {"status":"declined"}`
    (reserved for a future accept prompt; v1 auto-accepts) · `409` duplicate active
- transferId.
+   transferId · `400 {"status":"tooLarge"}` when `fileSize` exceeds free space on the
+   receiver's transfers volume minus **500 MB** (524,288,000 bytes) ·
+   `429 {"status":"tooManyTransfers"}` when the sending device already holds **8** active
+   sessions (counted per authenticated `sourceDeviceId`).
 
 ### Receiver validation
 
@@ -263,17 +266,27 @@ authenticate a chunk body before treating a repeated index as an idempotent dupl
    `ciphertext || tag` bytes (`application/octet-stream`). Codecs lowercase header keys,
    so servers read `x-transfer-id` / `x-chunk-index`.
    Responses: `200 {"status":"ok","received":<n>}` (n = distinct chunks stored) ·
-   `404` unknown/expired transferId · `400` bad index or AEAD failure (tears down the
-   session) · `410` cancelled.
+   `404` unknown/expired transferId · `400` bad index, AEAD failure, bad plaintext size or
+   failed write · `410` cancelled.
+   Chunks are not enveloped, so anyone who sees the plaintext `X-Transfer-Id` can post one.
+   A rejected chunk therefore MUST leave the session intact (no teardown, no activity
+   refresh): the genuine sender's chunks and finish still succeed. An index counts as
+   received only after its bytes are written; a failed write may be retried.
 
 3. **`POST /v1/file/finish`** — envelope-sealed `{"transferId": "...", "sentAt": "..."}`. Receiver verifies
    every chunk is present, streams the reassembled temp file through `fileHash`, and on a
    match moves it to the destination.
    Responses: `200 {"status":"complete"}` · `409 {"status":"incomplete"}` ·
-   `422 {"status":"hashMismatch"}` (session + temp file destroyed).
+   `422 {"status":"hashMismatch"}` · `422 {"status":"error"}` (hashing or move failed) ·
+   `401` unpaired, paused or AEAD failure · `404` unknown transferId **or a session owned by
+   a different device** (`envelope.sourceDeviceId` must equal the offer's). Both 422s
+   destroy the session and its temp file.
 
 4. **`POST /v1/file/cancel`** — envelope-sealed `{"transferId": "...", "sentAt": "..."}`;
    idempotent `200`. Like every envelope endpoint, also `400 stale` / `409 replayed`.
+   `401` from a paused device; `404` when the session belongs to a different device (the
+   session is left intact). Cancelled ids are remembered for **600 s** (chunks for them get
+   `410`), then pruned.
 
 ### Semantics
 
@@ -282,6 +295,8 @@ authenticate a chunk body before treating a repeated index as an idempotent dupl
   a `GET /v1/file/status` chunk-bitmap with no wire-format change.
 - Receiver holds sessions **in memory**; chunk plaintext is written to a `.part` temp file
   at `chunkIndex * chunkSize` offsets; sessions GC after **60 s** idle.
+- Every path that ends a session (cancel, hash mismatch, finalize failure, idle GC, failed
+  offer setup) closes the file handle and deletes the `.part`.
 - Sender streams the file in 4 MiB slices (two passes: streaming hash, then
   offer → chunks → finish) and aborts the whole transfer on any non-200, best-effort
   issuing `/v1/file/cancel`.

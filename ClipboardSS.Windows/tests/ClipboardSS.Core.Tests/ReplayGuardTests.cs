@@ -247,19 +247,19 @@ public sealed class ReplayGuardTests
             return new ReceiveResult(ReceiveStatus.Added, null);
         }
 
-        public Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, CancellationToken cancellationToken)
+        public Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, Guid sourceDeviceId, CancellationToken cancellationToken)
         {
             OfferCount++;
             return Task.FromResult(new FileReceiveResult(200, "ready"));
         }
 
-        public Task<FileReceiveResult> HandleFileFinishAsync(string transferId, CancellationToken cancellationToken)
+        public Task<FileReceiveResult> HandleFileFinishAsync(string transferId, Guid sourceDeviceId, CancellationToken cancellationToken)
         {
             FinishCount++;
             return Task.FromResult(new FileReceiveResult(200, "complete"));
         }
 
-        public Task<FileReceiveResult> HandleFileCancelAsync(string transferId, CancellationToken cancellationToken)
+        public Task<FileReceiveResult> HandleFileCancelAsync(string transferId, Guid sourceDeviceId, CancellationToken cancellationToken)
         {
             CancelCount++;
             return Task.FromResult(new FileReceiveResult(200, "cancelled"));

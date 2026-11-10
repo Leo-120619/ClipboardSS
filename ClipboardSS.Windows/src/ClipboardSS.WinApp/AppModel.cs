@@ -477,14 +477,14 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         });
     }
 
-    public Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, CancellationToken cancellationToken) =>
-        _fileReceiver.OfferAsync(offer, pairKey, cancellationToken);
+    public Task<FileReceiveResult> HandleFileOfferAsync(FileOfferPayload offer, byte[] pairKey, Guid sourceDeviceId, CancellationToken cancellationToken) =>
+        _fileReceiver.OfferAsync(offer, pairKey, sourceDeviceId, cancellationToken);
     public Task<FileReceiveResult> HandleFileChunkAsync(string transferId, int chunkIndex, byte[] body, CancellationToken cancellationToken) =>
         _fileReceiver.ChunkAsync(transferId, chunkIndex, body, cancellationToken);
-    public Task<FileReceiveResult> HandleFileFinishAsync(string transferId, CancellationToken cancellationToken) =>
-        _fileReceiver.FinishAsync(transferId, cancellationToken);
-    public Task<FileReceiveResult> HandleFileCancelAsync(string transferId, CancellationToken cancellationToken) =>
-        _fileReceiver.CancelAsync(transferId, cancellationToken);
+    public Task<FileReceiveResult> HandleFileFinishAsync(string transferId, Guid sourceDeviceId, CancellationToken cancellationToken) =>
+        _fileReceiver.FinishAsync(transferId, sourceDeviceId, cancellationToken);
+    public Task<FileReceiveResult> HandleFileCancelAsync(string transferId, Guid sourceDeviceId, CancellationToken cancellationToken) =>
+        _fileReceiver.CancelAsync(transferId, sourceDeviceId, cancellationToken);
 
     public Task<PairStartResponse> HandlePairStartAsync(
         PairStartRequest request,

@@ -76,9 +76,14 @@ public actor FileReceiver {
     private let onEvent: (@Sendable (FileTransferReceiveEvent) -> Void)?
     /// Shared with the clip endpoint in production (one guard per process).
     private let replayGuard: ReplayGuard
+    /// Bytes available on the transfers volume.
+    private let freeSpaceProvider: @Sendable () -> Int64
+    /// Writes one chunk's plaintext at a byte offset (a seam for tests).
+    private let chunkWriter: @Sendable (FileHandle, UInt64, Data) throws -> Void
 
     private var sessions: [String: Session] = [:]
-    private var cancelledTransferIds: Set<String> = []
+    /// Cancelled transfer id -> when it was cancelled; pruned after `cancelledRetention`.
+    private var cancelledTransferIds: [String: Date] = [:]
 
     public init(
         pairedStore: PairedDeviceStore,
@@ -88,9 +93,13 @@ public actor FileReceiver {
         now: @escaping @Sendable () -> Date = { Date() },
         idleTimeout: TimeInterval = FileTransferConstants.idleTimeout,
         replayGuard: ReplayGuard = ReplayGuard(),
+        freeSpaceProvider: (@Sendable () -> Int64)? = nil,
+        chunkWriter: @escaping @Sendable (FileHandle, UInt64, Data) throws -> Void = FileReceiver.defaultChunkWriter,
         onEvent: (@Sendable (FileTransferReceiveEvent) -> Void)? = nil
     ) {
         self.replayGuard = replayGuard
+        self.freeSpaceProvider = freeSpaceProvider ?? { FileReceiver.volumeFreeSpace(at: transfersDirectory) }
+        self.chunkWriter = chunkWriter
         self.pairedStore = pairedStore
         self.localDeviceId = localDeviceId
         self.transfersDirectory = transfersDirectory
@@ -99,6 +108,27 @@ public actor FileReceiver {
         self.idleTimeout = idleTimeout
         self.onEvent = onEvent
     }
+
+    public static let defaultChunkWriter: @Sendable (FileHandle, UInt64, Data) throws -> Void = { handle, offset, data in
+        try handle.seek(toOffset: offset)
+        try handle.write(contentsOf: data)
+    }
+
+    /// Free bytes on the volume holding `directory` (its nearest existing ancestor).
+    /// Unknown free space does not block transfers.
+    static func volumeFreeSpace(at directory: URL) -> Int64 {
+        var url = directory
+        while !FileManager.default.fileExists(atPath: url.path), url.pathComponents.count > 1 {
+            url = url.deletingLastPathComponent()
+        }
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        if let important = values?.volumeAvailableCapacityForImportantUsage { return important }
+        if let available = values?.volumeAvailableCapacity { return Int64(available) }
+        return .max
+    }
+
+    /// Number of remembered cancelled ids (test hook for pruning).
+    var cancelledTransferCount: Int { cancelledTransferIds.count }
 
     // MARK: - Offer
 
@@ -126,10 +156,17 @@ public actor FileReceiver {
         if sessions[offer.transferId] != nil {
             return .json(409, ["status": "duplicate"])
         }
+        let activeForDevice = sessions.values.filter { $0.sourceDeviceId == envelope.sourceDeviceId }.count
+        guard activeForDevice < FileTransferConstants.maxSessionsPerDevice else {
+            return .json(429, ["status": "tooManyTransfers"])
+        }
+        guard offer.fileSize <= freeSpaceProvider() - FileTransferConstants.freeSpaceReserve else {
+            return .json(400, ["status": "tooLarge"])
+        }
 
+        let tempURL = transfersDirectory.appendingPathComponent("\(offer.transferId).part")
         do {
             try FileManager.default.createDirectory(at: transfersDirectory, withIntermediateDirectories: true)
-            let tempURL = transfersDirectory.appendingPathComponent("\(offer.transferId).part")
             FileManager.default.createFile(atPath: tempURL.path, contents: nil)
             let handle = try FileHandle(forWritingTo: tempURL)
 
@@ -143,37 +180,37 @@ public actor FileReceiver {
                 receivedIndices: [],
                 lastActivity: now()
             )
-            cancelledTransferIds.remove(offer.transferId)
+            cancelledTransferIds[offer.transferId] = nil
             emit(.started(transferId: offer.transferId, fileName: offer.fileName, chunkCount: offer.chunkCount))
             return .json(200, ["status": "ready"])
         } catch {
+            try? FileManager.default.removeItem(at: tempURL)
             return .json(400, ["status": "error"])
         }
     }
 
     // MARK: - Chunk
 
+    /// Chunks are unauthenticated at the HTTP layer (anyone who sees `X-Transfer-Id` can post
+    /// one), so a rejected chunk never touches the session: it stays intact for the real sender.
     public func handleChunk(transferId: String, chunkIndex: Int, body: Data) -> FileTransferResponse {
-        if cancelledTransferIds.contains(transferId) {
+        if cancelledTransferIds[transferId] != nil {
             return .json(410, ["status": "cancelled"])
         }
         guard var session = sessions[transferId] else {
             return .json(404, ["status": "unknown"])
         }
         guard chunkIndex >= 0, chunkIndex < session.offer.chunkCount else {
-            teardown(transferId, reason: "bad chunk index")
             return .json(400, ["status": "badIndex"])
         }
 
         guard let plaintext = try? FileTransferCrypto.openChunk(body, fileKey: session.fileKey, index: UInt64(chunkIndex)) else {
-            teardown(transferId, reason: "chunk authentication failed")
             return .json(400, ["status": "authFailed"])
         }
         let expectedSize = chunkIndex == session.offer.chunkCount - 1
             ? Int(session.offer.fileSize - Int64(chunkIndex) * Int64(session.offer.chunkSize))
             : session.offer.chunkSize
         guard plaintext.count == expectedSize else {
-            teardown(transferId, reason: "bad chunk size")
             return .json(400, ["status": "badSize"])
         }
 
@@ -184,11 +221,10 @@ public actor FileReceiver {
             return .json(200, ["status": "ok", "received": session.receivedIndices.count])
         }
 
+        // The index counts as received only once its bytes are on disk; a retry rewrites it.
         do {
-            try session.handle.seek(toOffset: UInt64(chunkIndex) * UInt64(session.offer.chunkSize))
-            try session.handle.write(contentsOf: plaintext)
+            try chunkWriter(session.handle, UInt64(chunkIndex) * UInt64(session.offer.chunkSize), plaintext)
         } catch {
-            teardown(transferId, reason: "write failed")
             return .json(400, ["status": "writeFailed"])
         }
 
@@ -203,13 +239,19 @@ public actor FileReceiver {
 
     public func handleFinish(envelope: ClipEnvelope) async -> FileTransferResponse {
         guard envelope.v == ClipEnvelope.currentVersion else { return .upgradeRequired }
-        guard let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId),
-              let opened = try? envelope.openStamped(FileFinishPayload.self, purpose: .fileFinish, recipientDeviceId: localDeviceId, pairKey: key) else {
+        guard let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId) else {
+            return .json(401, ["status": "unpaired"])
+        }
+        guard await pairedStore.isConnected(envelope.sourceDeviceId) else {
+            return .json(401, ["status": "paused"])
+        }
+        guard let opened = try? envelope.openStamped(FileFinishPayload.self, purpose: .fileFinish, recipientDeviceId: localDeviceId, pairKey: key) else {
             return .json(401, ["status": "unpaired"])
         }
         if let rejection = await replayRejection(envelope, sentAt: opened.sentAt) { return rejection }
         let finish = opened.payload
-        guard let session = sessions[finish.transferId] else {
+        // Another paired device must not learn of, or finish, this device's transfer.
+        guard let session = sessions[finish.transferId], session.sourceDeviceId == envelope.sourceDeviceId else {
             return .json(404, ["status": "unknown"])
         }
 
@@ -242,14 +284,22 @@ public actor FileReceiver {
 
     public func handleCancel(envelope: ClipEnvelope) async -> FileTransferResponse {
         guard envelope.v == ClipEnvelope.currentVersion else { return .upgradeRequired }
-        if let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId),
-           let opened = try? envelope.openStamped(FileCancelPayload.self, purpose: .fileCancel, recipientDeviceId: localDeviceId, pairKey: key) {
-            if let rejection = await replayRejection(envelope, sentAt: opened.sentAt) { return rejection }
-            let cancel = opened.payload
-            cancelledTransferIds.insert(cancel.transferId)
-            if let session = sessions[cancel.transferId] {
-                destroy(cancel.transferId, session: session)
-                emit(.cancelled(transferId: cancel.transferId))
+        if let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId) {
+            guard await pairedStore.isConnected(envelope.sourceDeviceId) else {
+                return .json(401, ["status": "paused"])
+            }
+            if let opened = try? envelope.openStamped(FileCancelPayload.self, purpose: .fileCancel, recipientDeviceId: localDeviceId, pairKey: key) {
+                if let rejection = await replayRejection(envelope, sentAt: opened.sentAt) { return rejection }
+                let cancel = opened.payload
+                if let session = sessions[cancel.transferId] {
+                    guard session.sourceDeviceId == envelope.sourceDeviceId else {
+                        return .json(404, ["status": "unknown"])
+                    }
+                    destroy(cancel.transferId, session: session)
+                    emit(.cancelled(transferId: cancel.transferId))
+                }
+                pruneCancelled()
+                cancelledTransferIds[cancel.transferId] = now()
             }
         }
         return .json(200, ["status": "cancelled"])
@@ -257,13 +307,20 @@ public actor FileReceiver {
 
     // MARK: - Garbage collection
 
-    /// Drops sessions idle longer than `idleTimeout`, deleting their temp files.
+    /// Drops sessions idle longer than `idleTimeout`, deleting their temp files, and forgets
+    /// cancelled ids older than `cancelledRetention`.
     public func garbageCollect() {
         let cutoff = now().addingTimeInterval(-idleTimeout)
         for (transferId, session) in sessions where session.lastActivity < cutoff {
             destroy(transferId, session: session)
             emit(.failed(transferId: transferId, reason: "idle timeout"))
         }
+        pruneCancelled()
+    }
+
+    private func pruneCancelled() {
+        let cutoff = now().addingTimeInterval(-FileTransferConstants.cancelledRetention)
+        cancelledTransferIds = cancelledTransferIds.filter { $0.value > cutoff }
     }
 
     // MARK: - Internals
@@ -272,13 +329,6 @@ public actor FileReceiver {
     private func replayRejection(_ envelope: ClipEnvelope, sentAt: Date) async -> FileTransferResponse? {
         let check = await replayGuard.check(sourceDeviceId: envelope.sourceDeviceId, nonce: envelope.nonce, sentAt: sentAt)
         return FileTransferResponse.rejection(for: check)
-    }
-
-    private func teardown(_ transferId: String, reason: String) {
-        if let session = sessions[transferId] {
-            destroy(transferId, session: session)
-        }
-        emit(.failed(transferId: transferId, reason: reason))
     }
 
     private func destroy(_ transferId: String, session: Session) {

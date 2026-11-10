@@ -15,9 +15,14 @@ struct FileReceiverTests {
         let key: SymmetricKey
         let destinationDir: URL
         let clock: MutableClock
+        let store: PairedDeviceStore
     }
 
-    private func makeFixture(now: Date = Date(timeIntervalSince1970: 1_000)) async throws -> Fixture {
+    private func makeFixture(
+        now: Date = Date(timeIntervalSince1970: 1_000),
+        freeSpace: Int64 = 1 << 40,
+        chunkWriter: @escaping @Sendable (FileHandle, UInt64, Data) throws -> Void = FileReceiver.defaultChunkWriter
+    ) async throws -> Fixture {
         let peerId = UUID()
         let key = SymmetricKey(size: .bits256)
         let store = try await makePairedStore(peerId: peerId, key: key)
@@ -30,9 +35,11 @@ struct FileReceiverTests {
             transfersDirectory: try temporaryDirectory().appendingPathComponent("Transfers"),
             destinationProvider: { destinationDir },
             now: clock.now,
-            idleTimeout: 60
+            idleTimeout: 60,
+            freeSpaceProvider: { freeSpace },
+            chunkWriter: chunkWriter
         )
-        return Fixture(receiver: receiver, peerId: peerId, localId: localId, key: key, destinationDir: destinationDir, clock: clock)
+        return Fixture(receiver: receiver, peerId: peerId, localId: localId, key: key, destinationDir: destinationDir, clock: clock, store: store)
     }
 
     /// Builds an offer for `data` split at `chunkSize`, returning the offer + sealed chunks.
@@ -164,18 +171,154 @@ struct FileReceiverTests {
         #expect(status(response) == "incomplete")
     }
 
-    @Test("corrupted chunk tears the session down with 400")
-    func corruptedChunk() async throws {
+    // MARK: - Robustness (junk chunks, ownership, quota, cleanup)
+
+    private func finishEnvelope(_ fixture: Fixture, _ id: String, from source: UUID? = nil, key: SymmetricKey? = nil) throws -> ClipEnvelope {
+        try sealedEnvelope(FileFinishPayload(transferId: id), purpose: .fileFinish, sourceDeviceId: source ?? fixture.peerId, recipientDeviceId: fixture.localId, key: key ?? fixture.key)
+    }
+
+    private func offerEnvelope(_ fixture: Fixture, size: Int64, from source: UUID? = nil, key: SymmetricKey? = nil) throws -> ClipEnvelope {
+        let chunkSize = FileTransferConstants.chunkSize
+        let count = Int(size / Int64(chunkSize) + (size % Int64(chunkSize) == 0 ? 0 : 1))
+        return try sealedEnvelope(FileOfferPayload(
+            transferId: UUID().uuidString.lowercased(), fileName: "big.bin", fileSize: size,
+            mimeType: "application/octet-stream", fileHash: "h", chunkSize: chunkSize,
+            chunkCount: count, createdAt: Date(), sourceDeviceName: "Peer"
+        ), purpose: .fileOffer, sourceDeviceId: source ?? fixture.peerId, recipientDeviceId: fixture.localId, key: key ?? fixture.key)
+    }
+
+    private func pairSecondPeer(_ fixture: Fixture) async throws -> (UUID, SymmetricKey) {
+        let otherId = UUID()
+        let otherKey = SymmetricKey(size: .bits256)
+        try await fixture.store.addDevice(PairedDevice(id: otherId, name: "Other"), key: otherKey)
+        return (otherId, otherKey)
+    }
+
+    @Test("junk, bad-index and bad-size chunks return 400 and leave the session intact")
+    func junkChunkDoesNotDestroySession() async throws {
         let fixture = try await makeFixture()
         let data = Data((0..<10).map { UInt8($0) })
         let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
-        _ = await fixture.receiver.handleOffer(envelope: offer)
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+
         var corrupt = chunks[0]
         corrupt[corrupt.startIndex] ^= 0xFF
-        let response = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: corrupt)
-        #expect(response.statusCode == 400)
-        // Session is gone: a subsequent valid chunk is now unknown.
-        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 1, body: chunks[1]).statusCode == 404)
+        let junk = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: corrupt)
+        #expect(junk.statusCode == 400)
+        #expect(status(junk) == "authFailed")
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: Data(repeating: 0, count: 64)).statusCode == 400)
+        let badIndex = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 99, body: chunks[0])
+        #expect(badIndex.statusCode == 400)
+        #expect(status(badIndex) == "badIndex")
+        let fileKey = FileTransferCrypto.deriveFileKey(pairKey: fixture.key, transferId: id)
+        let shortChunk = try FileTransferCrypto.sealChunk(Data([9]), fileKey: fileKey, index: 0)
+        let badSize = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: shortChunk)
+        #expect(badSize.statusCode == 400)
+        #expect(status(badSize) == "badSize")
+
+        for (i, chunk) in chunks.enumerated() {
+            #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: i, body: chunk).statusCode == 200)
+        }
+        #expect(await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id)).statusCode == 200)
+        #expect(try Data(contentsOf: fixture.destinationDir.appendingPathComponent("file.bin")) == data)
+    }
+
+    @Test("finish and cancel from a different paired device get 404 and leave the session intact")
+    func finishFromDifferentPairedDeviceIsRejected() async throws {
+        let fixture = try await makeFixture()
+        let (otherId, otherKey) = try await pairSecondPeer(fixture)
+        let data = Data((0..<4).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0]).statusCode == 200)
+
+        #expect(await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id, from: otherId, key: otherKey)).statusCode == 404)
+        let foreignCancel = try sealedEnvelope(FileCancelPayload(transferId: id), purpose: .fileCancel, sourceDeviceId: otherId, recipientDeviceId: fixture.localId, key: otherKey)
+        #expect(await fixture.receiver.handleCancel(envelope: foreignCancel).statusCode == 404)
+
+        #expect(await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id)).statusCode == 200)
+    }
+
+    @Test("finish and cancel from a paused device get 401 paused")
+    func finishWhilePausedIsRejected() async throws {
+        let fixture = try await makeFixture()
+        let data = Data((0..<4).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0]).statusCode == 200)
+
+        try await fixture.store.setConnected(fixture.peerId, false)
+        let paused = await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id))
+        #expect(paused.statusCode == 401)
+        #expect(status(paused) == "paused")
+        let cancel = try sealedEnvelope(FileCancelPayload(transferId: id), purpose: .fileCancel, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
+        #expect(await fixture.receiver.handleCancel(envelope: cancel).statusCode == 401)
+
+        try await fixture.store.setConnected(fixture.peerId, true)
+        #expect(await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id)).statusCode == 200)
+    }
+
+    @Test("an offer larger than free space minus the 500 MB reserve gets 400 tooLarge")
+    func offerLargerThanFreeSpaceIsRejected() async throws {
+        let reserve = FileTransferConstants.freeSpaceReserve
+        #expect(reserve == 500 * 1024 * 1024)
+        let fixture = try await makeFixture(freeSpace: reserve + 1_000)
+        let tooLarge = await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 1_001))
+        #expect(tooLarge.statusCode == 400)
+        #expect(status(tooLarge) == "tooLarge")
+        #expect(await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 1_000)).statusCode == 200)
+    }
+
+    @Test("a ninth concurrent session from one device gets 429")
+    func ninthConcurrentSessionIsRejected() async throws {
+        let fixture = try await makeFixture()
+        #expect(FileTransferConstants.maxSessionsPerDevice == 8)
+        for _ in 0..<8 {
+            #expect(await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 1)).statusCode == 200)
+        }
+        let ninth = await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 1))
+        #expect(ninth.statusCode == 429)
+        #expect(status(ninth) == "tooManyTransfers")
+        // The limit is per device.
+        let (otherId, otherKey) = try await pairSecondPeer(fixture)
+        #expect(await fixture.receiver.handleOffer(envelope: try offerEnvelope(fixture, size: 1, from: otherId, key: otherKey)).statusCode == 200)
+    }
+
+    @Test("a failed write does not mark the chunk received; a retry stores it")
+    func failedWriteDoesNotMarkChunkReceived() async throws {
+        let failures = FailCounter(failures: 1)
+        let fixture = try await makeFixture(chunkWriter: { handle, offset, data in
+            if failures.shouldFail() { throw CocoaError(.fileWriteOutOfSpace) }
+            try FileReceiver.defaultChunkWriter(handle, offset, data)
+        })
+        let data = Data((0..<4).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+
+        let failed = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0])
+        #expect(failed.statusCode == 400)
+        #expect(status(failed) == "writeFailed")
+        #expect(await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id)).statusCode == 409)
+
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0]).statusCode == 200)
+        #expect(await fixture.receiver.handleFinish(envelope: try finishEnvelope(fixture, id)).statusCode == 200)
+        #expect(try Data(contentsOf: fixture.destinationDir.appendingPathComponent("file.bin")) == data)
+    }
+
+    @Test("cancelled ids are pruned after 600 s")
+    func cancelledIdsArePruned() async throws {
+        let fixture = try await makeFixture()
+        let (offer, chunks, id) = try makeTransfer(fixture, data: Data([1, 2, 3, 4]), chunkSize: 4)
+        _ = await fixture.receiver.handleOffer(envelope: offer)
+        let cancel = try sealedEnvelope(FileCancelPayload(transferId: id), purpose: .fileCancel, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
+        #expect(await fixture.receiver.handleCancel(envelope: cancel).statusCode == 200)
+        fixture.clock.advance(by: 599)
+        await fixture.receiver.garbageCollect()
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0]).statusCode == 410)
+        fixture.clock.advance(by: 2)
+        await fixture.receiver.garbageCollect()
+        #expect(await fixture.receiver.cancelledTransferCount == 0)
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0]).statusCode == 404)
     }
 
     @Test("hash mismatch returns 422 and deletes the temp file")
@@ -371,5 +514,18 @@ struct FileReceiverTests {
         let forged = ClipEnvelope(sourceDeviceId: offer.sourceDeviceId, nonce: offer.nonce, ciphertext: forgedBytes.base64EncodedString())
         #expect(await fixture.receiver.handleOffer(envelope: forged).statusCode == 401)
         #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+    }
+}
+
+/// Lets a test writer fail its first `failures` calls.
+final class FailCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+    init(failures: Int) { remaining = failures }
+    func shouldFail() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard remaining > 0 else { return false }
+        remaining -= 1
+        return true
     }
 }
