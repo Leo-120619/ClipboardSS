@@ -268,6 +268,46 @@ public sealed class FileTransferTests
         new(Path.Combine(temp.Path, "parts"), () => Path.Combine(temp.Path, "downloads"), clock, () => freeSpace, chunkWriter);
 
     /// <summary>An offer split into 4-byte chunks.</summary>
+    [Theory]
+    [InlineData("report.pdf", "report.pdf")]
+    [InlineData("a:b.txt", "ab.txt")]
+    [InlineData("notes.txt:Zone.Identifier", "notes.txtZone.Identifier")]
+    [InlineData("..\\..\\evil.exe", "evil.exe")]
+    [InlineData("../../evil.exe", "evil.exe")]
+    [InlineData("CON", "_CON")]
+    [InlineData("nul.txt", "_nul.txt")]
+    [InlineData("COM1.log", "_COM1.log")]
+    [InlineData("LPT9", "_LPT9")]
+    [InlineData("AUX .txt", "_AUX .txt")]
+    [InlineData("console.txt", "console.txt")]
+    [InlineData("COM10.txt", "COM10.txt")]
+    [InlineData("trailing. . ", "trailing")]
+    [InlineData(":::", "file")]
+    [InlineData("", "file")]
+    public void SafeFileNameStripsStreamsAndReservedDeviceNames(string offered, string expected) =>
+        Assert.Equal(expected, FileReceiver.SafeFileName(offered));
+
+    [Fact]
+    public async Task ReceivedFileWithReservedOrStreamNameIsSavedUnderASafeName()
+    {
+        using var temp = new TemporaryDirectory();
+        var downloads = Path.Combine(temp.Path, "downloads");
+        using var receiver = new FileReceiver(Path.Combine(temp.Path, "parts"), () => downloads);
+        var bytes = new byte[] { 1, 2, 3 };
+        foreach (var (id, name, expected) in new[] { ("con-name", "CON.txt", "_CON.txt"), ("ads-name", "a:b.txt", "ab.txt") })
+        {
+            var offer = SmallOffer(id, bytes) with { FileName = name };
+            Assert.Equal(200, (await receiver.OfferAsync(offer, PairKey, Peer)).StatusCode);
+            await SendAllChunks(receiver, id, bytes);
+            var finished = await receiver.FinishAsync(id, Peer);
+            Assert.Equal(200, finished.StatusCode);
+            Assert.Equal(expected, Path.GetFileName(finished.SavedPath));
+        }
+
+        // On Windows the Zone.Identifier is an alternate data stream; elsewhere nothing extra is written.
+        Assert.Equal(["_CON.txt", "ab.txt"], Directory.GetFiles(downloads).Select(Path.GetFileName).Order());
+    }
+
     private static FileOfferPayload SmallOffer(string id, byte[] bytes) => new(id, "test.bin", bytes.Length,
         "application/octet-stream", ContentHasherFor(bytes), 4, (bytes.Length + 3) / 4, DateTimeOffset.UtcNow, "Mac");
 

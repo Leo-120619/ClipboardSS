@@ -210,8 +210,48 @@ public sealed class ScreenTextSelectionState
         return result.ToString();
     }
 
+    /// <summary>
+    /// Buckets each display's blocks into lines, then sorts strictly by (display, line, x, id).
+    /// A tolerance-based comparer is intransitive (a≈b, b≈c, a≠c), which made the order depend
+    /// on the input order.
+    /// </summary>
     private static IReadOnlyList<ScreenTextBlock> SortedForReading(IEnumerable<ScreenTextBlock> blocks) =>
-        blocks.OrderBy(block => block, ReadingComparer.Instance).ToArray();
+        blocks.GroupBy(block => block.DisplayId)
+            .OrderBy(group => group.Key)
+            .SelectMany(group => LineBuckets(group, block => block)
+                .OrderBy(item => item.Line)
+                .ThenBy(item => item.Item.Bounds.MinX)
+                .ThenBy(item => item.Item.Id, StringComparer.Ordinal)
+                .Select(item => item.Item))
+            .ToArray();
+
+    /// <summary>
+    /// Assigns a line index to blocks of one display: walking top to bottom, a block starts a new
+    /// line when its top is further than half a line height (at least 4 px) from the line's top.
+    /// </summary>
+    private static IEnumerable<(T Item, int Line)> LineBuckets<T>(IEnumerable<T> sameDisplay, Func<T, ScreenTextBlock> blockOf)
+    {
+        var lineIndex = 0;
+        var lineMinY = double.NegativeInfinity;
+        var lineHeight = 0d;
+        foreach (var item in sameDisplay.OrderBy(blockOf, StrictPositionComparer.Instance))
+        {
+            var block = blockOf(item);
+            var threshold = Math.Max(4, Math.Min(block.Bounds.NormalizedHeight, lineHeight) * 0.5);
+            if (Math.Abs(block.Bounds.MinY - lineMinY) > threshold)
+            {
+                lineIndex += 1;
+                lineMinY = block.Bounds.MinY;
+                lineHeight = block.Bounds.NormalizedHeight;
+            }
+            else
+            {
+                lineHeight = (lineHeight + block.Bounds.NormalizedHeight) / 2;
+            }
+
+            yield return (item, lineIndex);
+        }
+    }
 
     private static bool IsDuplicate(ScreenTextBlock existing, ScreenTextBlock candidate)
     {
@@ -265,30 +305,10 @@ public sealed class ScreenTextSelectionState
         foreach (var group in blocks.Select((block, index) => (Block: block, Index: index))
                      .GroupBy(item => item.Block.DisplayId))
         {
-            var sorted = group.OrderBy(item => item.Block, LineComparer.Instance);
-            var lineIndex = 0;
-            var lineMinY = double.NegativeInfinity;
-            var lineHeight = 0d;
-            foreach (var (block, originalIndex) in sorted)
+            foreach (var ((block, originalIndex), lineIndex) in LineBuckets(group, item => item.Block))
             {
                 var updated = block with { };
-                if (updated.LineId is null)
-                {
-                    var threshold = Math.Max(4, Math.Min(block.Bounds.NormalizedHeight, lineHeight) * 0.5);
-                    if (Math.Abs(block.Bounds.MinY - lineMinY) > threshold)
-                    {
-                        lineIndex += 1;
-                        lineMinY = block.Bounds.MinY;
-                        lineHeight = block.Bounds.NormalizedHeight;
-                    }
-                    else
-                    {
-                        lineHeight = (lineHeight + block.Bounds.NormalizedHeight) / 2;
-                    }
-
-                    updated.LineId = $"{group.Key}:{lineIndex}";
-                }
-
+                updated.LineId ??= $"{group.Key}:{lineIndex}";
                 assigned[originalIndex] = updated;
             }
         }
@@ -325,24 +345,6 @@ public sealed class ScreenTextSelectionState
             .ToHashSet(StringComparer.Ordinal);
     }
 
-    private sealed class ReadingComparer : IComparer<ScreenTextBlock>
-    {
-        public static ReadingComparer Instance { get; } = new();
-
-        public int Compare(ScreenTextBlock? left, ScreenTextBlock? right)
-        {
-            if (ReferenceEquals(left, right)) return 0;
-            if (left is null) return -1;
-            if (right is null) return 1;
-            if (left.DisplayId != right.DisplayId) return left.DisplayId.CompareTo(right.DisplayId);
-            if (Math.Abs(left.Bounds.MinY - right.Bounds.MinY) > 4)
-                return left.Bounds.MinY.CompareTo(right.Bounds.MinY);
-            if (Math.Abs(left.Bounds.MinX - right.Bounds.MinX) > 4)
-                return left.Bounds.MinX.CompareTo(right.Bounds.MinX);
-            return string.Compare(left.Id, right.Id, StringComparison.Ordinal);
-        }
-    }
-
     private sealed class SourcePreferredComparer : IComparer<ScreenTextBlock>
     {
         public static SourcePreferredComparer Instance { get; } = new();
@@ -354,22 +356,25 @@ public sealed class ScreenTextSelectionState
             if (right is null) return 1;
             if (left.Source != right.Source)
                 return left.Source == ScreenTextSource.Accessibility ? -1 : 1;
-            return ReadingComparer.Instance.Compare(left, right);
+            if (left.DisplayId != right.DisplayId) return left.DisplayId.CompareTo(right.DisplayId);
+            return StrictPositionComparer.Instance.Compare(left, right);
         }
     }
 
-    private sealed class LineComparer : IComparer<ScreenTextBlock>
+    /// <summary>Strict lexicographic (top, left, id) order — transitive, unlike a tolerance.</summary>
+    private sealed class StrictPositionComparer : IComparer<ScreenTextBlock>
     {
-        public static LineComparer Instance { get; } = new();
+        public static StrictPositionComparer Instance { get; } = new();
 
         public int Compare(ScreenTextBlock? left, ScreenTextBlock? right)
         {
             if (ReferenceEquals(left, right)) return 0;
             if (left is null) return -1;
             if (right is null) return 1;
-            if (Math.Abs(left.Bounds.MinY - right.Bounds.MinY) > 4)
-                return left.Bounds.MinY.CompareTo(right.Bounds.MinY);
-            return left.Bounds.MinX.CompareTo(right.Bounds.MinX);
+            var byY = left.Bounds.MinY.CompareTo(right.Bounds.MinY);
+            if (byY != 0) return byY;
+            var byX = left.Bounds.MinX.CompareTo(right.Bounds.MinX);
+            return byX != 0 ? byX : string.Compare(left.Id, right.Id, StringComparison.Ordinal);
         }
     }
 }

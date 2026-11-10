@@ -37,33 +37,26 @@ public sealed class ClipboardInterop : IPasteboardClient, IDisposable
         OpenWithRetry();
         try
         {
-            if (_pngFormat != 0 && NativeMethods.IsClipboardFormatAvailable(_pngFormat))
+            uint[] probed = [NativeMethods.CfUnicodeText, _pngFormat, NativeMethods.CfDib];
+            var available = probed.Where(format => format != 0 && NativeMethods.IsClipboardFormatAvailable(format)).ToArray();
+            foreach (var kind in ClipboardReadOrder.Candidates(available, _pngFormat))
             {
-                var png = ReadGlobalBytes(NativeMethods.GetClipboardData(_pngFormat));
-                if (png is { Length: > 0 }) return new ClipboardSnapshot(null, png);
-            }
-
-            if (NativeMethods.IsClipboardFormatAvailable(NativeMethods.CfDib))
-            {
-                var dib = ReadGlobalBytes(NativeMethods.GetClipboardData(NativeMethods.CfDib));
-                var png = dib is null ? null : DibCodec.DibToPng(dib);
-                if (png is { Length: > 0 }) return new ClipboardSnapshot(null, png);
-            }
-
-            if (NativeMethods.IsClipboardFormatAvailable(NativeMethods.CfUnicodeText))
-            {
-                var handle = NativeMethods.GetClipboardData(NativeMethods.CfUnicodeText);
-                var pointer = handle == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GlobalLock(handle);
-                if (pointer != IntPtr.Zero)
+                switch (kind)
                 {
-                    try
-                    {
-                        return new ClipboardSnapshot(Marshal.PtrToStringUni(pointer), null);
-                    }
-                    finally
-                    {
-                        _ = NativeMethods.GlobalUnlock(handle);
-                    }
+                    case ClipboardPayloadKind.Text:
+                        var textBytes = ReadGlobalBytes(NativeMethods.GetClipboardData(NativeMethods.CfUnicodeText));
+                        var text = textBytes is null ? null : ClipboardReadOrder.DecodeUnicodeText(textBytes);
+                        if (!string.IsNullOrEmpty(text)) return new ClipboardSnapshot(text, null);
+                        break;
+                    case ClipboardPayloadKind.Png:
+                        var png = ReadGlobalBytes(NativeMethods.GetClipboardData(_pngFormat));
+                        if (png is { Length: > 0 }) return new ClipboardSnapshot(null, png);
+                        break;
+                    case ClipboardPayloadKind.Dib:
+                        var dib = ReadGlobalBytes(NativeMethods.GetClipboardData(NativeMethods.CfDib));
+                        var converted = dib is null ? null : DibCodec.DibToPng(dib);
+                        if (converted is { Length: > 0 }) return new ClipboardSnapshot(null, converted);
+                        break;
                 }
             }
 

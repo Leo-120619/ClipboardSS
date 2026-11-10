@@ -112,6 +112,47 @@ public sealed class SelectionStateTests
         Assert.Null(selection.AnchorId);
     }
 
+    [Fact]
+    public void SortIsStableForNearlyAlignedWords()
+    {
+        // Each neighbour pair is within the old ±4 px tolerance but the ends are not, so a
+        // tolerant comparer is intransitive and the result depended on the input order.
+        ScreenTextBlock[] words =
+        [
+            Block("right", "Right", 100, 0, 40, 18),
+            Block("middle", "Middle", 50, 3, 40, 18),
+            Block("left", "Left", 0, 6, 40, 18),
+            Block("next", "Next", 0, 40, 40, 18),
+        ];
+
+        foreach (var permutation in Permutations(words))
+        {
+            var state = new ScreenTextSelectionState(permutation);
+            Assert.Equal(["left", "middle", "right", "next"], state.Blocks.Select(block => block.Id));
+            Assert.Equal(
+                "Left Middle Right\nNext",
+                ScreenTextSelectionState.JoinedText(permutation, ScreenTextJoinMode.Lines));
+        }
+    }
+
+    private static IEnumerable<ScreenTextBlock[]> Permutations(ScreenTextBlock[] items)
+    {
+        if (items.Length <= 1)
+        {
+            yield return items;
+            yield break;
+        }
+
+        for (var index = 0; index < items.Length; index++)
+        {
+            var rest = items.Where((_, other) => other != index).ToArray();
+            foreach (var tail in Permutations(rest))
+            {
+                yield return [items[index], .. tail];
+            }
+        }
+    }
+
     private static ScreenTextSelectionState State(params ScreenTextBlock[] blocks) => new(blocks);
 
     private static ScreenTextBlock Block(

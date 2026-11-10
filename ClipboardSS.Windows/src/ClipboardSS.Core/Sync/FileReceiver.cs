@@ -135,6 +135,7 @@ public sealed class FileReceiver : IDisposable
                 Directory.CreateDirectory(downloads);
                 destination = CollisionSafePath(downloads, session.Offer.FileName);
                 File.Move(session.Path, destination);
+                MarkAsDownloaded(destination);
             }
             catch (Exception) when (!token.IsCancellationRequested) { return FailLocked(id, session, 422, "error"); }
             catch { FailLocked(id, session, 422, "error"); throw; }
@@ -165,6 +166,37 @@ public sealed class FileReceiver : IDisposable
     private FileReceiveResult FailLocked(string id, Session session, int code, string status) { session.Stream.Dispose(); TryDelete(session.Path); _sessions.Remove(id); TransferChanged?.Invoke(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Failed, Error: status)); return new(code, status); }
     private static string Normalize(string id) => id.ToLowerInvariant();
     private static void TryDelete(string path) { try { File.Delete(path); } catch { } }
-    private static string CollisionSafePath(string directory, string name) { name = Path.GetFileName(name); var path = Path.Combine(directory, name); for (var n = 2; File.Exists(path); n++) path = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(name)} ({n}){Path.GetExtension(name)}"); return path; }
+    private static readonly HashSet<string> ReservedDeviceNames = new(
+        ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"], StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The peer-supplied name reduced to one safe Windows file name: no directory part (either
+    /// separator), no <c>:</c> (which would address an alternate data stream) or other invalid
+    /// character, no trailing dots/spaces, and no reserved device name (<c>NUL</c>, <c>CON.txt</c>…).
+    /// </summary>
+    public static string SafeFileName(string name)
+    {
+        var leaf = name[(name.LastIndexOfAny(['/', '\\']) + 1)..];
+        var cleaned = new string(leaf.Where(c => c >= 0x20 && c is not ('<' or '>' or ':' or '"' or '|' or '?' or '*')).ToArray())
+            .TrimEnd('.', ' ');
+        if (cleaned.Length == 0 || cleaned is "." or "..") return "file";
+        var stem = cleaned.Split('.', 2)[0].TrimEnd(' ');
+        return ReservedDeviceNames.Contains(stem) ? "_" + cleaned : cleaned;
+    }
+
+    /// <summary>
+    /// Tags a received file as coming from another computer (Mark of the Web, <c>ZoneId=3</c>) so
+    /// SmartScreen and Office treat it as untrusted. NTFS-only and best effort: a failure (FAT32,
+    /// network share) never fails the transfer.
+    /// </summary>
+    private static void MarkAsDownloaded(string path)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try { File.WriteAllText(path + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n"); }
+        catch { }
+    }
+
+    private static string CollisionSafePath(string directory, string name) { name = SafeFileName(name); var path = Path.Combine(directory, name); for (var n = 2; File.Exists(path); n++) path = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(name)} ({n}){Path.GetExtension(name)}"); return path; }
     public void Dispose() { foreach (var session in _sessions.Values) { session.Stream.Dispose(); TryDelete(session.Path); } _gate.Dispose(); }
 }
