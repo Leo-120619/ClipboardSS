@@ -12,7 +12,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var snippetPaster: SnippetPaster?
     private var monitorTimer: Timer?
     private var clipboardMonitor: ClipboardMonitor?
-    private var shareStagingDirectory: URL?
     private var receivedFileNotifications: ReceivedFileNotificationService?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -147,10 +146,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            let stagingDir = store.storageDirectory.appendingPathComponent("ShareStaging", isDirectory: true)
-            try? FileManager.default.removeItem(at: stagingDir)
-            try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
-            self.shareStagingDirectory = stagingDir
+            model.onShareNeedsAttention = { [weak windowController] in
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                windowController?.show()
+            }
+
+            // Leftovers from a previous run; their sends cannot resume.
+            try? FileManager.default.removeItem(at: model.shareStagingDirectory)
 
             configureStatusItem()
             model.startNetworking()
@@ -211,46 +213,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Handles a `clipboardss://` open triggered by the share extension. The payload is
-    /// irrelevant — any activation means "drain the share outbox".
+    /// irrelevant — any activation means "check the share outbox".
     @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent: NSAppleEventDescriptor) {
         processShareOutbox()
     }
 
-    /// Drains complete drops written by the share extension: stages each file locally,
-    /// removes the app-group drop folder, and hands the files to the normal send flow.
+    /// Queues complete drops written by the share extension. The model sends them once a
+    /// paired device is reachable; the drop stays in the outbox until then.
     private func processShareOutbox() {
-        guard let model else { return }
-        let drops = ShareInbox.pendingDrops()
-        guard !drops.isEmpty else { return }
-
-        let staging = shareStagingDirectory ?? FileManager.default.temporaryDirectory
-        var stagedURLs: [URL] = []
-        for drop in drops {
-            for source in drop.fileURLs {
-                let destDir = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
-                try? FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
-                let dest = destDir.appendingPathComponent(source.lastPathComponent)
-                do {
-                    do {
-                        try FileManager.default.moveItem(at: source, to: dest)
-                    } catch {
-                        try FileManager.default.copyItem(at: source, to: dest)
-                    }
-                    stagedURLs.append(dest)
-                } catch {
-                    // Skip files we can't stage; keep going with the rest.
-                }
-            }
-            ShareInbox.remove(drop)
-        }
-        guard !stagedURLs.isEmpty else { return }
-
-        model.handleDroppedFiles(stagedURLs)
-        // Surface the window when the user must choose a device or when nothing is reachable.
-        if model.pendingSend != nil || model.lastError != nil {
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            windowController?.show()
-        }
+        model?.enqueueShares(ShareInbox.pendingDrops())
     }
 
     private func configureStatusItem() {

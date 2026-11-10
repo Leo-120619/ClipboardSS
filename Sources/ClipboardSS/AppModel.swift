@@ -27,7 +27,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var pairedDevices: [PairedDevice] = []
     /// Live reachability per paired device. In-memory only: it is rebuilt from scratch
     /// on every refresh, so unpaired devices drop out on their own.
-    @Published private(set) var onlineDeviceIds: Set<UUID> = []
+    @Published private(set) var onlineDeviceIds: Set<UUID> = [] {
+        // Every online transition (liveness pass or reconnect) retries queued shares.
+        didSet {
+            if !onlineDeviceIds.isSubset(of: oldValue) { processPendingShares() }
+        }
+    }
     /// Paired devices whose `/v1/id` probe advertised an older wire protocol.
     @Published private(set) var outdatedDeviceIds: Set<UUID> = []
     @Published private(set) var transfers: [FileTransferState] = []
@@ -45,6 +50,17 @@ final class AppModel: ObservableObject {
     private var receiveBatch = ReceiveBatchDestination()
     private var sendTokens: [UUID: CancellationToken] = [:]
     private var livenessTask: Task<Void, Never>?
+    /// Where shared files are staged while they are being sent.
+    let shareStagingDirectory: URL
+    /// Share-extension drops waiting for a reachable, up-to-date device. A drop leaves the
+    /// outbox only once its files are handed to `FileSender`.
+    private(set) var pendingShares: [ShareInbox.PendingDrop] = []
+    /// Staging folder per send, removed when that send finishes.
+    private var shareStagingBySend: [UUID: URL] = [:]
+    private var hasCompletedLivenessPass = false
+    nonisolated static let shareMaxAge: TimeInterval = 24 * 60 * 60
+    nonisolated static let shareQueuedMessage =
+        "No paired device is reachable. Shared files will be sent when one comes online."
     private static let livenessInterval = Duration.seconds(5)
     nonisolated static let coachMarksCompletedDefaultsKey = "hasCompletedCoachMarks"
     nonisolated static let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
@@ -69,6 +85,8 @@ final class AppModel: ObservableObject {
     var onReceivedFileCompleted: ((URL) -> Void)?
     /// Called once per clip queued for sending to paired devices.
     var onClipBroadcast: ((ClipItem) -> Void)?
+    /// Called when queued shares need the user: a device must be picked, or none is reachable.
+    var onShareNeedsAttention: (() -> Void)?
 
     init(
         store: ClipStore,
@@ -104,6 +122,7 @@ final class AppModel: ObservableObject {
         self.fileSender = fileSender
         self.fileReceiver = fileReceiver
         self.clips = store.items
+        self.shareStagingDirectory = store.storageDirectory.appendingPathComponent("ShareStaging", isDirectory: true)
         self.clipboardShortcut = .savedClipboardShortcut
         self.screenshotShortcut = .savedScreenshotShortcut
         self.screenTextShortcut = .savedScreenTextShortcut
@@ -162,6 +181,15 @@ final class AppModel: ObservableObject {
             mdnsPeers: peerBrowser.peers,
             probe: { await SubnetSweeper.probe(host: $0, timeoutMs: 500) }
         )
+        updateOnlineDeviceIds(online)
+        if !hasCompletedLivenessPass {
+            hasCompletedLivenessPass = true
+            processPendingShares(reportUnreachable: true)
+        }
+    }
+
+    /// The single point where liveness results land.
+    func updateOnlineDeviceIds(_ online: Set<UUID>) {
         guard online != onlineDeviceIds else { return }
         onlineDeviceIds = online
     }
@@ -455,19 +483,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func startFileSend(url: URL, to deviceId: UUID) {
+    /// Returns true once the file is handed to `FileSender`. `stagingDirectory` is removed
+    /// when that send finishes.
+    @discardableResult
+    private func startFileSend(url: URL, to deviceId: UUID, stagingDirectory: URL? = nil) -> Bool {
         guard !deviceNeedsUpdate(deviceId) else {
             lastError = ProtocolMismatch.updateOtherDeviceMessage
-            return
+            return false
         }
         guard let peer = resolvePeer(for: deviceId) else {
             lastError = "That device is not reachable right now."
-            return
+            return false
         }
 
         let uiId = UUID()
         let token = CancellationToken()
         sendTokens[uiId] = token
+        if let stagingDirectory { shareStagingBySend[uiId] = stagingDirectory }
         transfers.insert(
             FileTransferState(
                 id: uiId,
@@ -501,6 +533,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self?.completeSend(uiId: uiId, status: .failed(error.localizedDescription)) }
             }
         }
+        return true
     }
 
     /// Cancels an in-flight send (receiver-side transfers finish on their own in v1).
@@ -526,9 +559,103 @@ final class AppModel: ObservableObject {
     }
 
     func completePendingSend(to deviceId: UUID) {
-        let files = pendingSend?.files ?? []
+        let pending = pendingSend
         pendingSend = nil
-        for url in files { sendFile(url: url, to: deviceId) }
+        if pending?.isShare == true {
+            sendPendingShares(to: deviceId)
+            return
+        }
+        for url in pending?.files ?? [] { sendFile(url: url, to: deviceId) }
+    }
+
+    /// Dismisses the device picker. Cancelling a share discards it: the user chose not to send.
+    func cancelPendingSend() {
+        if pendingSend?.isShare == true {
+            pendingShares.forEach(ShareInbox.remove)
+            pendingShares = []
+        }
+        pendingSend = nil
+    }
+
+    /// Queues complete drops from the share extension. Drops already queued are ignored, so
+    /// callers can pass the whole outbox on every poll.
+    func enqueueShares(_ drops: [ShareInbox.PendingDrop], now: Date = Date()) {
+        let known = Set(pendingShares.map { $0.directory.standardizedFileURL })
+        let fresh = drops.filter { !known.contains($0.directory.standardizedFileURL) }
+        guard !fresh.isEmpty else { return }
+        pendingShares.append(contentsOf: fresh)
+        processPendingShares(now: now, reportUnreachable: hasCompletedLivenessPass)
+    }
+
+    /// Sends queued shares when exactly one reachable, up-to-date device exists, asks which
+    /// device when several do, and otherwise leaves them queued.
+    func processPendingShares(now: Date = Date(), reportUnreachable: Bool = false) {
+        discardExpiredShares(now: now)
+        guard !pendingShares.isEmpty, pendingSend == nil else { return }
+
+        let reachable = pairedDevices.filter { resolvePeer(for: $0.id) != nil }
+        let targets = reachable.filter { !deviceNeedsUpdate($0.id) }
+        switch targets.count {
+        case 0:
+            guard reportUnreachable else { return }
+            lastError = reachable.isEmpty ? Self.shareQueuedMessage : ProtocolMismatch.updateOtherDeviceMessage
+            onShareNeedsAttention?()
+        case 1:
+            sendPendingShares(to: targets[0].id)
+        default:
+            pendingSend = PendingSend(files: pendingShares.flatMap(\.fileURLs), isShare: true)
+            onShareNeedsAttention?()
+        }
+    }
+
+    private func discardExpiredShares(now: Date) {
+        let expired = pendingShares.filter { now.timeIntervalSince($0.createdAt) > Self.shareMaxAge }
+        guard !expired.isEmpty else { return }
+        expired.forEach(ShareInbox.remove)
+        let expiredDirs = Set(expired.map(\.directory))
+        pendingShares.removeAll { expiredDirs.contains($0.directory) }
+    }
+
+    /// Stages every queued share and hands it to `FileSender`; the outbox drop is removed only
+    /// after that hand-off. An unreachable or outdated device leaves the queue untouched.
+    private func sendPendingShares(to deviceId: UUID) {
+        guard resolvePeer(for: deviceId) != nil else {
+            lastError = "That device is not reachable right now."
+            return
+        }
+        guard !deviceNeedsUpdate(deviceId) else {
+            lastError = ProtocolMismatch.updateOtherDeviceMessage
+            return
+        }
+        let shares = pendingShares
+        pendingShares = []
+        for share in shares {
+            for source in share.fileURLs {
+                guard let staged = stageSharedFile(source) else { continue }
+                if !startFileSend(url: staged, to: deviceId, stagingDirectory: staged.deletingLastPathComponent()) {
+                    try? FileManager.default.removeItem(at: staged.deletingLastPathComponent())
+                }
+            }
+            ShareInbox.remove(share)
+        }
+    }
+
+    /// Moves (or copies) a shared file into its own `ShareStaging/<uuid>/` folder.
+    private func stageSharedFile(_ source: URL) -> URL? {
+        let destDir = shareStagingDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dest = destDir.appendingPathComponent(source.lastPathComponent)
+        do {
+            try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
+            do {
+                try FileManager.default.moveItem(at: source, to: dest)
+            } catch {
+                try FileManager.default.copyItem(at: source, to: dest)
+            }
+            return dest
+        } catch {
+            try? FileManager.default.removeItem(at: destDir)
+            return nil
+        }
     }
 
     var reachablePairedDevices: [PairedDevice] {
@@ -645,6 +772,9 @@ final class AppModel: ObservableObject {
 
     private func completeSend(uiId: UUID, status: FileTransferState.Status) {
         sendTokens[uiId] = nil
+        if let staging = shareStagingBySend.removeValue(forKey: uiId) {
+            try? FileManager.default.removeItem(at: staging)
+        }
         guard let i = transfers.firstIndex(where: { $0.id == uiId }) else { return }
         if status == .completed { transfers[i].progress = 1.0 }
         transfers[i].status = status

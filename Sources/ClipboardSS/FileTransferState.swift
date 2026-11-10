@@ -32,6 +32,8 @@ struct FileTransferState: Identifiable, Equatable {
 struct PendingSend: Identifiable, Equatable {
     let id = UUID()
     let files: [URL]
+    /// True for files queued by the share extension (sent via the share queue).
+    var isShare = false
 }
 
 /// Thread-safe cancellation flag polled by `FileSender.sendFile(isCancelled:)`.
