@@ -69,7 +69,9 @@ void main() {
       recipientDeviceId: recipient,
       pairKey: pairKey,
     );
-    expect(opened, {'a': 1});
+    expect(opened['a'], 1);
+    // seal stamps an authenticated sentAt (see replay_guard_test.dart).
+    expect(opened.keys.toSet(), {'a', 'sentAt'});
   });
 
   test('openFailsWithWrongPurpose', () async {

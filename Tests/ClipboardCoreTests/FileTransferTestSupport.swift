@@ -31,14 +31,16 @@ func sealedEnvelope<T: Encodable>(
     purpose: EnvelopePurpose,
     sourceDeviceId: UUID,
     recipientDeviceId: UUID,
-    key: SymmetricKey
+    key: SymmetricKey,
+    sentAt: Date = Date()
 ) throws -> ClipEnvelope {
     try ClipEnvelope.seal(
         payload: payload,
         purpose: purpose,
         sourceDeviceId: sourceDeviceId,
         recipientDeviceId: recipientDeviceId,
-        pairKey: key
+        pairKey: key,
+        sentAt: sentAt
     )
 }
 
@@ -54,6 +56,8 @@ final class RecordingTransport: PeerTransport, @unchecked Sendable {
     private(set) var recorded: [Recorded] = []
     /// Path -> status code override. Missing paths default to 200.
     var statusForPath: [String: Int] = [:]
+    /// Path -> response body override. Missing paths default to `{}`.
+    var bodyForPath: [String: Data] = [:]
     /// If set, the Nth call (0-indexed) fails with this status regardless of path.
     var failAtCallIndex: (index: Int, status: Int)?
 
@@ -62,7 +66,8 @@ final class RecordingTransport: PeerTransport, @unchecked Sendable {
     func send(_ data: Data, to peer: Peer) async throws -> Data {
         let request = try HTTPCodec.parseRequest(data)
         let status = record(request: request, peer: peer)
-        return HTTPCodec.encodeResponse(HTTPResponse(statusCode: status, headers: [:], body: Data("{}".utf8)))
+        let body = lock.withLock { bodyForPath[request.path] } ?? Data("{}".utf8)
+        return HTTPCodec.encodeResponse(HTTPResponse(statusCode: status, headers: [:], body: body))
     }
 
     private func record(request: HTTPRequest, peer: Peer) -> Int {

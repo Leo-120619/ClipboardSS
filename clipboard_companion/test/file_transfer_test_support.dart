@@ -49,6 +49,7 @@ Future<PreparedTransfer> prepareTransfer({
   String recipientId = receiverId,
   String fileName = 'file.bin',
   String? overrideHash,
+  DateTime? sentAt,
 }) async {
   final transferId = const Uuid().v4().toLowerCase();
   final fileKey = await FileTransferCrypto.deriveFileKey(key, transferId);
@@ -82,6 +83,7 @@ Future<PreparedTransfer> prepareTransfer({
     sourceDeviceId: peerId,
     recipientDeviceId: recipientId,
     pairKey: key,
+    sentAt: sentAt,
   );
   return PreparedTransfer(offer, chunks, transferId);
 }
@@ -92,12 +94,14 @@ Future<ClipEnvelope> sealControl(
   SecretKey key, {
   required EnvelopePurpose purpose,
   String recipientId = receiverId,
+  DateTime? sentAt,
 }) => CryptoEnvelopeUtils.sealJson(
   json,
   purpose: purpose,
   sourceDeviceId: peerId,
   recipientDeviceId: recipientId,
   pairKey: key,
+  sentAt: sentAt,
 );
 
 String statusOf(FileTransferResponse response) =>

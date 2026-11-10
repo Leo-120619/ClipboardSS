@@ -173,4 +173,55 @@ struct FileSenderTests {
         let dest = destinationDir.appendingPathComponent("big.bin")
         #expect(try ContentHasher.fileHash(contentsOf: dest) == ContentHasher.fileHash(data))
     }
+    // MARK: - Clock skew (Review Focus 1)
+
+    @Test("a stale answer surfaces as clockOutOfSync naming the device")
+    func staleAnswerSurfacesAsClockOutOfSync() async throws {
+        let transport = RecordingTransport()
+        transport.statusForPath["/v1/file/offer"] = 400
+        transport.bodyForPath["/v1/file/offer"] = Data(#"{"status":"stale"}"#.utf8)
+        let sender = try await makeSender(peerId: peer.id, key: SymmetricKey(size: .bits256), transport: transport)
+        do {
+            try await sender.sendFile(at: try makeFile(bytes: 16), to: peer)
+            Issue.record("expected clockOutOfSync")
+        } catch let error as FileSendError {
+            #expect(error == .clockOutOfSync(deviceName: "Peer"))
+            #expect(error.localizedDescription == "Clock out of sync with Peer.")
+        }
+    }
+
+    private func loopbackSend(receiverClockOffset: TimeInterval) async throws -> (URL, Data) {
+        let senderId = UUID()
+        let receiverId = UUID()
+        let key = SymmetricKey(size: .bits256)
+        let senderStore = try await makePairedStore(peerId: receiverId, key: key)
+        let receiverStore = try await makePairedStore(peerId: senderId, key: key)
+        let destinationDir = try temporaryDirectory()
+        let receiver = FileReceiver(
+            pairedStore: receiverStore,
+            localDeviceId: receiverId,
+            transfersDirectory: try temporaryDirectory().appendingPathComponent("Transfers"),
+            destinationProvider: { destinationDir },
+            replayGuard: ReplayGuard(now: { Date().addingTimeInterval(receiverClockOffset) })
+        )
+        let sender = FileSender(identity: DeviceIdentity(id: senderId, name: "Mac"), pairedStore: senderStore, transport: LoopbackTransport(receiver: receiver))
+        let data = Data((0..<100).map { UInt8($0) })
+        let sourceURL = try temporaryDirectory().appendingPathComponent("skew.bin")
+        try data.write(to: sourceURL)
+        try await sender.sendFile(at: sourceURL, to: Peer(id: receiverId, name: "Phone", host: "127.0.0.1", port: 51888))
+        return (destinationDir.appendingPathComponent("skew.bin"), data)
+    }
+
+    @Test("a receiver whose clock is 4 minutes off still receives the file")
+    func fourMinuteSkewStillSyncs() async throws {
+        let (dest, data) = try await loopbackSend(receiverClockOffset: 240)
+        #expect(try Data(contentsOf: dest) == data)
+    }
+
+    @Test("a receiver whose clock is 20 minutes off reports the clock as out of sync")
+    func twentyMinuteSkewIsClockOutOfSync() async throws {
+        await #expect(throws: FileSendError.clockOutOfSync(deviceName: "Phone")) {
+            _ = try await loopbackSend(receiverClockOffset: -1_200)
+        }
+    }
 }

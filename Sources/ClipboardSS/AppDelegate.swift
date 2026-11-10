@@ -53,11 +53,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard)
 
             let transferEventSink = FileTransferEventSink()
+            // One guard for every envelope endpoint, so a nonce is single-use process-wide.
+            let replayGuard = ReplayGuard()
             let fileReceiver = FileReceiver(
                 pairedStore: pairedStore,
                 localDeviceId: identity.id,
                 transfersDirectory: store.storageDirectory.appendingPathComponent("Transfers", isDirectory: true),
                 destinationProvider: { ReceiveSettings.resolvedDirectory() },
+                replayGuard: replayGuard,
                 onEvent: { [transferEventSink] event in transferEventSink.emit(event) }
             )
 
@@ -65,7 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 identity: identity,
                 receiver: clipReceiver,
                 pairingCoordinator: pairingCoordinator,
-                fileReceiver: fileReceiver
+                fileReceiver: fileReceiver,
+                replayGuard: replayGuard
             )
             let peerBrowser = PeerBrowser(identityId: identity.id)
             let clipSender = ClipSender(

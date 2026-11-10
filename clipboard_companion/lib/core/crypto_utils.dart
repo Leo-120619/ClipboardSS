@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'models.dart';
+import 'replay_guard.dart';
 
 class PairingSession {
   late SimpleKeyPair _privateKey;
@@ -142,12 +143,14 @@ class CryptoEnvelopeUtils {
     required String sourceDeviceId,
     required String recipientDeviceId,
     required SecretKey pairKey,
+    DateTime? sentAt,
   }) => sealJson(
     payload.toJson(),
     purpose: purpose,
     sourceDeviceId: sourceDeviceId,
     recipientDeviceId: recipientDeviceId,
     pairKey: pairKey,
+    sentAt: sentAt,
   );
 
   static Future<ClipPayload> open(
@@ -164,15 +167,20 @@ class CryptoEnvelopeUtils {
     ),
   );
 
-  /// Seals an arbitrary JSON map (file-transfer control messages use this directly).
+  /// Seals an arbitrary JSON map (file-transfer control messages use this directly),
+  /// stamping `sentAt` (default: now) into the inner JSON so the receiver's
+  /// [ReplayGuard] checks freshness on an authenticated value.
   static Future<ClipEnvelope> sealJson(
     Map<String, dynamic> json, {
     required EnvelopePurpose purpose,
     required String sourceDeviceId,
     required String recipientDeviceId,
     required SecretKey pairKey,
+    DateTime? sentAt,
   }) => sealBytes(
-    utf8.encode(jsonEncode(json)),
+    utf8.encode(
+      jsonEncode({...json, 'sentAt': wireTimestamp(sentAt ?? DateTime.now())}),
+    ),
     purpose: purpose,
     sourceDeviceId: sourceDeviceId,
     recipientDeviceId: recipientDeviceId,

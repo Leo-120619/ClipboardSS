@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 enum ClipType { text, image }
 
 String canonicalDeviceId(String id) => id.trim().toLowerCase();
@@ -123,6 +125,21 @@ class Peer {
 /// User-facing text for a peer that runs another wire protocol version.
 const updateOtherDeviceMessage =
     'Update ClipboardSS on the other device to keep syncing.';
+
+/// User-facing text for peers that answered `400 {"status":"stale"}`.
+String clockOutOfSyncMessage(List<String> deviceNames) =>
+    'Clock out of sync with ${deviceNames.join(', ')}.';
+
+/// True when an HTTP answer is `400 {"status":"stale"}` (the peer's clock disagrees).
+bool isStaleResponse(int statusCode, String body) {
+  if (statusCode != 400) return false;
+  try {
+    final decoded = jsonDecode(body);
+    return decoded is Map && decoded['status'] == 'stale';
+  } on FormatException {
+    return false;
+  }
+}
 
 class PairedDevice {
   final String id;

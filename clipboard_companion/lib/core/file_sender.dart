@@ -30,6 +30,16 @@ class FileSendNeedsUpdateException extends FileSendException {
   String toString() => updateOtherDeviceMessage;
 }
 
+/// The peer answered `400 {"status":"stale"}`: its clock disagrees with ours.
+class FileSendClockOutOfSyncException extends FileSendException {
+  final String deviceName;
+  FileSendClockOutOfSyncException(this.deviceName)
+    : super(clockOutOfSyncMessage([deviceName]));
+
+  @override
+  String toString() => message;
+}
+
 /// Sends a single file to one paired peer using the chunked protocol. Streams the file in
 /// 4 MiB slices via [RandomAccessFile] — never loads the whole file. Two passes: a
 /// streaming hash pass, then offer -> chunks -> finish. Reports monotonic progress and
@@ -210,6 +220,9 @@ class FileSender {
       throw FileSendException('$path timed out');
     }
     if (response.statusCode == 426) throw FileSendNeedsUpdateException();
+    if (isStaleResponse(response.statusCode, response.body)) {
+      throw FileSendClockOutOfSyncException(peer.name);
+    }
     if (response.statusCode != 200) {
       throw FileSendException('$path returned ${response.statusCode}');
     }

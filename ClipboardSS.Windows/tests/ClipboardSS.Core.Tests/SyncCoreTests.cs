@@ -276,6 +276,40 @@ public sealed class SyncCoreTests
             cancellationToken: TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task SendersReportStaleAnswersAsClockOutOfSyncWithThatDevice()
+    {
+        using var directory = new TemporaryDirectory();
+        var peerId = Guid.NewGuid();
+        var pairedStore = new PairedDeviceStore(
+            System.IO.Path.Combine(directory.Path, "paired.json"),
+            new InMemoryPairKeyStorage());
+        pairedStore.AddDevice(new PairedDevice(peerId, "Phone"), Enumerable.Repeat((byte)9, 32).ToArray());
+        var transport = new FakePeerTransport
+        {
+            Response = HttpCodec.EncodeResponse(new HttpResponse(400,
+                new Dictionary<string, string> { ["Content-Type"] = "application/json" },
+                Encoding.UTF8.GetBytes("{\"status\":\"stale\"}"))),
+        };
+        var peer = new Peer(peerId, "Phone", "10.0.0.3", 51888);
+
+        var clipSender = new ClipSender(new DeviceIdentity(Guid.NewGuid(), "Windows"), pairedStore, transport, directory.Path);
+        var clip = new ClipStore(directory.Path).AddText("hi");
+        var result = await clipSender.BroadcastAsync(clip, [peer], TestContext.Current.CancellationToken);
+        Assert.Equal(1, result.FailureCount);
+        Assert.Equal(0, result.NeedsUpdateCount);
+        Assert.Equal(["Phone"], result.ClockOutOfSyncPeerNames);
+        Assert.Equal("Clock out of sync with Phone.", WireProtocol.ClockOutOfSyncMessage(result.ClockOutOfSyncPeerNames));
+
+        var file = System.IO.Path.Combine(directory.Path, "payload.bin");
+        await File.WriteAllBytesAsync(file, [1, 2, 3], TestContext.Current.CancellationToken);
+        var fileSender = new FileSender(new DeviceIdentity(Guid.NewGuid(), "Windows"), pairedStore, transport);
+        var error = await Assert.ThrowsAsync<PeerClockOutOfSyncException>(() => fileSender.SendAsync(
+            file, peer, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal("Phone", error.DeviceName);
+        Assert.Equal("Clock out of sync with Phone.", error.Message);
+    }
+
     private static readonly byte[] OnePixelPng = Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
 

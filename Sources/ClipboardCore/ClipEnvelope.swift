@@ -61,18 +61,21 @@ public struct ClipEnvelope: Codable, Equatable, Sendable {
         return Data("ClipboardSS/\(currentVersion)|\(purpose.rawValue)|\(source)|\(recipient)".utf8)
     }
 
-    /// Seals any `Encodable` inner payload (ISO-8601 dates) for `recipientDeviceId`.
+    /// Seals any `Encodable` inner payload (ISO-8601 dates) for `recipientDeviceId`,
+    /// stamping `sentAt` into the inner JSON so the receiver's `ReplayGuard` can check
+    /// freshness on an authenticated value.
     public static func seal<T: Encodable>(
         payload: T,
         purpose: EnvelopePurpose,
         sourceDeviceId: UUID,
         recipientDeviceId: UUID,
-        pairKey: SymmetricKey
+        pairKey: SymmetricKey,
+        sentAt: Date = Date()
     ) throws -> ClipEnvelope {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return try sealPlaintext(
-            try encoder.encode(payload),
+            try encoder.encode(SentAtStamped(payload: payload, sentAt: sentAt)),
             purpose: purpose,
             sourceDeviceId: sourceDeviceId,
             recipientDeviceId: recipientDeviceId,
@@ -121,6 +124,18 @@ public struct ClipEnvelope: Codable, Equatable, Sendable {
         }
     }
 
+    /// Opens like `open`, also returning the authenticated `sentAt`. A payload without
+    /// `sentAt` opens with `.distantPast`, which the `ReplayGuard` rejects as stale.
+    public func openStamped<T: Decodable>(
+        _ type: T.Type,
+        purpose: EnvelopePurpose,
+        recipientDeviceId: UUID,
+        pairKey: SymmetricKey
+    ) throws -> OpenedEnvelope<T> {
+        let opened = try open(SentAtStamped<T>.self, purpose: purpose, recipientDeviceId: recipientDeviceId, pairKey: pairKey)
+        return OpenedEnvelope(payload: opened.payload, sentAt: opened.sentAt ?? .distantPast)
+    }
+
     func openPlaintext(purpose: EnvelopePurpose, recipientDeviceId: UUID, pairKey: SymmetricKey) throws -> Data {
         guard v == Self.currentVersion else {
             throw EnvelopeError.unsupportedVersion(v)
@@ -142,5 +157,37 @@ public struct ClipEnvelope: Codable, Equatable, Sendable {
         } catch {
             throw EnvelopeError.decryptionFailed
         }
+    }
+}
+
+/// An opened envelope's payload plus its authenticated `sentAt`.
+public struct OpenedEnvelope<T> {
+    public let payload: T
+    public let sentAt: Date
+}
+
+private enum SentAtCodingKey: String, CodingKey {
+    case sentAt
+}
+
+/// Encodes or decodes a payload's own keys plus `sentAt` in the same JSON object.
+private struct SentAtStamped<T> {
+    let payload: T
+    let sentAt: Date?
+}
+
+extension SentAtStamped: Encodable where T: Encodable {
+    func encode(to encoder: Encoder) throws {
+        try payload.encode(to: encoder)
+        var container = encoder.container(keyedBy: SentAtCodingKey.self)
+        try container.encodeIfPresent(sentAt, forKey: .sentAt)
+    }
+}
+
+extension SentAtStamped: Decodable where T: Decodable {
+    init(from decoder: Decoder) throws {
+        payload = try T(from: decoder)
+        let container = try decoder.container(keyedBy: SentAtCodingKey.self)
+        sentAt = (try? container.decodeIfPresent(Date.self, forKey: .sentAt)) ?? nil
     }
 }

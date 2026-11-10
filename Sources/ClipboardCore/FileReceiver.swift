@@ -26,6 +26,20 @@ public struct FileTransferResponse: Sendable, Equatable {
         426,
         ["status": "upgradeRequired", "minVersion": ClipEnvelope.currentVersion]
     )
+
+    /// 400: `sentAt` is outside the freshness window (clocks out of sync, or an old capture).
+    public static let stale = FileTransferResponse.json(400, ["status": "stale"])
+    /// 409: this `(sourceDeviceId, nonce)` was already accepted.
+    public static let replayed = FileTransferResponse.json(409, ["status": "replayed"])
+
+    /// The rejection for a failed `ReplayGuard` check, or nil when the envelope may proceed.
+    public static func rejection(for check: ReplayCheck) -> FileTransferResponse? {
+        switch check {
+        case .ok: return nil
+        case .stale: return .stale
+        case .replayed: return .replayed
+        }
+    }
 }
 
 /// UI-facing events emitted as a transfer progresses on the receiving side.
@@ -60,6 +74,8 @@ public actor FileReceiver {
     private let now: @Sendable () -> Date
     private let idleTimeout: TimeInterval
     private let onEvent: (@Sendable (FileTransferReceiveEvent) -> Void)?
+    /// Shared with the clip endpoint in production (one guard per process).
+    private let replayGuard: ReplayGuard
 
     private var sessions: [String: Session] = [:]
     private var cancelledTransferIds: Set<String> = []
@@ -71,8 +87,10 @@ public actor FileReceiver {
         destinationProvider: @escaping @Sendable () -> URL,
         now: @escaping @Sendable () -> Date = { Date() },
         idleTimeout: TimeInterval = FileTransferConstants.idleTimeout,
+        replayGuard: ReplayGuard = ReplayGuard(),
         onEvent: (@Sendable (FileTransferReceiveEvent) -> Void)? = nil
     ) {
+        self.replayGuard = replayGuard
         self.pairedStore = pairedStore
         self.localDeviceId = localDeviceId
         self.transfersDirectory = transfersDirectory
@@ -93,9 +111,11 @@ public actor FileReceiver {
         guard await pairedStore.isConnected(envelope.sourceDeviceId) else {
             return .json(401, ["status": "paused"])
         }
-        guard let offer = try? envelope.open(FileOfferPayload.self, purpose: .fileOffer, recipientDeviceId: localDeviceId, pairKey: key) else {
+        guard let opened = try? envelope.openStamped(FileOfferPayload.self, purpose: .fileOffer, recipientDeviceId: localDeviceId, pairKey: key) else {
             return .json(401, ["status": "unpaired"])
         }
+        if let rejection = await replayRejection(envelope, sentAt: opened.sentAt) { return rejection }
+        let offer = opened.payload
         guard isValidTransferId(offer.transferId) else {
             return .json(400, ["status": "invalidId"])
         }
@@ -184,9 +204,11 @@ public actor FileReceiver {
     public func handleFinish(envelope: ClipEnvelope) async -> FileTransferResponse {
         guard envelope.v == ClipEnvelope.currentVersion else { return .upgradeRequired }
         guard let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId),
-              let finish = try? envelope.open(FileFinishPayload.self, purpose: .fileFinish, recipientDeviceId: localDeviceId, pairKey: key) else {
+              let opened = try? envelope.openStamped(FileFinishPayload.self, purpose: .fileFinish, recipientDeviceId: localDeviceId, pairKey: key) else {
             return .json(401, ["status": "unpaired"])
         }
+        if let rejection = await replayRejection(envelope, sentAt: opened.sentAt) { return rejection }
+        let finish = opened.payload
         guard let session = sessions[finish.transferId] else {
             return .json(404, ["status": "unknown"])
         }
@@ -221,7 +243,9 @@ public actor FileReceiver {
     public func handleCancel(envelope: ClipEnvelope) async -> FileTransferResponse {
         guard envelope.v == ClipEnvelope.currentVersion else { return .upgradeRequired }
         if let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId),
-           let cancel = try? envelope.open(FileCancelPayload.self, purpose: .fileCancel, recipientDeviceId: localDeviceId, pairKey: key) {
+           let opened = try? envelope.openStamped(FileCancelPayload.self, purpose: .fileCancel, recipientDeviceId: localDeviceId, pairKey: key) {
+            if let rejection = await replayRejection(envelope, sentAt: opened.sentAt) { return rejection }
+            let cancel = opened.payload
             cancelledTransferIds.insert(cancel.transferId)
             if let session = sessions[cancel.transferId] {
                 destroy(cancel.transferId, session: session)
@@ -243,6 +267,12 @@ public actor FileReceiver {
     }
 
     // MARK: - Internals
+
+    /// Runs only after a successful AEAD open, before any session change.
+    private func replayRejection(_ envelope: ClipEnvelope, sentAt: Date) async -> FileTransferResponse? {
+        let check = await replayGuard.check(sourceDeviceId: envelope.sourceDeviceId, nonce: envelope.nonce, sentAt: sentAt)
+        return FileTransferResponse.rejection(for: check)
+    }
 
     private func teardown(_ transferId: String, reason: String) {
         if let session = sessions[transferId] {

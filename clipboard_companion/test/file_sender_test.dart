@@ -5,6 +5,7 @@ import 'package:clipboard_companion/core/content_hasher.dart';
 import 'package:clipboard_companion/core/file_receiver.dart';
 import 'package:clipboard_companion/core/file_sender.dart';
 import 'package:clipboard_companion/core/models.dart';
+import 'package:clipboard_companion/core/replay_guard.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -175,6 +176,27 @@ void main() {
     );
   });
 
+  test(
+    'a stale answer surfaces as clock out of sync with the device',
+    () async {
+      final client = MockClient(
+        (request) async => http.Response('{"status":"stale"}', 400),
+      );
+      final sender = await makeSender(client);
+
+      await expectLater(
+        sender.sendFile(file: makeFile(16), peer: peer),
+        throwsA(
+          isA<FileSendClockOutOfSyncException>().having(
+            (e) => e.toString(),
+            'message',
+            'Clock out of sync with Peer.',
+          ),
+        ),
+      );
+    },
+  );
+
   test('sending to an unpaired peer throws', () async {
     final client = MockClient((request) async => http.Response('{}', 200));
     final sender = await makeSender(client);
@@ -278,4 +300,65 @@ void main() {
       );
     },
   );
+
+  group('clock skew (Review Focus 1)', () {
+    Future<Directory> loopbackSend(Duration receiverClockOffset) async {
+      final store = await makePairedStore(peerId, key);
+      final destDir = makeTempDir('dest');
+      final receiver = FileReceiver(
+        pairedStore: store,
+        localDeviceId: peer.id,
+        transfersDirectory: makeTempDir('transfers'),
+        destinationProvider: () => destDir,
+        replayGuard: ReplayGuard(
+          now: () => DateTime.now().add(receiverClockOffset),
+        ),
+      );
+      final client = MockClient((request) async {
+        final FileTransferResponse result;
+        switch (request.url.path) {
+          case '/v1/file/offer':
+            result = await receiver.handleOffer(
+              ClipEnvelope.fromJson(jsonDecode(request.body)),
+            );
+          case '/v1/file/chunk':
+            result = await receiver.handleChunk(
+              request.headers['x-transfer-id'] ?? '',
+              int.tryParse(request.headers['x-chunk-index'] ?? '') ?? -1,
+              request.bodyBytes,
+            );
+          case '/v1/file/finish':
+            result = await receiver.handleFinish(
+              ClipEnvelope.fromJson(jsonDecode(request.body)),
+            );
+          case '/v1/file/cancel':
+            result = await receiver.handleCancel(
+              ClipEnvelope.fromJson(jsonDecode(request.body)),
+            );
+          default:
+            result = FileTransferResponse(404, {});
+        }
+        return http.Response(jsonEncode(result.body), result.statusCode);
+      });
+      final sender = FileSender(
+        identity: DeviceIdentity(id: peerId, name: 'Peer'),
+        pairedStore: store,
+        client: client,
+      );
+      await sender.sendFile(file: makeFile(100), peer: peer);
+      return destDir;
+    }
+
+    test('a receiver 4 minutes off still receives the file', () async {
+      final destDir = await loopbackSend(const Duration(minutes: 4));
+      expect(File('${destDir.path}/payload.bin').existsSync(), isTrue);
+    });
+
+    test('a receiver 20 minutes off reports clock out of sync', () async {
+      await expectLater(
+        loopbackSend(const Duration(minutes: -20)),
+        throwsA(isA<FileSendClockOutOfSyncException>()),
+      );
+    });
+  });
 }

@@ -91,9 +91,13 @@ The target must be in pairing mode before it accepts `POST /v1/pair/start`. Pair
     "imageExtension": "png", // Optional (if type=image)
     "previewText": "...",
     "contentHash": "<sha256 hex>",
-    "sourceDeviceName": "..."
+    "sourceDeviceName": "...",
+    "sentAt": "2026-11-10T12:00:00Z" // set at seal time; see Freshness and replay protection
   }
   ```
+
+  Responses: `200 {"status":"ok"|"duplicate"}` · `401` unpaired/paused · `426` upgradeRequired ·
+  `400 {"status":"stale"}` · `409 {"status":"replayed"}` · `400` otherwise.
 
 ## Envelope v2 (all envelope-carrying endpoints)
 
@@ -122,6 +126,44 @@ aad = UTF-8("ClipboardSS/2|" + purpose + "|" + lowercase(sourceDeviceId) + "|" +
   `426 {"status":"upgradeRequired","minVersion":2}` on every envelope endpoint. Senders that
   receive `426`, or whose peer advertises an older `v`, show "update the other device" —
   never "unauthorized" or a re-pair prompt.
+
+### Freshness and replay protection
+
+Every inner payload (clip, file-offer, file-finish, file-cancel, and any later purpose such as
+`ping`/`pong`) carries `"sentAt"`, the sender's clock at seal time. It lives **inside** the
+ciphertext, so it is authenticated. Every platform writes it in whole-second UTC,
+`yyyy-MM-ddTHH:mm:ssZ` (e.g. `2026-11-10T12:00:00Z`), and the seal helpers stamp it
+automatically.
+
+Each receiver process keeps one replay guard shared by every envelope endpoint. On every
+envelope receive path the order is:
+
+1. `v` check (426), pairing / paused checks (401).
+2. AEAD open. A failed open is rejected and never touches the guard.
+3. Guard check, in this order:
+   - `|now − sentAt| > 300 s` → `400 {"status":"stale"}`. A missing or unparsable `sentAt`
+     is stale. Stale envelopes are not remembered.
+   - `(sourceDeviceId lowercase, nonce bytes)` already accepted in the last **600 s** →
+     `409 {"status":"replayed"}`. The nonce is compared by its decoded bytes, not its base64
+     spelling.
+   - otherwise remember the pair and continue.
+4. Only then any side effect (pasteboard, clip store, transfer session create/teardown).
+
+Retention (600 s) covers the whole acceptance window: an envelope accepted at receiver time
+`t` carries `sentAt ≤ t + 300`, so it is stale from `t + 600` on. Chunks are not enveloped and
+are not guarded; they are bound to a session that only a fresh offer can create.
+
+Senders that receive `400 {"status":"stale"}` show "Clock out of sync with <device>." (never
+"unauthorized" or a re-pair prompt). A clock skew of up to 5 minutes still syncs.
+
+**Freshness test vector** (all three suites assert it):
+
+- `sentAt` for the instant `1794312000` (Unix seconds), sealed with a 456 ms fraction,
+  is written as `2026-11-10T12:00:00Z` and parses back to `1794312000`.
+- Receiver clock `now`: `sentAt = now − 240 s` and `now + 240 s` → ok;
+  `now − 300 s` → ok (inclusive); `now − 301 s`, `now ± 1200 s` → stale.
+- The same `(sourceDeviceId, nonce)` again at `now + 599 s` → replayed; at `now + 601 s`
+  the entry has expired.
 
 ### Envelope v2 Test Vector (pinned, cross-platform)
 
@@ -199,10 +241,12 @@ All on port `51888`, same host as the clip server.
      "chunkSize": 4194304,
      "chunkCount": 38,
      "createdAt": "2026-07-10T12:00:00Z",
-     "sourceDeviceName": "Leo's Mac"
+     "sourceDeviceName": "Leo's Mac",
+     "sentAt": "2026-07-10T12:00:00Z"
    }
    ```
-   Responses: `200 {"status":"ready"}` · `401` unpaired · `426` upgradeRequired · `403 {"status":"declined"}`
+   Responses: `200 {"status":"ready"}` · `401` unpaired · `426` upgradeRequired ·
+   `400 {"status":"stale"}` · `409 {"status":"replayed"}` · `403 {"status":"declined"}`
    (reserved for a future accept prompt; v1 auto-accepts) · `409` duplicate active
  transferId.
 
@@ -222,13 +266,14 @@ authenticate a chunk body before treating a repeated index as an idempotent dupl
    `404` unknown/expired transferId · `400` bad index or AEAD failure (tears down the
    session) · `410` cancelled.
 
-3. **`POST /v1/file/finish`** — envelope-sealed `{"transferId": "..."}`. Receiver verifies
+3. **`POST /v1/file/finish`** — envelope-sealed `{"transferId": "...", "sentAt": "..."}`. Receiver verifies
    every chunk is present, streams the reassembled temp file through `fileHash`, and on a
    match moves it to the destination.
    Responses: `200 {"status":"complete"}` · `409 {"status":"incomplete"}` ·
    `422 {"status":"hashMismatch"}` (session + temp file destroyed).
 
-4. **`POST /v1/file/cancel`** — envelope-sealed `{"transferId": "..."}`; idempotent `200`.
+4. **`POST /v1/file/cancel`** — envelope-sealed `{"transferId": "...", "sentAt": "..."}`;
+   idempotent `200`. Like every envelope endpoint, also `400 stale` / `409 replayed`.
 
 ### Semantics
 

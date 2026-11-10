@@ -25,6 +25,16 @@ public struct Peer: Equatable, Hashable, Sendable {
 /// User-facing text for a peer that runs an older (or newer) wire protocol.
 public enum ProtocolMismatch {
     public static let updateOtherDeviceMessage = "Update ClipboardSS on the other device to keep syncing."
+
+    /// User-facing text for peers that answered `400 {"status":"stale"}`.
+    public static func clockOutOfSyncMessage(deviceNames: [String]) -> String {
+        "Clock out of sync with \(deviceNames.joined(separator: ", "))."
+    }
+
+    /// The JSON `status` of a response body, if it has one.
+    static func responseStatus(_ body: Data) -> String? {
+        (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["status"] as? String
+    }
 }
 
 public protocol PeerTransport: Sendable {
@@ -43,13 +53,23 @@ public struct ClipSendResult: Equatable, Sendable {
     public let failureCount: Int
     /// Paired peers skipped or refused (426) because they run another protocol version.
     public let needsUpdateCount: Int
+    /// Names of peers that refused the clip as stale: their clock disagrees with ours.
+    public let clockOutOfSyncPeerNames: [String]
 
-    public init(visiblePeerCount: Int, pairedPeerCount: Int, successCount: Int, failureCount: Int, needsUpdateCount: Int = 0) {
+    public init(
+        visiblePeerCount: Int,
+        pairedPeerCount: Int,
+        successCount: Int,
+        failureCount: Int,
+        needsUpdateCount: Int = 0,
+        clockOutOfSyncPeerNames: [String] = []
+    ) {
         self.visiblePeerCount = visiblePeerCount
         self.pairedPeerCount = pairedPeerCount
         self.successCount = successCount
         self.failureCount = failureCount
         self.needsUpdateCount = needsUpdateCount
+        self.clockOutOfSyncPeerNames = clockOutOfSyncPeerNames
     }
 
     public var hasVisiblePeers: Bool { visiblePeerCount > 0 }
@@ -58,13 +78,18 @@ public struct ClipSendResult: Equatable, Sendable {
 
 public struct ClipSendHTTPStatusError: Error, Equatable, Sendable {
     public let statusCode: Int
+    /// The JSON `status` of the response body, if any.
+    public let status: String?
 
-    public init(statusCode: Int) {
+    public init(statusCode: Int, status: String? = nil) {
         self.statusCode = statusCode
+        self.status = status
     }
 
     /// 426: the receiver speaks a different wire protocol version.
     public var isUpgradeRequired: Bool { statusCode == 426 }
+    /// 400 stale: the receiver's clock disagrees with ours by more than the window.
+    public var isStale: Bool { statusCode == 400 && status == "stale" }
 }
 
 public struct ClipSender: Sendable {
@@ -149,7 +174,10 @@ public struct ClipSender: Sendable {
                         let responseData = try await transport.send(requestData, to: peer)
                         let response = try HTTPCodec.parseResponse(responseData)
                         guard response.statusCode == 200 else {
-                            throw ClipSendHTTPStatusError(statusCode: response.statusCode)
+                            throw ClipSendHTTPStatusError(
+                                statusCode: response.statusCode,
+                                status: ProtocolMismatch.responseStatus(response.body)
+                            )
                         }
                         return (peer, nil)
                     } catch {
@@ -160,11 +188,16 @@ public struct ClipSender: Sendable {
             
             var failures: [Peer: Error] = [:]
             var refusedCount = 0
+            var clockOutOfSync: [String] = []
             for try await (peer, error) in group {
                 if let error = error {
                     failures[peer] = error
-                    if (error as? ClipSendHTTPStatusError)?.isUpgradeRequired == true {
+                    let statusError = error as? ClipSendHTTPStatusError
+                    if statusError?.isUpgradeRequired == true {
                         refusedCount += 1
+                    }
+                    if statusError?.isStale == true {
+                        clockOutOfSync.append(peer.name)
                     }
                 }
             }
@@ -174,7 +207,8 @@ public struct ClipSender: Sendable {
                 pairedPeerCount: pairedTargets.count,
                 successCount: pairedTargets.count - failures.count,
                 failureCount: failures.count,
-                needsUpdateCount: outdatedCount + refusedCount
+                needsUpdateCount: outdatedCount + refusedCount,
+                clockOutOfSyncPeerNames: clockOutOfSync.sorted()
             )
         }
     }

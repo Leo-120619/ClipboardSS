@@ -41,8 +41,13 @@ public interface IClipServerBackend
         CancellationToken cancellationToken);
 }
 
-public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend backend)
+/// <param name="replayGuard">
+/// Shared by every envelope endpoint; the router is created once per process. Defaults to a new guard.
+/// </param>
+public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend backend, ReplayGuard? replayGuard = null)
 {
+    private readonly ReplayGuard _replayGuard = replayGuard ?? new ReplayGuard();
+
     public async Task<HttpResponse> RouteAsync(
         HttpRequest request,
         string remoteHost,
@@ -74,8 +79,9 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
                 if (!backend.IsConnected(envelope.SourceDeviceId))
                     return TextResponse(401, "Unauthorized");
 
-                var payload = EnvelopeCrypto.Open(envelope, EnvelopePurpose.Clip, identity.Id, key);
-                var result = backend.Receive(payload);
+                var opened = EnvelopeCrypto.OpenStamped<ClipPayload>(envelope, EnvelopePurpose.Clip, identity.Id, key);
+                if (ReplayRejection(envelope, opened.SentAt) is { } rejected) return rejected;
+                var result = backend.Receive(opened.Payload);
                 var status = result.Status == ReceiveStatus.Duplicate ? "duplicate" : "ok";
                 return JsonResponse(200, Encoding.UTF8.GetBytes($"{{\"status\":\"{status}\"}}"));
             }
@@ -106,11 +112,23 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
                 if (!backend.IsConnected(envelope.SourceDeviceId)) return TextResponse(401, "Unauthorized");
                 FileReceiveResult result;
                 if (request.Path == "/v1/file/offer")
-                    result = await backend.HandleFileOfferAsync(EnvelopeCrypto.OpenJson<FileOfferPayload>(envelope, EnvelopePurpose.FileOffer, identity.Id, key), key, cancellationToken);
+                {
+                    var offer = EnvelopeCrypto.OpenStamped<FileOfferPayload>(envelope, EnvelopePurpose.FileOffer, identity.Id, key);
+                    if (ReplayRejection(envelope, offer.SentAt) is { } rejected) return rejected;
+                    result = await backend.HandleFileOfferAsync(offer.Payload, key, cancellationToken);
+                }
                 else if (request.Path == "/v1/file/finish")
-                    result = await backend.HandleFileFinishAsync(EnvelopeCrypto.OpenJson<FileFinishPayload>(envelope, EnvelopePurpose.FileFinish, identity.Id, key).TransferId, cancellationToken);
+                {
+                    var finish = EnvelopeCrypto.OpenStamped<FileFinishPayload>(envelope, EnvelopePurpose.FileFinish, identity.Id, key);
+                    if (ReplayRejection(envelope, finish.SentAt) is { } rejected) return rejected;
+                    result = await backend.HandleFileFinishAsync(finish.Payload.TransferId, cancellationToken);
+                }
                 else
-                    result = await backend.HandleFileCancelAsync(EnvelopeCrypto.OpenJson<FileCancelPayload>(envelope, EnvelopePurpose.FileCancel, identity.Id, key).TransferId, cancellationToken);
+                {
+                    var cancel = EnvelopeCrypto.OpenStamped<FileCancelPayload>(envelope, EnvelopePurpose.FileCancel, identity.Id, key);
+                    if (ReplayRejection(envelope, cancel.SentAt) is { } rejected) return rejected;
+                    result = await backend.HandleFileCancelAsync(cancel.Payload.TransferId, cancellationToken);
+                }
                 return FileResponse(result);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested) { return TextResponse(400, "Bad Request"); }
@@ -163,6 +181,18 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
         .Replace('\u201d', '"')
         .Where(character => character <= 0x7f)
         .ToArray());
+
+    /// <summary>
+    /// Runs only after a successful AEAD open, before any side effect: 400 stale or 409 replayed,
+    /// or null when the envelope may proceed.
+    /// </summary>
+    private HttpResponse? ReplayRejection(ClipEnvelope envelope, DateTimeOffset sentAt) =>
+        _replayGuard.Check(envelope.SourceDeviceId, envelope.Nonce, sentAt) switch
+        {
+            ReplayCheck.Stale => JsonResponse(400, "{\"status\":\"stale\"}"u8.ToArray()),
+            ReplayCheck.Replayed => JsonResponse(409, "{\"status\":\"replayed\"}"u8.ToArray()),
+            _ => null,
+        };
 
     /// <summary>426 for an envelope whose <c>v</c> is not <see cref="WireProtocol.Version"/>.</summary>
     private static HttpResponse UpgradeRequiredResponse() =>

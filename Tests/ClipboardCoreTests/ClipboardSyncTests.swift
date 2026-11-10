@@ -255,6 +255,42 @@ struct ClipboardSyncTests {
         #expect(result.needsUpdateCount == 1)
     }
 
+    @Test("ClipSender reports a stale answer as the clock being out of sync with that device")
+    func clipSenderReportsStaleAsClockOutOfSync() async throws {
+        let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
+        let transport = FakePeerTransport()
+        transport.responseData = HTTPCodec.encodeResponse(
+            HTTPResponse(statusCode: 400, headers: ["Content-Type": "application/json"], body: Data(#"{"status":"stale"}"#.utf8))
+        )
+        let sender = ClipSender(identity: DeviceIdentity(id: UUID(), name: "Mac"), pairedStore: pairedStore, transport: transport, storageDirectory: try syncTemporaryDirectory())
+        let peerId = UUID()
+        try await pairedStore.addDevice(PairedDevice(id: peerId, name: "Phone"), key: SymmetricKey(size: .bits256))
+
+        let clip = ClipItem(type: .text, createdAt: Date(), text: "hi", previewText: "hi", contentHash: "123")
+        let result = try await sender.broadcast(clip: clip, to: [Peer(id: peerId, name: "Phone", host: "10.0.0.1", port: 8080)])
+        #expect(result.failureCount == 1)
+        #expect(result.clockOutOfSyncPeerNames == ["Phone"])
+        #expect(result.needsUpdateCount == 0)
+        #expect(ProtocolMismatch.clockOutOfSyncMessage(deviceNames: result.clockOutOfSyncPeerNames) == "Clock out of sync with Phone.")
+    }
+
+    @Test("ClipSender stamps sentAt into every clip it seals")
+    func clipSenderStampsSentAt() async throws {
+        let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
+        let transport = FakePeerTransport()
+        let sender = ClipSender(identity: DeviceIdentity(id: UUID(), name: "Mac"), pairedStore: pairedStore, transport: transport, storageDirectory: try syncTemporaryDirectory())
+        let peerId = UUID()
+        let key = SymmetricKey(size: .bits256)
+        try await pairedStore.addDevice(PairedDevice(id: peerId, name: "Phone"), key: key)
+
+        let clip = ClipItem(type: .text, createdAt: Date(timeIntervalSince1970: 0), text: "hi", previewText: "hi", contentHash: "123")
+        _ = try await sender.broadcast(clip: clip, to: [Peer(id: peerId, name: "Phone", host: "10.0.0.1", port: 8080)])
+        let request = try HTTPCodec.parseRequest(transport.sentRequests[0].0)
+        let envelope = try JSONDecoder().decode(ClipEnvelope.self, from: request.body)
+        let opened = try envelope.openStamped(ClipPayload.self, purpose: .clip, recipientDeviceId: peerId, pairKey: key)
+        #expect(abs(opened.sentAt.timeIntervalSinceNow) < 5)
+    }
+
     @Test("ClipSender treats non-200 responses as failed sends")
     func clipSenderChecksResponseStatus() async throws {
         let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())

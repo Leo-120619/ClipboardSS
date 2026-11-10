@@ -192,6 +192,42 @@ void main() {
     expect(result.failureCount, 1);
     expect(result.needsUpdateCount, 1);
   });
+
+  test(
+    'broadcast reports a stale answer as clock out of sync with that device',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final pairedStore = PairedDeviceStore(prefs);
+      const peerId = '550e8400-e29b-41d4-a716-446655440000';
+      await pairedStore.addDevice(
+        PairedDevice(id: peerId, name: 'Mac'),
+        SecretKey(List<int>.filled(32, 1)),
+      );
+      final sender = ClipSender(
+        identity: DeviceIdentity(
+          id: '4d967c79-47dc-4e1f-a3bd-d3160b082da7',
+          name: 'Android',
+        ),
+        pairedStore: pairedStore,
+        client: MockClient(
+          (request) async => http.Response('{"status":"stale"}', 400),
+        ),
+      );
+
+      final result = await sender.broadcast(_clip(), [
+        Peer(id: peerId, name: 'Mac', host: '10.0.0.2', port: 51888),
+      ]);
+
+      expect(result.failureCount, 1);
+      expect(result.needsUpdateCount, 0);
+      expect(result.clockOutOfSyncPeerNames, ['Mac']);
+      expect(
+        clockOutOfSyncMessage(result.clockOutOfSyncPeerNames),
+        'Clock out of sync with Mac.',
+      );
+    },
+  );
 }
 
 ClipPayload _clip() {

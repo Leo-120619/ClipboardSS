@@ -7,6 +7,8 @@ public enum FileSendError: Error, Equatable, LocalizedError {
     case cancelled
     /// The peer runs another wire protocol version (advertised, or answered 426).
     case peerNeedsUpdate
+    /// The peer answered `400 {"status":"stale"}`: its clock disagrees with ours.
+    case clockOutOfSync(deviceName: String)
     case httpStatus(endpoint: String, statusCode: Int)
 
     public var errorDescription: String? {
@@ -15,6 +17,7 @@ public enum FileSendError: Error, Equatable, LocalizedError {
         case .fileUnreadable: return "The file could not be read."
         case .cancelled: return "The transfer was cancelled."
         case .peerNeedsUpdate: return ProtocolMismatch.updateOtherDeviceMessage
+        case let .clockOutOfSync(deviceName): return ProtocolMismatch.clockOutOfSyncMessage(deviceNames: [deviceName])
         case let .httpStatus(endpoint, statusCode): return "\(endpoint) failed with HTTP \(statusCode)."
         }
     }
@@ -159,6 +162,9 @@ public struct FileSender: Sendable {
         let response = try HTTPCodec.parseResponse(responseData)
         if response.statusCode == 426 {
             throw FileSendError.peerNeedsUpdate
+        }
+        if response.statusCode == 400, ProtocolMismatch.responseStatus(response.body) == "stale" {
+            throw FileSendError.clockOutOfSync(deviceName: peer.name)
         }
         guard response.statusCode == 200 else {
             throw FileSendError.httpStatus(endpoint: path, statusCode: response.statusCode)

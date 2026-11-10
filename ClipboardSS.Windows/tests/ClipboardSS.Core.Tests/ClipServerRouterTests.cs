@@ -52,8 +52,14 @@ public sealed class ClipServerRouterTests
         var added = await router.RouteAsync(request, "host", TestContext.Current.CancellationToken);
         Assert.Equal("{\"status\":\"ok\"}", System.Text.Encoding.UTF8.GetString(added.Body));
 
+        // Same clip under a fresh nonce (resending the same envelope would be a replay).
         backend.ReceiveStatus = ReceiveStatus.Duplicate;
-        var duplicate = await router.RouteAsync(request, "host", TestContext.Current.CancellationToken);
+        var resealed = Request(
+            "POST",
+            "/v1/clip",
+            JsonSerializer.SerializeToUtf8Bytes(
+                EnvelopeCrypto.Seal(payload, EnvelopePurpose.Clip, sourceId, Identity.Id, key), WireJson.Options));
+        var duplicate = await router.RouteAsync(resealed, "host", TestContext.Current.CancellationToken);
         Assert.Equal("{\"status\":\"duplicate\"}", System.Text.Encoding.UTF8.GetString(duplicate.Body));
     }
 

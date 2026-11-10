@@ -100,6 +100,101 @@ struct ClipServerTests {
     }
 }
 
+@Suite("ClipServer replay protection")
+@MainActor
+struct ClipServerReplayTests {
+    private struct Setup {
+        let server: ClipServer
+        let pasteboard: CountingPasteboard
+        let localId: UUID
+        let peerId: UUID
+        let key: SymmetricKey
+    }
+
+    private func makeSetup() async throws -> Setup {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = try ClipStore(storageDirectory: directory)
+        let identity = DeviceIdentity(id: UUID(), name: "Test Mac")
+        let pairedStore = try PairedDeviceStore(
+            storageURL: directory.appendingPathComponent("paired-devices.json"),
+            keyStorage: MemoryPairKeyStorage()
+        )
+        let peerId = UUID()
+        let key = SymmetricKey(size: .bits256)
+        try await pairedStore.addDevice(PairedDevice(id: peerId, name: "Phone"), key: key)
+        let coordinator = PairingCoordinator(identity: identity, pairedStore: pairedStore, transport: HarnessPeerTransport())
+        let pasteboard = CountingPasteboard()
+        let server = try ClipServer(
+            identity: identity,
+            receiver: ClipReceiver(store: store, pasteboard: pasteboard),
+            pairingCoordinator: coordinator,
+            port: .any,
+            advertisesService: false
+        )
+        return Setup(server: server, pasteboard: pasteboard, localId: identity.id, peerId: peerId, key: key)
+    }
+
+    private func clipBody(_ setup: Setup, text: String, sentAt: Date = Date()) throws -> Data {
+        let payload = ClipPayload(
+            id: UUID(), type: .text, createdAt: Date(), text: text,
+            previewText: text, contentHash: ContentHasher.textHash(text), sourceDeviceName: "Phone"
+        )
+        let envelope = try ClipEnvelope.seal(
+            payload: payload, purpose: .clip,
+            sourceDeviceId: setup.peerId, recipientDeviceId: setup.localId,
+            pairKey: setup.key, sentAt: sentAt
+        )
+        return try JSONEncoder().encode(envelope)
+    }
+
+    private func status(_ response: HTTPResponse) -> String? {
+        (try? JSONSerialization.jsonObject(with: response.body) as? [String: Any])?["status"] as? String
+    }
+
+    @Test("a replayed clip does not touch the pasteboard")
+    func replayedClipDoesNotTouchPasteboard() async throws {
+        let setup = try await makeSetup()
+        let body = try clipBody(setup, text: "secret")
+
+        #expect(await setup.server.handleClipRequest(body: body).statusCode == 200)
+        #expect(setup.pasteboard.writeCount == 1)
+
+        let replayed = await setup.server.handleClipRequest(body: body)
+        #expect(replayed.statusCode == 409)
+        #expect(status(replayed) == "replayed")
+        #expect(setup.pasteboard.writeCount == 1)
+    }
+
+    @Test("a clip sent 20 minutes ago is stale and not pasted; 4 minutes ago syncs (Review Focus 1)")
+    func staleClipIsRejected() async throws {
+        let setup = try await makeSetup()
+        let stale = await setup.server.handleClipRequest(body: try clipBody(setup, text: "old", sentAt: Date().addingTimeInterval(-1_200)))
+        #expect(stale.statusCode == 400)
+        #expect(status(stale) == "stale")
+        #expect(setup.pasteboard.writeCount == 0)
+
+        let skewed = await setup.server.handleClipRequest(body: try clipBody(setup, text: "skewed", sentAt: Date().addingTimeInterval(240)))
+        #expect(skewed.statusCode == 200)
+        #expect(setup.pasteboard.writeCount == 1)
+    }
+}
+
+private final class MemoryPairKeyStorage: PairKeyStorage, @unchecked Sendable {
+    private var keys: [UUID: SymmetricKey] = [:]
+    func storeKey(_ key: SymmetricKey, for deviceId: UUID) throws { keys[deviceId] = key }
+    func getKey(for deviceId: UUID) throws -> SymmetricKey? { keys[deviceId] }
+    func deleteKey(for deviceId: UUID) throws { keys[deviceId] = nil }
+}
+
+private final class CountingPasteboard: PasteboardClient {
+    private(set) var writeCount = 0
+    func currentChangeCount() -> Int { writeCount }
+    func readSnapshot() -> ClipboardSnapshot { ClipboardSnapshot(text: nil, imageData: nil) }
+    func clearContents() {}
+    func writeText(_ text: String) { writeCount += 1 }
+    func writeImageData(_ data: Data) { writeCount += 1 }
+}
+
 /// Runs a real ClipServer on an ephemeral loopback port without advertising Bonjour.
 private final class ClipServerHarness: @unchecked Sendable {
     let server: ClipServer

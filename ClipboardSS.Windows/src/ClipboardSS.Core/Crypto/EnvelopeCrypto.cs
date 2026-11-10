@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ClipboardSS.Core.Json;
 using ClipboardSS.Core.Models;
 using Org.BouncyCastle.Crypto;
@@ -54,15 +56,29 @@ public static class EnvelopeCrypto
             $"ClipboardSS/{WireProtocol.Version}|{purpose.WireName()}|" +
             $"{sourceDeviceId.ToString("D").ToLowerInvariant()}|{recipientDeviceId.ToString("D").ToLowerInvariant()}");
 
-    public static ClipEnvelope Seal(
-        ClipPayload payload, EnvelopePurpose purpose, Guid sourceDeviceId, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
-        => SealJson(payload, purpose, sourceDeviceId, recipientDeviceId, pairKey);
+    /// <summary>Wire format of <c>sentAt</c> (and every other wire timestamp): whole-second UTC.</summary>
+    public const string WireTimestampFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'";
 
+    public static ClipEnvelope Seal(
+        ClipPayload payload, EnvelopePurpose purpose, Guid sourceDeviceId, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey,
+        DateTimeOffset? sentAt = null)
+        => SealJson(payload, purpose, sourceDeviceId, recipientDeviceId, pairKey, sentAt);
+
+    /// <summary>
+    /// Seals <paramref name="payload"/> with <c>sentAt</c> (default: now) stamped into the inner JSON,
+    /// so the receiver's <see cref="Protocol.ReplayGuard"/> checks freshness on an authenticated value.
+    /// </summary>
     public static ClipEnvelope SealJson<T>(
-        T payload, EnvelopePurpose purpose, Guid sourceDeviceId, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
-        => SealPlaintext(
-            JsonSerializer.SerializeToUtf8Bytes(payload, WireJson.Options),
+        T payload, EnvelopePurpose purpose, Guid sourceDeviceId, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey,
+        DateTimeOffset? sentAt = null)
+    {
+        var json = JsonSerializer.SerializeToNode(payload, WireJson.Options) as JsonObject
+            ?? throw new EnvelopeCryptoException("Envelope payloads must be JSON objects.");
+        json["sentAt"] = (sentAt ?? DateTimeOffset.UtcNow).UtcDateTime.ToString(WireTimestampFormat, CultureInfo.InvariantCulture);
+        return SealPlaintext(
+            JsonSerializer.SerializeToUtf8Bytes(json, WireJson.Options),
             purpose, sourceDeviceId, recipientDeviceId, pairKey);
+    }
 
     /// <summary>Seals raw inner bytes. <paramref name="nonce"/> is injectable only to reproduce the pinned vector.</summary>
     public static ClipEnvelope SealPlaintext(
@@ -109,6 +125,39 @@ public static class EnvelopeCrypto
         }
     }
 
+    /// <summary>
+    /// Opens like <see cref="OpenJson{T}"/>, also returning the authenticated <c>sentAt</c>.
+    /// A payload without a parsable <c>sentAt</c> opens with <see cref="DateTimeOffset.MinValue"/>,
+    /// which the replay guard rejects as stale.
+    /// </summary>
+    public static OpenedEnvelope<T> OpenStamped<T>(
+        ClipEnvelope envelope, EnvelopePurpose purpose, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
+    {
+        var plaintext = OpenPlaintext(envelope, purpose, recipientDeviceId, pairKey);
+        try
+        {
+            using var document = JsonDocument.Parse(plaintext);
+            var payload = document.RootElement.Deserialize<T>(WireJson.Options)
+                ?? throw new EnvelopeCryptoException("The envelope payload is empty.");
+            var sentAt = DateTimeOffset.MinValue;
+            if (document.RootElement.TryGetProperty("sentAt", out var element) &&
+                element.ValueKind == JsonValueKind.String &&
+                DateTimeOffset.TryParse(
+                    element.GetString(),
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out var parsed))
+            {
+                sentAt = parsed;
+            }
+            return new OpenedEnvelope<T>(payload, sentAt);
+        }
+        catch (JsonException exception)
+        {
+            throw new EnvelopeCryptoException("The envelope could not be decrypted.", exception);
+        }
+    }
+
     public static byte[] OpenPlaintext(
         ClipEnvelope envelope, EnvelopePurpose purpose, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
     {
@@ -138,3 +187,6 @@ public static class EnvelopeCrypto
         }
     }
 }
+
+/// <summary>An opened envelope's payload plus its authenticated <c>sentAt</c>.</summary>
+public sealed record OpenedEnvelope<T>(T Payload, DateTimeOffset SentAt);

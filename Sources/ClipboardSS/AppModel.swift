@@ -440,6 +440,8 @@ final class AppModel: ObservableObject {
             let result = try await clipSender.broadcast(clip: clip, to: targets)
             if result.needsUpdateCount > 0 {
                 lastError = ProtocolMismatch.updateOtherDeviceMessage
+            } else if !result.clockOutOfSyncPeerNames.isEmpty {
+                lastError = ProtocolMismatch.clockOutOfSyncMessage(deviceNames: result.clockOutOfSyncPeerNames)
             }
         } catch {
             lastError = error.localizedDescription

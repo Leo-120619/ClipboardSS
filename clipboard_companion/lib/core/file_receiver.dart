@@ -8,6 +8,7 @@ import 'file_transfer_crypto.dart';
 import 'file_transfer_models.dart';
 import 'models.dart';
 import 'paired_device_store.dart';
+import 'replay_guard.dart';
 
 /// UI-facing event emitted as a transfer progresses on the receiving side.
 class FileTransferReceiveEvent {
@@ -69,6 +70,9 @@ class FileReceiver {
   final DateTime Function() now;
   final Duration idleTimeout;
 
+  /// Shared with the clip endpoint in production (one guard per process).
+  final ReplayGuard replayGuard;
+
   final _sessions = <String, _Session>{};
   final _cancelled = <String>{};
   final _events = StreamController<FileTransferReceiveEvent>.broadcast();
@@ -80,8 +84,10 @@ class FileReceiver {
     required this.destinationProvider,
     DateTime Function()? now,
     this.idleTimeout = FileTransferConstants.idleTimeout,
+    ReplayGuard? replayGuard,
   }) : localDeviceId = canonicalDeviceId(localDeviceId),
-       now = now ?? DateTime.now;
+       now = now ?? DateTime.now,
+       replayGuard = replayGuard ?? ReplayGuard();
 
   Stream<FileTransferReceiveEvent> get events => _events.stream;
 
@@ -91,6 +97,23 @@ class FileReceiver {
     'status': 'upgradeRequired',
     'minVersion': wireProtocolVersion,
   });
+
+  /// Runs only after a successful AEAD open, before any session change.
+  FileTransferResponse? _replayRejection(
+    ClipEnvelope envelope,
+    Map<String, dynamic> json,
+  ) {
+    final rejection = replayRejection(
+      replayGuard.check(
+        sourceDeviceId: envelope.sourceDeviceId,
+        nonce: envelope.nonce,
+        sentAt: sentAtOf(json),
+      ),
+    );
+    if (rejection == null) return null;
+    final (status, body) = rejection;
+    return FileTransferResponse(status, body);
+  }
 
   // MARK: - Offer
 
@@ -102,19 +125,21 @@ class FileReceiver {
       return FileTransferResponse(401, {'status': 'paused'});
     }
 
+    final Map<String, dynamic> json;
     FileOfferPayload offer;
     try {
-      offer = FileOfferPayload.fromJson(
-        await CryptoEnvelopeUtils.openJson(
-          envelope,
-          purpose: EnvelopePurpose.fileOffer,
-          recipientDeviceId: localDeviceId,
-          pairKey: key,
-        ),
+      json = await CryptoEnvelopeUtils.openJson(
+        envelope,
+        purpose: EnvelopePurpose.fileOffer,
+        recipientDeviceId: localDeviceId,
+        pairKey: key,
       );
+      offer = FileOfferPayload.fromJson(json);
     } catch (_) {
       return FileTransferResponse(401, {'status': 'unpaired'});
     }
+    final rejected = _replayRejection(envelope, json);
+    if (rejected != null) return rejected;
     if (!_validTransferId(offer.transferId)) {
       return FileTransferResponse(400, {'status': 'invalidId'});
     }
@@ -236,19 +261,21 @@ class FileReceiver {
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key == null) return FileTransferResponse(401, {'status': 'unpaired'});
 
+    final Map<String, dynamic> json;
     FileFinishPayload finish;
     try {
-      finish = FileFinishPayload.fromJson(
-        await CryptoEnvelopeUtils.openJson(
-          envelope,
-          purpose: EnvelopePurpose.fileFinish,
-          recipientDeviceId: localDeviceId,
-          pairKey: key,
-        ),
+      json = await CryptoEnvelopeUtils.openJson(
+        envelope,
+        purpose: EnvelopePurpose.fileFinish,
+        recipientDeviceId: localDeviceId,
+        pairKey: key,
       );
+      finish = FileFinishPayload.fromJson(json);
     } catch (_) {
       return FileTransferResponse(401, {'status': 'unpaired'});
     }
+    final rejected = _replayRejection(envelope, json);
+    if (rejected != null) return rejected;
 
     final session = _sessions[finish.transferId];
     if (session == null)
@@ -309,15 +336,23 @@ class FileReceiver {
     if (envelope.v != wireProtocolVersion) return _upgradeRequired();
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key != null) {
+      final Map<String, dynamic> json;
+      final FileCancelPayload cancel;
       try {
-        final cancel = FileCancelPayload.fromJson(
-          await CryptoEnvelopeUtils.openJson(
-            envelope,
-            purpose: EnvelopePurpose.fileCancel,
-            recipientDeviceId: localDeviceId,
-            pairKey: key,
-          ),
+        json = await CryptoEnvelopeUtils.openJson(
+          envelope,
+          purpose: EnvelopePurpose.fileCancel,
+          recipientDeviceId: localDeviceId,
+          pairKey: key,
         );
+        cancel = FileCancelPayload.fromJson(json);
+      } catch (_) {
+        // Idempotent: ignore undecodable cancels.
+        return FileTransferResponse(200, {'status': 'cancelled'});
+      }
+      final rejected = _replayRejection(envelope, json);
+      if (rejected != null) return rejected;
+      try {
         _cancelled.add(cancel.transferId);
         final session = _sessions[cancel.transferId];
         if (session != null) {
@@ -325,7 +360,7 @@ class FileReceiver {
           _emit(FileTransferReceiveEvent('cancelled', cancel.transferId));
         }
       } catch (_) {
-        // Idempotent: ignore undecodable cancels.
+        // Best effort: cancel stays idempotent even if cleanup fails.
       }
     }
     return FileTransferResponse(200, {'status': 'cancelled'});

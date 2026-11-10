@@ -67,6 +67,7 @@ public sealed class FileSender(DeviceIdentity identity, PairedDeviceStore paired
         var bytes = await transport.SendAsync(HttpCodec.EncodeRequest(request, $"{peer.Host}:{peer.Port}"), peer, token);
         var response = HttpCodec.ParseResponse(bytes);
         if (response.StatusCode == 426) throw new PeerNeedsUpdateException();
+        if (WireProtocol.IsStaleResponse(response.StatusCode, response.Body)) throw new PeerClockOutOfSyncException(peer.Name);
         if (response.StatusCode != 200) throw new HttpRequestException($"Peer returned HTTP {response.StatusCode}.");
     }
 

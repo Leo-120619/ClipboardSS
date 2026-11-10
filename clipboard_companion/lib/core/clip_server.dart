@@ -13,6 +13,7 @@ import 'crypto_utils.dart';
 import 'file_receiver.dart';
 import 'file_transfer_models.dart';
 import 'image_validation.dart';
+import 'replay_guard.dart';
 
 class ClipServerStartException implements Exception {
   final String message;
@@ -78,6 +79,9 @@ class ClipServer {
   final Function(ClipPayload) onClipReceived;
   final FileReceiver? fileReceiver;
 
+  /// Shared with [fileReceiver] in production (one guard per process).
+  final ReplayGuard replayGuard;
+
   HttpServer? _server;
   int get port => _server?.port ?? 0;
 
@@ -87,7 +91,8 @@ class ClipServer {
     required this.pairedStore,
     required this.onClipReceived,
     this.fileReceiver,
-  });
+    ReplayGuard? replayGuard,
+  }) : replayGuard = replayGuard ?? ReplayGuard();
 
   static String identityBody(String deviceId, String deviceName) => jsonEncode({
     'deviceId': deviceId,
@@ -234,13 +239,29 @@ class ClipServer {
         return Response(401, body: 'Paused');
       }
 
-      final opened = await CryptoEnvelopeUtils.open(
+      final json = await CryptoEnvelopeUtils.openJson(
         envelope,
         purpose: EnvelopePurpose.clip,
         recipientDeviceId: identity.id,
         pairKey: key,
       );
-      final payload = acceptReceivedClip(opened);
+      // Only after a successful open, and before any side effect.
+      final rejection = replayRejection(
+        replayGuard.check(
+          sourceDeviceId: envelope.sourceDeviceId,
+          nonce: envelope.nonce,
+          sentAt: sentAtOf(json),
+        ),
+      );
+      if (rejection != null) {
+        final (status, body) = rejection;
+        return Response(
+          status,
+          body: jsonEncode(body),
+          headers: {'Content-Type': 'application/json'},
+        );
+      }
+      final payload = acceptReceivedClip(ClipPayload.fromJson(json));
       if (payload == null) {
         return Response(400, body: 'Invalid image payload');
       }

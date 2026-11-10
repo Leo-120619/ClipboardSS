@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'models.dart';
 import 'paired_device_store.dart';
 import 'peer_browser.dart';
+import 'replay_guard.dart';
 import 'pairing_coordinator.dart';
 import 'clip_server.dart';
 import 'clip_sender.dart';
@@ -243,6 +244,10 @@ class AppState extends ChangeNotifier {
 
   /// Paired devices whose `/v1/id` probe advertised an older wire protocol.
   final Set<String> outdatedDeviceIds = {};
+
+  /// One guard for every envelope endpoint, kept across network restarts, so a nonce
+  /// is single-use for the whole process.
+  final ReplayGuard _replayGuard = ReplayGuard();
   final Map<String, TransferCancelToken> _sendTokens = {};
   final Set<String> _consumedShareBatchIds = {};
   IncomingShareBatch? pendingShareBatch;
@@ -444,6 +449,7 @@ class AppState extends ChangeNotifier {
         localDeviceId: identity.id,
         transfersDirectory: transfersDir,
         destinationProvider: () => destinationDir,
+        replayGuard: _replayGuard,
       );
 
       final nextClipServer = ClipServer(
@@ -457,6 +463,7 @@ class AppState extends ChangeNotifier {
           onClipReceived?.call(payload);
         },
         fileReceiver: nextFileReceiver,
+        replayGuard: _replayGuard,
       );
 
       try {

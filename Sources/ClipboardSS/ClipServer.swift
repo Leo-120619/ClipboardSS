@@ -7,6 +7,8 @@ public final class ClipServer: @unchecked Sendable {
     private let pairingCoordinator: PairingCoordinator
     private let identity: DeviceIdentity
     private let fileReceiver: FileReceiver?
+    /// Shared with the `FileReceiver` in production (one guard per process).
+    private let replayGuard: ReplayGuard
     private let listenerQueue = DispatchQueue(label: "com.local.ClipboardSS.ClipServer.listener")
     private var listener: NWListener?
     private var retryWorkItem: DispatchWorkItem?
@@ -22,6 +24,7 @@ public final class ClipServer: @unchecked Sendable {
         receiver: ClipReceiver,
         pairingCoordinator: PairingCoordinator,
         fileReceiver: FileReceiver? = nil,
+        replayGuard: ReplayGuard = ReplayGuard(),
         port: NWEndpoint.Port = 51888,
         advertisesService: Bool = true,
         requestDeadline: TimeInterval = 15
@@ -30,6 +33,7 @@ public final class ClipServer: @unchecked Sendable {
         self.receiver = receiver
         self.pairingCoordinator = pairingCoordinator
         self.fileReceiver = fileReceiver
+        self.replayGuard = replayGuard
         self.port = port
         self.advertisesService = advertisesService
         self.requestDeadline = requestDeadline
@@ -248,42 +252,7 @@ public final class ClipServer: @unchecked Sendable {
             self.sendResponse(resp, on: connection)
         } else if request.path == "/v1/clip" {
             Task {
-                do {
-                    let envelope = try JSONDecoder().decode(ClipEnvelope.self, from: request.body)
-                    guard envelope.v == ClipEnvelope.currentVersion else {
-                        logToFile("ClipServer: Clip envelope v\(envelope.v) refused; upgrade required")
-                        self.sendResponse(Self.upgradeRequiredResponse(), on: connection)
-                        return
-                    }
-
-                    guard let key = try await self.pairingCoordinator.pairedStore.getKey(for: envelope.sourceDeviceId) else {
-                        logToFile("ClipServer: Clipboard receive denied, sender not paired: \(envelope.sourceDeviceId.uuidString)")
-                        let resp = HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
-                        self.sendResponse(resp, on: connection)
-                        return
-                    }
-                    guard await self.pairingCoordinator.pairedStore.isConnected(envelope.sourceDeviceId) else {
-                        let resp = HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
-                        self.sendResponse(resp, on: connection)
-                        return
-                    }
-
-                    let payload = try envelope.open(
-                        ClipPayload.self,
-                        purpose: .clip,
-                        recipientDeviceId: self.identity.id,
-                        pairKey: key
-                    )
-
-                    let result = try await self.receiver.receive(payload)
-                    let status = (result == .duplicate) ? "duplicate" : "ok"
-                    let resp = HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: Data("{\"status\":\"\(status)\"}".utf8))
-                    self.sendResponse(resp, on: connection)
-                } catch {
-                    logToFile("ClipServer: Failed to process inbound clip: \(error)")
-                    let resp = HTTPResponse(statusCode: 400, headers: [:], body: Data("Bad Request".utf8))
-                    self.sendResponse(resp, on: connection)
-                }
+                self.sendResponse(await self.handleClipRequest(body: request.body), on: connection)
             }
         } else if request.path == "/v1/pair/start" {
             Task {
@@ -355,6 +324,44 @@ public final class ClipServer: @unchecked Sendable {
             logToFile("ClipServer: 404 Not Found path: \(request.path)")
             let resp = HTTPResponse(statusCode: 404, headers: [:], body: Data("Not Found".utf8))
             self.sendResponse(resp, on: connection)
+        }
+    }
+
+    /// `POST /v1/clip`: version → pairing → AEAD open → replay guard → pasteboard/store.
+    func handleClipRequest(body: Data) async -> HTTPResponse {
+        do {
+            let envelope = try JSONDecoder().decode(ClipEnvelope.self, from: body)
+            guard envelope.v == ClipEnvelope.currentVersion else {
+                logToFile("ClipServer: Clip envelope v\(envelope.v) refused; upgrade required")
+                return Self.upgradeRequiredResponse()
+            }
+
+            guard let key = try await pairingCoordinator.pairedStore.getKey(for: envelope.sourceDeviceId) else {
+                logToFile("ClipServer: Clipboard receive denied, sender not paired: \(envelope.sourceDeviceId.uuidString)")
+                return HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
+            }
+            guard await pairingCoordinator.pairedStore.isConnected(envelope.sourceDeviceId) else {
+                return HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
+            }
+
+            let opened = try envelope.openStamped(
+                ClipPayload.self,
+                purpose: .clip,
+                recipientDeviceId: identity.id,
+                pairKey: key
+            )
+            let check = await replayGuard.check(sourceDeviceId: envelope.sourceDeviceId, nonce: envelope.nonce, sentAt: opened.sentAt)
+            if let rejection = FileTransferResponse.rejection(for: check) {
+                logToFile("ClipServer: Clip refused by replay guard: \(check)")
+                return HTTPResponse(statusCode: rejection.statusCode, headers: ["Content-Type": "application/json"], body: rejection.body)
+            }
+
+            let result = try await receiver.receive(opened.payload)
+            let status = (result == .duplicate) ? "duplicate" : "ok"
+            return HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: Data("{\"status\":\"\(status)\"}".utf8))
+        } catch {
+            logToFile("ClipServer: Failed to process inbound clip: \(error)")
+            return HTTPResponse(statusCode: 400, headers: [:], body: Data("Bad Request".utf8))
         }
     }
 

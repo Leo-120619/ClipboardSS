@@ -41,7 +41,8 @@ struct FileReceiverTests {
         data: Data,
         chunkSize: Int,
         fileName: String = "file.bin",
-        overrideHash: String? = nil
+        overrideHash: String? = nil,
+        sentAt: Date = Date()
     ) throws -> (offer: ClipEnvelope, chunks: [Data], transferId: String) {
         let transferId = UUID().uuidString.lowercased()
         let fileKey = FileTransferCrypto.deriveFileKey(pairKey: fixture.key, transferId: transferId)
@@ -65,7 +66,7 @@ struct FileReceiverTests {
             createdAt: Date(),
             sourceDeviceName: "Peer"
         )
-        let offer = try sealedEnvelope(payload, purpose: .fileOffer, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
+        let offer = try sealedEnvelope(payload, purpose: .fileOffer, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key, sentAt: sentAt)
         return (offer, chunks, transferId)
     }
 
@@ -243,7 +244,12 @@ struct FileReceiverTests {
         let data = Data((0..<4).map { UInt8($0) })
         let (offer, _, _) = try makeTransfer(fixture, data: data, chunkSize: 4)
         #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
-        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 409)
+        // Same payload under a fresh nonce: rejected by the active-session check, not the replay guard.
+        let payload = try offer.open(FileOfferPayload.self, purpose: .fileOffer, recipientDeviceId: fixture.localId, pairKey: fixture.key)
+        let resealed = try sealedEnvelope(payload, purpose: .fileOffer, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
+        let response = await fixture.receiver.handleOffer(envelope: resealed)
+        #expect(response.statusCode == 409)
+        #expect(status(response) == "duplicate")
     }
 
     @Test("colliding file names are given a unique suffix")
@@ -301,5 +307,69 @@ struct FileReceiverTests {
             #expect(obj?["status"] as? String == "upgradeRequired")
             #expect(obj?["minVersion"] as? Int == 2)
         }
+    }
+    // MARK: - Replay protection
+
+    @Test("an offer replayed after finish is rejected and re-delivers nothing")
+    func replayedOfferAfterFinishIsRejected() async throws {
+        let fixture = try await makeFixture()
+        let data = Data((0..<8).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+        for (i, chunk) in chunks.enumerated() {
+            _ = await fixture.receiver.handleChunk(transferId: id, chunkIndex: i, body: chunk)
+        }
+        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), purpose: .fileFinish, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
+        #expect(await fixture.receiver.handleFinish(envelope: finish).statusCode == 200)
+
+        let replayedOffer = await fixture.receiver.handleOffer(envelope: offer)
+        #expect(replayedOffer.statusCode == 409)
+        #expect(status(replayedOffer) == "replayed")
+        // No session was created: the replayed chunks and finish go nowhere.
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0]).statusCode == 404)
+        let replayedFinish = await fixture.receiver.handleFinish(envelope: finish)
+        #expect(replayedFinish.statusCode == 409)
+        #expect(status(replayedFinish) == "replayed")
+        let delivered = try FileManager.default.contentsOfDirectory(atPath: fixture.destinationDir.path)
+        #expect(delivered == ["file.bin"])
+    }
+
+    @Test("a replayed cancel is rejected")
+    func replayedCancelIsRejected() async throws {
+        let fixture = try await makeFixture()
+        let cancel = try sealedEnvelope(FileCancelPayload(transferId: "abc"), purpose: .fileCancel, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
+        #expect(await fixture.receiver.handleCancel(envelope: cancel).statusCode == 200)
+        let replayed = await fixture.receiver.handleCancel(envelope: cancel)
+        #expect(replayed.statusCode == 409)
+        #expect(status(replayed) == "replayed")
+    }
+
+    @Test("an offer sent 20 minutes ago is stale and creates no session (Review Focus 1)")
+    func staleOfferIsRejected() async throws {
+        let fixture = try await makeFixture()
+        let data = Data((0..<4).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4, sentAt: Date().addingTimeInterval(-1_200))
+        let response = await fixture.receiver.handleOffer(envelope: offer)
+        #expect(response.statusCode == 400)
+        #expect(status(response) == "stale")
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0]).statusCode == 404)
+    }
+
+    @Test("an offer sent 4 minutes ago is accepted (Review Focus 1)")
+    func fourMinuteOldOfferIsAccepted() async throws {
+        let fixture = try await makeFixture()
+        let (offer, _, _) = try makeTransfer(fixture, data: Data([1]), chunkSize: 4, sentAt: Date().addingTimeInterval(-240))
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+    }
+
+    @Test("a forged envelope does not burn the nonce of the genuine one")
+    func failedOpenDoesNotEnterTheGuard() async throws {
+        let fixture = try await makeFixture()
+        let (offer, _, _) = try makeTransfer(fixture, data: Data([1]), chunkSize: 4)
+        var forgedBytes = try #require(Data(base64Encoded: offer.ciphertext))
+        forgedBytes[0] ^= 0xff
+        let forged = ClipEnvelope(sourceDeviceId: offer.sourceDeviceId, nonce: offer.nonce, ciphertext: forgedBytes.base64EncodedString())
+        #expect(await fixture.receiver.handleOffer(envelope: forged).statusCode == 401)
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
     }
 }

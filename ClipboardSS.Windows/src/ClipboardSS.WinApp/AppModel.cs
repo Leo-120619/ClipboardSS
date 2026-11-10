@@ -597,6 +597,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
                 ComposeSendTargets(VisiblePeers, PairedDevices, OutdatedDeviceSnapshot()),
                 cancellationToken);
             if (result.NeedsUpdateCount > 0) LastError = WireProtocol.UpdateOtherDeviceMessage;
+            else if (result.ClockOutOfSyncPeerNames.Count > 0)
+                LastError = WireProtocol.ClockOutOfSyncMessage(result.ClockOutOfSyncPeerNames);
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {

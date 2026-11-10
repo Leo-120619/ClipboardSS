@@ -15,6 +15,9 @@ public sealed record ClipSendResult(
     int FailureCount,
     int NeedsUpdateCount = 0)
 {
+    /// <summary>Names of peers that refused the clip as stale: their clock disagrees with ours.</summary>
+    public IReadOnlyList<string> ClockOutOfSyncPeerNames { get; init; } = [];
+
     public bool HasVisiblePeers => VisiblePeerCount > 0;
     public bool HasPairedTargets => PairedPeerCount > 0;
 }
@@ -89,6 +92,8 @@ public sealed class ClipSender(
                     cancellationToken);
                 var response = HttpCodec.ParseResponse(responseData);
                 if (response.StatusCode == 426) throw new PeerNeedsUpdateException();
+                if (WireProtocol.IsStaleResponse(response.StatusCode, response.Body))
+                    throw new PeerClockOutOfSyncException(target.Peer.Name);
                 if (response.StatusCode != 200)
                 {
                     throw new HttpRequestException(
@@ -108,6 +113,13 @@ public sealed class ClipSender(
             pairedTargets.Length,
             pairedTargets.Length - failures.Count,
             failures.Count,
-            outdatedCount + failures.Count(failure => failure is PeerNeedsUpdateException));
+            outdatedCount + failures.Count(failure => failure is PeerNeedsUpdateException))
+        {
+            ClockOutOfSyncPeerNames = failures
+                .OfType<PeerClockOutOfSyncException>()
+                .Select(failure => failure.DeviceName)
+                .Order(StringComparer.Ordinal)
+                .ToArray(),
+        };
     }
 }
