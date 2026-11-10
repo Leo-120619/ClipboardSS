@@ -122,6 +122,25 @@ public sealed class ClipServerRouterTests
         Assert.Equal(409, response.StatusCode);
         Assert.Equal("{\"status\":\"alreadyPaired\"}", Encoding.UTF8.GetString(response.Body));
 
+        backend.ConfirmResult = PairConfirmOutcome.TimedOut;
+        response = await router.RouteAsync(
+            Request("POST", "/v1/pair/confirm", JsonSerializer.SerializeToUtf8Bytes(confirm, WireJson.Options)),
+            "192.168.0.9",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(408, response.StatusCode);
+        Assert.Equal("{\"status\":\"timeout\"}", Encoding.UTF8.GetString(response.Body));
+
+        var reveal = new PairRevealRequest(start.DeviceId, Convert.ToBase64String(new byte[32]), Convert.ToBase64String(new byte[16]));
+        foreach (var (outcome, status) in new[] { (PairRevealOutcome.Ok, 200), (PairRevealOutcome.Rejected, 401), (PairRevealOutcome.Invalid, 400) })
+        {
+            backend.RevealResult = outcome;
+            response = await router.RouteAsync(
+                Request("POST", "/v1/pair/reveal", JsonSerializer.SerializeToUtf8Bytes(reveal, WireJson.Options)),
+                "192.168.0.9",
+                TestContext.Current.CancellationToken);
+            Assert.Equal(status, response.StatusCode);
+        }
+
         backend.RejectPairStart = true;
         response = await router.RouteAsync(
             Request("POST", "/v1/pair/start", JsonSerializer.SerializeToUtf8Bytes(start, WireJson.Options)),
@@ -157,6 +176,7 @@ public sealed class ClipServerRouterTests
         public ReceiveStatus ReceiveStatus { get; set; } = ReceiveStatus.Added;
         public string? RemoteHost { get; private set; }
         public PairConfirmOutcome ConfirmResult { get; set; } = PairConfirmOutcome.Paired;
+        public PairRevealOutcome RevealResult { get; set; } = PairRevealOutcome.Ok;
         public bool RejectPairStart { get; set; }
         public bool Connected { get; set; } = true;
         public byte[]? GetPairKey(Guid deviceId) => Keys.GetValueOrDefault(deviceId);
@@ -175,6 +195,10 @@ public sealed class ClipServerRouterTests
                 Identity.Name,
                 Convert.ToBase64String(new byte[32])));
         }
+
+        public Task<PairRevealOutcome> HandlePairRevealAsync(
+            PairRevealRequest request,
+            CancellationToken cancellationToken) => Task.FromResult(RevealResult);
 
         public Task<PairConfirmOutcome> HandlePairConfirmAsync(
             PairConfirmRequest request,

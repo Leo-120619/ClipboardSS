@@ -19,15 +19,19 @@ public sealed class PairingCoordinatorTests : IDisposable
     private readonly TemporaryDirectory _directory = new();
     private readonly PairedDeviceStore _store;
     private readonly PairingCoordinator _coordinator;
+    private int _hostingChanges;
     private DateTimeOffset _now = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
 
     public PairingCoordinatorTests()
     {
-        _store = new PairedDeviceStore(Path.Combine(_directory.Path, "paired-devices.json"), new InMemoryPairKeyStorage());
+        _store = NewStore("target");
         _coordinator = new PairingCoordinator(_identity, _store, new UnusedPeerTransport(), () => _now);
+        _coordinator.HostingChanged += (_, _) => Interlocked.Increment(ref _hostingChanges);
     }
 
     public void Dispose() => _directory.Dispose();
+
+    private static CancellationToken Token => TestContext.Current.CancellationToken;
 
     [Fact]
     public async Task ConfirmWithWrongProofInvalidatesCode()
@@ -36,6 +40,8 @@ public sealed class PairingCoordinatorTests : IDisposable
         var initiation = await StartAsync(InitiatorA, code);
 
         Assert.Equal(PairConfirmOutcome.Rejected, await ConfirmAsync(InitiatorA, new byte[32]));
+        Assert.Null(_coordinator.HostCode);
+        Assert.Null(_coordinator.HostComparison);
 
         // The correct proof no longer works, and a fresh start is refused: the user must generate a new code.
         Assert.Equal(PairConfirmOutcome.Rejected, await ConfirmAsync(InitiatorA, initiation.Proof));
@@ -48,6 +54,7 @@ public sealed class PairingCoordinatorTests : IDisposable
     {
         var code = _coordinator.StartHosting(TimeSpan.FromSeconds(180));
         var initiation = await StartAsync(InitiatorA, code);
+        _coordinator.ConfirmHostedPairing();
 
         _now += TimeSpan.FromSeconds(181);
         Assert.Equal(PairConfirmOutcome.Rejected, await ConfirmAsync(InitiatorA, initiation.Proof));
@@ -61,6 +68,7 @@ public sealed class PairingCoordinatorTests : IDisposable
         var initiation = await StartAsync(InitiatorA, code);
 
         _coordinator.StopHosting();
+        Assert.Null(_coordinator.HostComparison);
         Assert.Equal(PairConfirmOutcome.Rejected, await ConfirmAsync(InitiatorA, initiation.Proof));
         Assert.Null(_store.GetKey(InitiatorA));
     }
@@ -74,6 +82,7 @@ public sealed class PairingCoordinatorTests : IDisposable
         await Assert.ThrowsAsync<PairingRejectedException>(() => StartAsync(InitiatorB, code));
 
         // The refused start did not displace the pending initiator.
+        _coordinator.ConfirmHostedPairing();
         Assert.Equal(PairConfirmOutcome.Paired, await ConfirmAsync(InitiatorA, first.Proof));
         Assert.Equal(first.PairKey, _store.GetKey(InitiatorA));
     }
@@ -82,9 +91,10 @@ public sealed class PairingCoordinatorTests : IDisposable
     public async Task SecondStartFromSameInitiatorReplacesPending()
     {
         var code = _coordinator.StartHosting();
-        await StartAsync(InitiatorA, code);
+        await StartWithoutRevealAsync(InitiatorA);
         var second = await StartAsync(InitiatorA, code);
 
+        _coordinator.ConfirmHostedPairing();
         Assert.Equal(PairConfirmOutcome.Paired, await ConfirmAsync(InitiatorA, second.Proof));
         Assert.Equal(second.PairKey, _store.GetKey(InitiatorA));
     }
@@ -97,6 +107,7 @@ public sealed class PairingCoordinatorTests : IDisposable
 
         var code = _coordinator.StartHosting();
         var initiation = await StartAsync(InitiatorA, code);
+        _coordinator.ConfirmHostedPairing();
 
         Assert.Equal(PairConfirmOutcome.AlreadyPaired, await ConfirmAsync(InitiatorA, initiation.Proof));
         Assert.Equal(existingKey, _store.GetKey(InitiatorA));
@@ -110,13 +121,136 @@ public sealed class PairingCoordinatorTests : IDisposable
         var stale = await StartAsync(InitiatorA, oldCode);
 
         var newCode = _coordinator.StartHosting();
+        Assert.Null(_coordinator.HostComparison);
 
         // The stale initiator no longer occupies the new code...
         await StartAsync(InitiatorB, newCode);
 
         // ...and its old proof cannot complete pairing.
+        _coordinator.ConfirmHostedPairing();
         Assert.Equal(PairConfirmOutcome.Rejected, await ConfirmAsync(InitiatorA, stale.Proof));
         Assert.Null(_store.GetKey(InitiatorA));
+    }
+
+    [Fact]
+    public async Task RevealWithWrongKeyInvalidatesCode()
+    {
+        var code = _coordinator.StartHosting();
+        var started = await StartWithoutRevealAsync(InitiatorA);
+
+        var outcome = await _coordinator.HandlePairRevealAsync(
+            new PairRevealRequest(InitiatorA, Convert.ToBase64String(new PairingSession().EphemeralPublicKey), Convert.ToBase64String(started.Salt)),
+            Token);
+        Assert.Equal(PairRevealOutcome.Invalid, outcome);
+        Assert.Null(_coordinator.HostCode);
+        Assert.Null(_coordinator.HostComparison);
+
+        // The honest reveal is now refused too, and so is a fresh start on the same code.
+        var honest = await _coordinator.HandlePairRevealAsync(
+            new PairRevealRequest(InitiatorA, Convert.ToBase64String(started.Session.EphemeralPublicKey), Convert.ToBase64String(started.Salt)),
+            Token);
+        Assert.Equal(PairRevealOutcome.Rejected, honest);
+        await Assert.ThrowsAsync<PairingRejectedException>(() => StartAsync(InitiatorA, code));
+    }
+
+    [Fact]
+    public async Task KeysAreNotStoredUntilBothConfirm()
+    {
+        var (initiator, initiatorStore, _) = NewInitiator();
+        var code = _coordinator.StartHosting();
+
+        var comparison = await initiator.StartPairingAsync(TargetPeer, code, Token);
+        var hosted = Assert.IsType<PairingComparison>(_coordinator.HostComparison);
+        Assert.Equal(hosted.ConfirmCode, comparison.ConfirmCode);
+        Assert.Equal("Windows", comparison.DeviceName);
+        Assert.Equal("Laptop", hosted.DeviceName);
+        Assert.Equal(comparison, initiator.JoinComparison);
+        Assert.Empty(initiatorStore.Devices);
+        Assert.Empty(_store.Devices);
+
+        // The initiator's user confirms; the target holds the request for its own user.
+        var confirming = initiator.ConfirmPairingAsync(Token);
+        await WaitUntilConfirmIsHeldAsync();
+        Assert.Empty(initiatorStore.Devices);
+        Assert.Empty(_store.Devices);
+
+        _coordinator.ConfirmHostedPairing();
+        await confirming;
+
+        var initiatorKey = Assert.IsType<byte[]>(initiatorStore.GetKey(_identity.Id));
+        Assert.Equal(initiatorKey, _store.GetKey(InitiatorA));
+        Assert.Null(_coordinator.HostComparison);
+        Assert.Null(initiator.JoinComparison);
+    }
+
+    [Fact]
+    public async Task TargetCancelRejectsInitiator()
+    {
+        var (initiator, initiatorStore, _) = NewInitiator();
+        var code = _coordinator.StartHosting();
+
+        await initiator.StartPairingAsync(TargetPeer, code, Token);
+        var confirming = initiator.ConfirmPairingAsync(Token);
+        await WaitUntilConfirmIsHeldAsync();
+        _coordinator.CancelHostedPairing();
+
+        var exception = await Assert.ThrowsAsync<PairingNotAcceptedException>(() => confirming);
+        Assert.Equal(401, exception.StatusCode);
+        Assert.Empty(initiatorStore.Devices);
+        Assert.Empty(_store.Devices);
+        Assert.Null(_coordinator.HostCode);
+        Assert.Null(_coordinator.HostComparison);
+        Assert.Null(initiator.JoinComparison);
+    }
+
+    [Fact]
+    public async Task InitiatorOnlyContactsSelectedPeer()
+    {
+        var (initiator, _, loopback) = NewInitiator();
+        var code = _coordinator.StartHosting();
+
+        await initiator.StartPairingAsync(TargetPeer, code, Token);
+        _coordinator.ConfirmHostedPairing();
+        await initiator.ConfirmPairingAsync(Token);
+
+        Assert.Equal(["/v1/pair/start", "/v1/pair/reveal", "/v1/pair/confirm"], loopback.Requests.Select(request => request.Path));
+        Assert.Equal(["10.0.0.2"], loopback.Requests.Select(request => request.Host).Distinct());
+    }
+
+    [Fact]
+    public async Task ConfirmTimesOutAfter60s()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(60), PairingCoordinator.DefaultConfirmHoldTimeout);
+        Assert.True(PairingCoordinator.DefaultConfirmRequestTimeout > PairingCoordinator.DefaultConfirmHoldTimeout);
+        var coordinator = new PairingCoordinator(
+            _identity, _store, new UnusedPeerTransport(), () => _now, confirmHoldTimeout: TimeSpan.FromMilliseconds(50));
+        var code = coordinator.StartHosting();
+        var initiation = await StartAsync(InitiatorA, code, coordinator);
+
+        var outcome = await coordinator.HandlePairConfirmAsync(
+            new PairConfirmRequest(InitiatorA, Convert.ToBase64String(initiation.Proof)), Token);
+        Assert.Equal(PairConfirmOutcome.TimedOut, outcome);
+        Assert.Null(coordinator.HostCode);
+        Assert.Null(coordinator.HostComparison);
+        Assert.Null(_store.GetKey(InitiatorA));
+    }
+
+    [Fact]
+    public async Task HostingChangedFiresOnFailureAndExpiry()
+    {
+        _coordinator.StartHosting();
+        await StartWithoutRevealAsync(InitiatorA);
+        var beforeFailure = _hostingChanges;
+        Assert.Equal(PairConfirmOutcome.Rejected, await ConfirmAsync(InitiatorA, new byte[32]));
+        Assert.Null(_coordinator.HostComparison);
+        Assert.True(_hostingChanges > beforeFailure);
+
+        _coordinator.StartHosting(TimeSpan.FromMilliseconds(20));
+        var beforeExpiry = _hostingChanges;
+        _now += TimeSpan.FromSeconds(1);
+        for (var i = 0; i < 100 && _hostingChanges == beforeExpiry; i++) await Task.Delay(10, Token);
+        Assert.True(_hostingChanges > beforeExpiry);
+        Assert.Null(_coordinator.HostCode);
     }
 
     [Fact]
@@ -129,36 +263,93 @@ public sealed class PairingCoordinatorTests : IDisposable
         var json = new Dictionary<string, string> { ["Content-Type"] = "application/json" };
         var transport = new ScriptedPeerTransport(
             HttpCodec.EncodeResponse(new HttpResponse(200, json, startBody)),
+            HttpCodec.EncodeResponse(new HttpResponse(200, json, Encoding.UTF8.GetBytes("{\"status\":\"ok\"}"))),
             HttpCodec.EncodeResponse(new HttpResponse(409, json, Encoding.UTF8.GetBytes("{\"status\":\"alreadyPaired\"}"))));
-        var initiator = new PairingCoordinator(_identity, _store, transport, () => _now);
+        var store = NewStore("initiator");
+        var initiator = new PairingCoordinator(_identity, store, transport, () => _now);
 
-        var exception = await Assert.ThrowsAsync<PairingAlreadyPairedException>(() =>
-            initiator.StartPairingAsync(new Peer(target.Id, target.Name, "10.0.0.2", 51888), "123456", TestContext.Current.CancellationToken));
+        await initiator.StartPairingAsync(new Peer(target.Id, target.Name, "10.0.0.2", 51888), "123456", Token);
+        var exception = await Assert.ThrowsAsync<PairingAlreadyPairedException>(() => initiator.ConfirmPairingAsync(Token));
         Assert.Equal("Remove the existing pairing on the other device first", exception.Message);
-        Assert.Empty(_store.Devices);
+        Assert.Empty(store.Devices);
+        Assert.Null(initiator.JoinComparison);
     }
 
-    /// <summary>Plays the initiator side of <c>/v1/pair/start</c> and derives the proof it would confirm with.</summary>
-    private async Task<(byte[] PairKey, byte[] Proof)> StartAsync(Guid initiatorId, string code)
+    private Peer TargetPeer => new(_identity.Id, _identity.Name, "10.0.0.2", 51888);
+
+    private PairedDeviceStore NewStore(string name) =>
+        new(Path.Combine(_directory.Path, $"{name}-paired-devices.json"), new InMemoryPairKeyStorage());
+
+    private (PairingCoordinator Initiator, PairedDeviceStore Store, LoopbackPeerTransport Loopback) NewInitiator()
+    {
+        var loopback = new LoopbackPeerTransport(new ClipServerRouter(_identity, new CoordinatorBackend(_coordinator)));
+        var store = NewStore("initiator");
+        var initiator = new PairingCoordinator(new DeviceIdentity(InitiatorA, "Laptop"), store, loopback, () => _now);
+        return (initiator, store, loopback);
+    }
+
+    private async Task WaitUntilConfirmIsHeldAsync()
+    {
+        for (var i = 0; i < 500 && !_coordinator.IsHoldingConfirm; i++) await Task.Delay(2, Token);
+        Assert.True(_coordinator.IsHoldingConfirm);
+    }
+
+    /// <summary>Plays the initiator side of <c>/v1/pair/start</c> only: a commitment to a fresh key.</summary>
+    private async Task<(PairingSession Session, byte[] Salt, byte[] TargetPublicKey)> StartWithoutRevealAsync(
+        Guid initiatorId,
+        PairingCoordinator? coordinator = null)
     {
         var session = new PairingSession();
-        var response = await _coordinator.HandlePairStartAsync(
-            new PairStartRequest(initiatorId, "Initiator", Convert.ToBase64String(session.EphemeralPublicKey)),
+        var salt = PairingSession.RandomSalt();
+        var response = await (coordinator ?? _coordinator).HandlePairStartAsync(
+            new PairStartRequest(initiatorId, "Initiator", Convert.ToBase64String(PairingSession.Commitment(session.EphemeralPublicKey, salt))),
             "10.0.0.9",
-            TestContext.Current.CancellationToken);
-        var result = session.CompletePairing(
-            Convert.FromBase64String(response.EphemeralPublicKey),
-            initiatorId,
-            _identity.Id,
-            true,
-            code);
+            Token);
+        return (session, salt, Convert.FromBase64String(response.EphemeralPublicKey));
+    }
+
+    /// <summary>Plays <c>/v1/pair/start</c> and <c>/v1/pair/reveal</c>, and derives the proof the initiator would confirm with.</summary>
+    private async Task<(byte[] PairKey, byte[] Proof)> StartAsync(Guid initiatorId, string code, PairingCoordinator? coordinator = null)
+    {
+        var target = coordinator ?? _coordinator;
+        var started = await StartWithoutRevealAsync(initiatorId, target);
+        var reveal = await target.HandlePairRevealAsync(
+            new PairRevealRequest(initiatorId, Convert.ToBase64String(started.Session.EphemeralPublicKey), Convert.ToBase64String(started.Salt)),
+            Token);
+        if (reveal != PairRevealOutcome.Ok) throw new PairingRejectedException($"reveal {reveal}");
+        var result = started.Session.CompletePairing(started.TargetPublicKey, true, code);
         return (result.PairKey, PairingSession.GenerateConfirmationProof(result.PairKey, initiatorId, _identity.Id));
     }
 
     private Task<PairConfirmOutcome> ConfirmAsync(Guid initiatorId, byte[] proof) =>
-        _coordinator.HandlePairConfirmAsync(
-            new PairConfirmRequest(initiatorId, Convert.ToBase64String(proof)),
-            TestContext.Current.CancellationToken);
+        _coordinator.HandlePairConfirmAsync(new PairConfirmRequest(initiatorId, Convert.ToBase64String(proof)), Token);
+
+    /// <summary>Delivers each request to a target's real router in-process, recording where it was sent.</summary>
+    private sealed class LoopbackPeerTransport(ClipServerRouter router) : IPeerTransport
+    {
+        public List<(string Host, string Path)> Requests { get; } = [];
+
+        public async Task<byte[]> SendAsync(byte[] data, Peer peer, CancellationToken cancellationToken = default)
+        {
+            var request = HttpCodec.ParseRequest(data);
+            lock (Requests) Requests.Add((peer.Host, request.Path));
+            var response = await router.RouteAsync(request, "10.0.0.9", cancellationToken);
+            return HttpCodec.EncodeResponse(response);
+        }
+    }
+
+    /// <summary>The pairing part of AppModel's backend: forwards the pair routes to the coordinator.</summary>
+    private sealed class CoordinatorBackend(PairingCoordinator coordinator) : IClipServerBackend
+    {
+        public byte[]? GetPairKey(Guid deviceId) => null;
+        public ReceiveResult Receive(ClipPayload payload) => throw new InvalidOperationException();
+        public Task<PairStartResponse> HandlePairStartAsync(PairStartRequest request, string remoteHost, CancellationToken cancellationToken) =>
+            coordinator.HandlePairStartAsync(request, remoteHost, cancellationToken);
+        public Task<PairRevealOutcome> HandlePairRevealAsync(PairRevealRequest request, CancellationToken cancellationToken) =>
+            coordinator.HandlePairRevealAsync(request, cancellationToken);
+        public Task<PairConfirmOutcome> HandlePairConfirmAsync(PairConfirmRequest request, CancellationToken cancellationToken) =>
+            coordinator.HandlePairConfirmAsync(request, cancellationToken);
+    }
 
     private sealed class InMemoryPairKeyStorage : IPairKeyStorage
     {

@@ -17,6 +17,13 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         InitializeComponent();
         _model = model;
         _model.StateChanged += (_, _) => Dispatcher.Invoke(Refresh);
+        // Raised from timer and server threads: the hosted code ended (spent or expired) or a
+        // number to compare appeared, changed or went away.
+        _model.PairingStateChanged += (_, _) => Dispatcher.BeginInvoke(RefreshPairing);
+        _model.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(AppModel.VisiblePeers)) Dispatcher.BeginInvoke(RefreshPairing);
+        };
         Closing += OnClosing;
         Refresh();
     }
@@ -37,20 +44,26 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
 
     private void ShowCode_OnClick(object sender, RoutedEventArgs args)
     {
-        HostCodeText.Text = _model.ShowPairingCode();
+        _model.ShowPairingCode();
         ErrorText.Text = string.Empty;
+        RefreshPairing();
     }
 
     private async void Join_OnClick(object sender, RoutedEventArgs args)
     {
+        if (PeerPicker.SelectedItem is not PeerOption option)
+        {
+            ErrorText.Text = "Choose the device to pair with.";
+            return;
+        }
+
         JoinButton.IsEnabled = false;
         ErrorText.Text = string.Empty;
         try
         {
-            var success = await _model.JoinWithCodeAsync(JoinCodeText.Text);
+            var success = await _model.JoinWithCodeAsync(JoinCodeText.Text, option.Peer);
             ErrorText.Text = success ? string.Empty : _model.LastError ?? "Pairing failed.";
             if (success) JoinCodeText.Clear();
-            Refresh();
         }
         catch (Exception exception)
         {
@@ -59,7 +72,70 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         finally
         {
             JoinButton.IsEnabled = true;
+            RefreshPairing();
         }
+    }
+
+    private async void ConfirmComparison_OnClick(object sender, RoutedEventArgs args)
+    {
+        ErrorText.Text = string.Empty;
+        if (_model.PairingCoordinator.HostComparison is not null)
+        {
+            _model.ConfirmHostedPairing();
+            return;
+        }
+
+        ConfirmComparisonButton.IsEnabled = false;
+        var success = await _model.ConfirmJoinAsync();
+        ErrorText.Text = success ? string.Empty : _model.LastError ?? "Pairing failed.";
+        Refresh();
+        RefreshPairing();
+    }
+
+    private void CancelComparison_OnClick(object sender, RoutedEventArgs args)
+    {
+        if (_model.PairingCoordinator.HostComparison is not null) _model.CancelHostedPairing();
+        else _model.CancelJoin();
+        RefreshPairing();
+    }
+
+    private async void Scan_OnClick(object sender, RoutedEventArgs args)
+    {
+        try { await _model.ScanForDevicesAsync(); }
+        catch (Exception exception) { ErrorText.Text = exception.Message; }
+    }
+
+    /// <summary>Shows the number to compare, or the hosted code (hidden once spent or expired) and the device picker.</summary>
+    private void RefreshPairing()
+    {
+        var coordinator = _model.PairingCoordinator;
+        var comparison = coordinator.HostComparison ?? coordinator.JoinComparison;
+        if (comparison is not null)
+        {
+            HostingPanel.Visibility = Visibility.Collapsed;
+            JoinPanel.Visibility = Visibility.Collapsed;
+            ComparisonPanel.Visibility = Visibility.Visible;
+            ComparisonNamesText.Text = $"{coordinator.Identity.Name} \u2194 {comparison.DeviceName}";
+            ComparisonHintText.Text = $"Check that {comparison.DeviceName} shows the same number:";
+            ComparisonCodeText.Text = comparison.ConfirmCode;
+            ComparisonWaitingText.Text = $"Waiting for {comparison.DeviceName} to confirm\u2026";
+            ComparisonWaitingText.Visibility = comparison.LocalConfirmed ? Visibility.Visible : Visibility.Collapsed;
+            ConfirmComparisonButton.IsEnabled = !comparison.LocalConfirmed;
+            return;
+        }
+
+        var hostCode = coordinator.HostCode;
+        ComparisonPanel.Visibility = Visibility.Collapsed;
+        HostingPanel.Visibility = Visibility.Visible;
+        HostCodeText.Text = hostCode ?? string.Empty;
+        JoinPanel.Visibility = hostCode is null ? Visibility.Visible : Visibility.Collapsed;
+
+        var selectedId = (PeerPicker.SelectedItem as PeerOption)?.Peer.Id;
+        var options = _model.PairingCandidates.Select(peer => new PeerOption(peer)).ToArray();
+        PeerPicker.ItemsSource = options;
+        PeerPicker.SelectedItem = options.FirstOrDefault(option => option.Peer.Id == selectedId);
+        ScanButton.IsEnabled = !_model.IsScanning;
+        ScanButton.Content = _model.IsScanning ? "Scanning\u2026" : "Scan network";
     }
 
     private void Unpair_OnClick(object sender, RoutedEventArgs args)
@@ -119,6 +195,7 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
                 _model.DeviceClockSkewed(device.Id)))
             .ToArray();
         TransferList.ItemsSource = _model.Transfers.ToArray();
+        RefreshPairing();
     }
 
     private void OnClosing(object? sender, CancelEventArgs args)
@@ -126,9 +203,16 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         if (_allowClose) return;
         args.Cancel = true;
         _model.StopHostingCode();
-        HostCodeText.Text = string.Empty;
+        _model.CancelJoin();
+        RefreshPairing();
         Hide();
     }
+}
+
+/// <summary>A device offered for pairing in the picker.</summary>
+internal sealed record PeerOption(ClipboardSS.Core.Models.Peer Peer)
+{
+    public override string ToString() => $"{Peer.Name} ({Peer.Host})";
 }
 
 internal sealed record PairedDeviceRow(

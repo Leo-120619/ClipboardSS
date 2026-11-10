@@ -71,21 +71,40 @@ public sealed class CryptoParityTests
             "e07e21c947d19e3376f09b3c1e161742",
             Hex(alice.DeriveSharedSecret(bob.EphemeralPublicKey)));
 
-        var aliceResult = alice.CompletePairing(
-            bob.EphemeralPublicKey,
-            Guid.NewGuid(),
-            Guid.NewGuid(),
-            true,
-            "123456");
-        var bobResult = bob.CompletePairing(
-            alice.EphemeralPublicKey,
-            Guid.NewGuid(),
-            Guid.NewGuid(),
-            false,
-            "123456");
+        var aliceResult = alice.CompletePairing(bob.EphemeralPublicKey, true, "123456");
+        var bobResult = bob.CompletePairing(alice.EphemeralPublicKey, false, "123456");
 
         Assert.Equal(aliceResult.PairKey, bobResult.PairKey);
         Assert.Equal(aliceResult.ConfirmCode, bobResult.ConfirmCode);
+    }
+
+    [Fact]
+    public void PairingV2MatchesPinnedVector()
+    {
+        // docs/wire-protocol.md "Pairing v2 Test Vector": RFC 7748 keys, initiator = Alice, target = Bob.
+        var initiator = PairingSession.FromPrivateKey(Convert.FromHexString(
+            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"));
+        var target = PairingSession.FromPrivateKey(Convert.FromHexString(
+            "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"));
+        var salt = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
+
+        var commitment = PairingSession.Commitment(initiator.EphemeralPublicKey, salt);
+        Assert.Equal("c288f1b99596594082bc7d2c3684e2baef0516454e44b3cd6d7bcbd8845f4c55", Hex(commitment));
+        Assert.True(PairingSession.CommitmentMatches(commitment, initiator.EphemeralPublicKey, salt));
+        Assert.False(PairingSession.CommitmentMatches(commitment, target.EphemeralPublicKey, salt));
+
+        var initiatorResult = initiator.CompletePairing(target.EphemeralPublicKey, true, "123456");
+        var targetResult = target.CompletePairing(initiator.EphemeralPublicKey, false, "123456");
+        Assert.Equal("8088860b8ecd246dbb52966bba419592f44ab2da96dec0d03725257384cdb83f", Hex(initiatorResult.PairKey));
+        Assert.Equal(initiatorResult.PairKey, targetResult.PairKey);
+        Assert.Equal("885454", initiatorResult.ConfirmCode);
+        Assert.Equal("885454", targetResult.ConfirmCode);
+
+        var proof = PairingSession.GenerateConfirmationProof(
+            initiatorResult.PairKey,
+            Guid.Parse("550E8400-E29B-41D4-A716-446655440000"),
+            Guid.Parse("4D967C79-47DC-4E1F-A3BD-D3160B082DA7"));
+        Assert.Equal("b4bb2c3b5b26e686aba290b1e6469b756684cb6f131b355f106905140204c23b", Hex(proof));
     }
 
     [Fact]
@@ -126,15 +145,10 @@ public sealed class CryptoParityTests
     {
         var initiator = new PairingSession();
         var target = new PairingSession();
-        var initiatorId = Guid.Parse("550E8400-E29B-41D4-A716-446655440000");
-        var targetId = Guid.Parse("4D967C79-47DC-4E1F-A3BD-D3160B082DA7");
 
-        var left = initiator.CompletePairing(
-            target.EphemeralPublicKey, initiatorId, targetId, true, "123456");
-        var right = target.CompletePairing(
-            initiator.EphemeralPublicKey, initiatorId, targetId, false, "123456");
-        var wrong = initiator.CompletePairing(
-            target.EphemeralPublicKey, initiatorId, targetId, true, "654321");
+        var left = initiator.CompletePairing(target.EphemeralPublicKey, true, "123456");
+        var right = target.CompletePairing(initiator.EphemeralPublicKey, false, "123456");
+        var wrong = initiator.CompletePairing(target.EphemeralPublicKey, true, "654321");
 
         Assert.Equal(left.PairKey, right.PairKey);
         Assert.Equal(left.ConfirmCode, right.ConfirmCode);

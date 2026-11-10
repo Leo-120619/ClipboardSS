@@ -7,9 +7,22 @@ using ClipboardSS.Core.Sync;
 
 namespace ClipboardSS.Core.Protocol;
 
-public sealed record PairStartRequest(Guid DeviceId, string DeviceName, string EphemeralPublicKey);
+/// <param name="Commitment">base64 <c>SHA256(initiatorPublicKey || salt)</c> (pairing v2).</param>
+public sealed record PairStartRequest(Guid DeviceId, string DeviceName, string Commitment);
 public sealed record PairStartResponse(Guid DeviceId, string DeviceName, string EphemeralPublicKey);
+public sealed record PairRevealRequest(Guid DeviceId, string EphemeralPublicKey, string Salt);
 public sealed record PairConfirmRequest(Guid DeviceId, string Proof);
+
+/// <summary>Result of a <c>/v1/pair/reveal</c> request on the hosting (target) side.</summary>
+public enum PairRevealOutcome
+{
+    /// <summary>200: the commitment opened; both screens now show the number.</summary>
+    Ok,
+    /// <summary>401: no active code, or no matching initiator waiting to reveal.</summary>
+    Rejected,
+    /// <summary>400: the revealed key or salt does not open the commitment.</summary>
+    Invalid,
+}
 
 /// <summary>Result of a <c>/v1/pair/confirm</c> request on the hosting (target) side.</summary>
 public enum PairConfirmOutcome
@@ -17,6 +30,8 @@ public enum PairConfirmOutcome
     Paired,
     Rejected,
     AlreadyPaired,
+    /// <summary>408: this device's user did not confirm the number in time.</summary>
+    TimedOut,
 }
 
 public interface IClipServerBackend
@@ -37,6 +52,11 @@ public interface IClipServerBackend
         PairStartRequest request,
         string remoteHost,
         CancellationToken cancellationToken);
+    Task<PairRevealOutcome> HandlePairRevealAsync(
+        PairRevealRequest request,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(PairRevealOutcome.Rejected);
+    /// <summary>May wait up to 60 s for this device's user (see docs/wire-protocol.md).</summary>
     Task<PairConfirmOutcome> HandlePairConfirmAsync(
         PairConfirmRequest request,
         CancellationToken cancellationToken);
@@ -170,6 +190,27 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
             }
         }
 
+        if (request.Path == "/v1/pair/reveal")
+        {
+            try
+            {
+                var revealRequest = JsonSerializer.Deserialize<PairRevealRequest>(request.Body, WireJson.Options)
+                    ?? throw new JsonException("Missing reveal request.");
+                return await backend.HandlePairRevealAsync(revealRequest, cancellationToken) switch
+                {
+                    PairRevealOutcome.Ok => JsonResponse(200, "{\"status\":\"ok\"}"u8.ToArray()),
+                    PairRevealOutcome.Rejected => TextResponse(401, "Unauthorized"),
+                    _ => TextResponse(400, "Bad Request"),
+                };
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return TextResponse(400, "Bad Request");
+            }
+        }
+
+        // The backend may hold this up to 60 s for its user. TcpClipServer's 15 s deadline only
+        // covers reading the request, so the hold is not cut short.
         if (request.Path == "/v1/pair/confirm")
         {
             try
@@ -180,6 +221,7 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
                 {
                     PairConfirmOutcome.Paired => JsonResponse(200, "{\"status\":\"ok\"}"u8.ToArray()),
                     PairConfirmOutcome.AlreadyPaired => JsonResponse(409, "{\"status\":\"alreadyPaired\"}"u8.ToArray()),
+                    PairConfirmOutcome.TimedOut => JsonResponse(408, "{\"status\":\"timeout\"}"u8.ToArray()),
                     _ => TextResponse(401, "Unauthorized"),
                 };
             }

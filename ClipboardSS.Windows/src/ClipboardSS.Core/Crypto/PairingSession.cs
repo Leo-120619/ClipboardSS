@@ -40,17 +40,36 @@ public sealed class PairingSession
         return new PairingSession(new X25519PrivateKeyParameters(privateKey.ToArray()));
     }
 
+    /// <summary>Length of the random salt the initiator commits with (pairing v2).</summary>
+    public const int SaltLength = 16;
+
+    public static byte[] RandomSalt() => RandomNumberGenerator.GetBytes(SaltLength);
+
+    /// <summary>
+    /// <c>SHA256(initiatorPublicKey || salt)</c>: sent in <c>/v1/pair/start</c> so the initiator's key
+    /// stays hidden until the target has answered with its own.
+    /// </summary>
+    public static byte[] Commitment(ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> salt)
+    {
+        var buffer = new byte[publicKey.Length + salt.Length];
+        publicKey.CopyTo(buffer);
+        salt.CopyTo(buffer.AsSpan(publicKey.Length));
+        return SHA256.HashData(buffer);
+    }
+
+    /// <summary>Constant-time check that <paramref name="publicKey"/> and <paramref name="salt"/> open the commitment.</summary>
+    public static bool CommitmentMatches(ReadOnlySpan<byte> commitment, ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> salt) =>
+        CryptographicOperations.FixedTimeEquals(commitment, Commitment(publicKey, salt));
+
+    /// <summary>
+    /// Derives <c>pairKey</c> and the 6-digit <c>confirmCode</c> both screens show. HKDF <c>info</c> is
+    /// the transcript <c>code || initiatorPublicKey || targetPublicKey</c>.
+    /// </summary>
     public PairingResult CompletePairing(
         ReadOnlySpan<byte> remotePublicKey,
-        Guid initiatorId,
-        Guid targetId,
         bool isInitiator,
         string code)
     {
-        _ = initiatorId;
-        _ = targetId;
-        _ = isInitiator;
-
         if (remotePublicKey.Length != X25519PublicKeyParameters.KeySize)
         {
             throw new PairingException("The remote X25519 public key must be 32 bytes.");
@@ -59,7 +78,13 @@ public sealed class PairingSession
         try
         {
             var sharedSecret = DeriveSharedSecret(remotePublicKey);
-            var info = Encoding.ASCII.GetBytes(code);
+            var codeBytes = Encoding.ASCII.GetBytes(code);
+            var initiatorPublicKey = isInitiator ? EphemeralPublicKey : remotePublicKey.ToArray();
+            var targetPublicKey = isInitiator ? remotePublicKey.ToArray() : EphemeralPublicKey;
+            var info = new byte[codeBytes.Length + initiatorPublicKey.Length + targetPublicKey.Length];
+            codeBytes.CopyTo(info, 0);
+            initiatorPublicKey.CopyTo(info, codeBytes.Length);
+            targetPublicKey.CopyTo(info, codeBytes.Length + initiatorPublicKey.Length);
             var pairKey = HkdfSha256.Derive(sharedSecret, PairKeySalt, info, 32);
             var codeKey = HkdfSha256.Derive(sharedSecret, ConfirmCodeSalt, info, 4);
             var codeValue = BinaryPrimitives.ReadUInt32BigEndian(codeKey) % 1_000_000;

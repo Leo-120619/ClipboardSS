@@ -27,15 +27,39 @@
             
             <TextBlock FontSize="24" FontWeight="SemiBold" Text="Devices" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
             
-            <StackPanel Grid.Row="1" Margin="0,18,0,0" Orientation="Horizontal">
-                <ui:Button Width="120" Content="Show Code" Appearance="Primary" Click="ShowCode_OnClick" />
-                <TextBlock x:Name="HostCodeText" Margin="18,3,0,0" FontSize="22" FontWeight="Bold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            <StackPanel Grid.Row="1" Margin="0,18,0,0">
+                <StackPanel x:Name="HostingPanel" Orientation="Horizontal">
+                    <ui:Button Width="120" Content="Show Code" Appearance="Primary" Click="ShowCode_OnClick" />
+                    <TextBlock x:Name="HostCodeText" Margin="18,3,0,0" FontSize="22" FontWeight="Bold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                </StackPanel>
+                <!-- Pairing v2: both device names and the 6-digit number, confirmed on both screens. -->
+                <StackPanel x:Name="ComparisonPanel" Visibility="Collapsed">
+                    <TextBlock x:Name="ComparisonNamesText" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"
+                            Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock x:Name="ComparisonHintText" Margin="0,4,0,0" TextWrapping="Wrap"
+                            Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="ComparisonCodeText" Margin="0,6,0,6" FontSize="48" FontWeight="Bold" FontFamily="Consolas"
+                            Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock x:Name="ComparisonWaitingText" Margin="0,0,0,8" Visibility="Collapsed" TextWrapping="Wrap"
+                            Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <StackPanel Orientation="Horizontal">
+                        <ui:Button Width="120" Content="Cancel" Click="CancelComparison_OnClick" />
+                        <ui:Button x:Name="ConfirmComparisonButton" Margin="10,0,0,0" Width="160" Content="Numbers match"
+                                Appearance="Primary" Click="ConfirmComparison_OnClick" />
+                    </StackPanel>
+                </StackPanel>
             </StackPanel>
-            
-            <StackPanel Grid.Row="2" Margin="0,18,0,0" Orientation="Horizontal">
-                <ui:TextBox x:Name="JoinCodeText" Width="160" MaxLength="6" FontSize="18" PlaceholderText="Code" />
-                <ui:Button x:Name="JoinButton" Margin="10,0,0,0" Width="100" Content="Enter Code"
-                        Click="Join_OnClick" />
+
+            <StackPanel x:Name="JoinPanel" Grid.Row="2" Margin="0,18,0,0">
+                <StackPanel Orientation="Horizontal">
+                    <ComboBox x:Name="PeerPicker" Width="270" ToolTip="The device to pair with" />
+                    <ui:Button x:Name="ScanButton" Margin="10,0,0,0" Width="130" Content="Scan network" Click="Scan_OnClick" />
+                </StackPanel>
+                <StackPanel Margin="0,10,0,0" Orientation="Horizontal">
+                    <ui:TextBox x:Name="JoinCodeText" Width="160" MaxLength="6" FontSize="18" PlaceholderText="Code" />
+                    <ui:Button x:Name="JoinButton" Margin="10,0,0,0" Width="100" Content="Enter Code"
+                            Click="Join_OnClick" />
+                </StackPanel>
             </StackPanel>
             
             <TextBlock x:Name="ErrorText" Grid.Row="3" Margin="0,10,0,10" Foreground="{DynamicResource SystemFillColorCriticalBrush}"
@@ -99,7 +123,7 @@
             </ScrollViewer>
             
             <TextBlock Grid.Row="5" Margin="0,14,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
-                    Text="Pairing codes expire after 180 seconds. If discovery misses a device, ClipboardSS automatically scans the local /24 subnet." />
+                    Text="Pairing codes expire after 180 seconds. Pick the device to pair with; if it is missing, use Scan network to search the local subnet." />
         </Grid>
     </Grid>
 </ui:FluentWindow>

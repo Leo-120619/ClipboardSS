@@ -48,6 +48,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private string? _lastWrittenHash;
     private Guid? _lastBroadcastClipId;
     private string? _lastError;
+    private IReadOnlyList<Peer> _sweptPeers = [];
+    private bool _isScanning;
     private bool _isSyncPaused;
     private bool _disposed;
 
@@ -84,6 +86,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
             OnPropertyChanged(nameof(VisiblePeers));
             _ = RefreshDeviceLivenessAsync();
         };
+        PairingCoordinator.HostingChanged += (_, _) => PairingStateChanged?.Invoke(this, EventArgs.Empty);
         PairingCoordinator.PairedDevicesChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(PairedDevices));
@@ -94,6 +97,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler? StateChanged;
+    /// <summary>The hosted code or a number to compare changed; raised on any thread.</summary>
+    public event EventHandler? PairingStateChanged;
     public event EventHandler? DevicesRequested;
     public event Action<PasteRequest>? PasteRequested;
     public ClipStore Store { get; }
@@ -207,7 +212,42 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     public string ShowPairingCode() => PairingCoordinator.StartHosting();
     public void StopHostingCode() => PairingCoordinator.StopHosting();
 
-    public async Task<bool> JoinWithCodeAsync(string code, CancellationToken cancellationToken = default)
+    /// <summary>Devices the user can pick to pair with: discovered, not paired yet, and on protocol v2.</summary>
+    public IReadOnlyList<Peer> PairingCandidates
+    {
+        get
+        {
+            var paired = PairedDevices.Select(device => device.Id).ToHashSet();
+            return ComposeJoinCandidates(VisiblePeers, _sweptPeers)
+                .Where(peer => !peer.NeedsUpdate && !paired.Contains(peer.Id))
+                .ToArray();
+        }
+    }
+
+    public bool IsScanning => _isScanning;
+
+    /// <summary>Sweeps the local subnet for devices mDNS missed, so the user can pick one to pair with.</summary>
+    public async Task ScanForDevicesAsync(CancellationToken cancellationToken = default)
+    {
+        if (_isScanning) return;
+        _isScanning = true;
+        PairingStateChanged?.Invoke(this, EventArgs.Empty);
+        try
+        {
+            _sweptPeers = await _sweeper.SweepAsync(cancellationToken);
+        }
+        finally
+        {
+            _isScanning = false;
+            PairingStateChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Starts pairing with the one device the user selected. On success both screens show a number;
+    /// the user then calls <see cref="ConfirmJoinAsync"/> or <see cref="CancelJoin"/>.
+    /// </summary>
+    public async Task<bool> JoinWithCodeAsync(string code, Peer peer, CancellationToken cancellationToken = default)
     {
         if (code.Length != 6 || code.Any(character => !char.IsAsciiDigit(character)))
         {
@@ -216,23 +256,45 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         }
 
         LastError = null;
-        var mdnsPeers = VisiblePeers;
         try
         {
-            if (await TryPairingAsync(mdnsPeers, code, cancellationToken)) return true;
-            var sweptPeers = await _sweeper.SweepAsync(cancellationToken);
-            if (await TryPairingAsync(ComposeJoinCandidates(mdnsPeers, sweptPeers), code, cancellationToken))
-                return true;
+            await PairingCoordinator.StartPairingAsync(peer, code, cancellationToken);
+            return true;
         }
-        catch (PairingAlreadyPairedException exception)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
-            // The target accepted the code but already knows this device; its code is now spent.
-            LastError = exception.Message;
+            LastError = JoinErrorMessage(exception);
             return false;
         }
-        LastError = "No device accepted that code. Make sure the other device is showing a code on the same Wi-Fi.";
-        return false;
     }
+
+    /// <summary>The user confirmed the numbers match on this device.</summary>
+    public async Task<bool> ConfirmJoinAsync(CancellationToken cancellationToken = default)
+    {
+        LastError = null;
+        try
+        {
+            await PairingCoordinator.ConfirmPairingAsync(cancellationToken);
+            OnPropertyChanged(nameof(PairedDevices));
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return true;
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            LastError = JoinErrorMessage(exception);
+            return false;
+        }
+    }
+
+    public void CancelJoin() => PairingCoordinator.CancelPairing();
+    public void ConfirmHostedPairing() => PairingCoordinator.ConfirmHostedPairing();
+    public void CancelHostedPairing() => PairingCoordinator.CancelHostedPairing();
+
+    public static string JoinErrorMessage(Exception exception) => exception switch
+    {
+        PairingAlreadyPairedException or PairingTimedOutException or PairingNotAcceptedException => exception.Message,
+        _ => "Could not reach that device. Make sure it is showing a code on the same Wi-Fi.",
+    };
 
     public void Unpair(Guid deviceId)
     {
@@ -554,6 +616,11 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         CancellationToken cancellationToken) =>
         PairingCoordinator.HandlePairStartAsync(request, remoteHost, cancellationToken);
 
+    public Task<PairRevealOutcome> HandlePairRevealAsync(
+        PairRevealRequest request,
+        CancellationToken cancellationToken) =>
+        PairingCoordinator.HandlePairRevealAsync(request, cancellationToken);
+
     public Task<PairConfirmOutcome> HandlePairConfirmAsync(
         PairConfirmRequest request,
         CancellationToken cancellationToken) =>
@@ -675,28 +742,6 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     private bool ShouldSuppress(string hash) =>
         hash == _lastWrittenHash || hash == Store.Items.FirstOrDefault()?.ContentHash;
-
-    private async Task<bool> TryPairingAsync(
-        IEnumerable<Peer> candidates,
-        string code,
-        CancellationToken cancellationToken)
-    {
-        foreach (var peer in candidates)
-        {
-            try
-            {
-                await PairingCoordinator.StartPairingAsync(peer, code, cancellationToken);
-                OnPropertyChanged(nameof(PairedDevices));
-                StateChanged?.Invoke(this, EventArgs.Empty);
-                return true;
-            }
-            catch (Exception exception) when (exception is not PairingAlreadyPairedException &&
-                                              !cancellationToken.IsCancellationRequested)
-            {
-            }
-        }
-        return false;
-    }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
