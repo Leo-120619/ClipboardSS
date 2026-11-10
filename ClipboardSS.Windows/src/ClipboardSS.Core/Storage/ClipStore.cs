@@ -79,12 +79,7 @@ public sealed class ClipStore
                 return RefreshExisting(existing);
             }
 
-            var extension = fileExtension.Trim();
-            if (extension.Length == 0)
-            {
-                extension = "png";
-            }
-
+            var extension = SanitizedImageExtension(fileExtension);
             var fileName = $"{Guid.NewGuid():D}.{extension}";
             var relativePath = Path.Combine("Images", fileName);
             AtomicFile.WriteAllBytes(Path.Combine(StorageDirectory, relativePath), data);
@@ -98,6 +93,28 @@ public sealed class ClipStore
             };
             return Upsert(clip);
         }
+    }
+
+    /// <summary>
+    /// Returns the lowercased extension when it is 1-5 ASCII letters or digits, otherwise "png".
+    /// The extension is peer-supplied, so anything else (separators, dots, "..") is discarded.
+    /// </summary>
+    public static string SanitizedImageExtension(string fileExtension)
+    {
+        if (fileExtension.Length is < 1 or > 5)
+        {
+            return "png";
+        }
+
+        foreach (var character in fileExtension)
+        {
+            if (!char.IsAsciiLetterOrDigit(character))
+            {
+                return "png";
+            }
+        }
+
+        return fileExtension.ToLowerInvariant();
     }
 
     public void SetPinned(Guid id, bool isPinned)

@@ -133,6 +133,53 @@ struct ClipboardSyncTests {
         #expect(pasteboard.lastText == "hello net")
     }
 
+    @Test("ClipReceiver rejects an undecodable image without storing it or touching the pasteboard")
+    @MainActor
+    func receiveUndecodableImageIsRejectedAndNotStored() async throws {
+        let pasteboard = FakePasteboard()
+        let storage = try syncTemporaryDirectory()
+        let store = try ClipStore(storageDirectory: storage)
+        let receiver = ClipReceiver(store: store, pasteboard: pasteboard)
+        var bytes: [UInt8] = [0x89, 0x50, 0x4E, 0x47]
+        bytes += (0..<32).map { _ in UInt8.random(in: 0...255) }
+        let payload = ClipPayload(
+            id: UUID(), type: .image, createdAt: Date(), text: nil,
+            imageBase64: Data(bytes).base64EncodedString(), imageExtension: "png",
+            previewText: "Image", contentHash: "ignored", sourceDeviceName: "Phone"
+        )
+
+        #expect(throws: (any Error).self) { try receiver.receive(payload) }
+
+        #expect(store.items.isEmpty)
+        let images = try FileManager.default.contentsOfDirectory(atPath: storage.appendingPathComponent("Images").path)
+        #expect(images.isEmpty)
+        #expect(pasteboard.clearCount == 0)
+        #expect(pasteboard.lastImageData == nil)
+    }
+
+    @Test("ClipReceiver stores a decodable image and writes it to the pasteboard")
+    @MainActor
+    func receiveValidImageIsStored() async throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: try syncTemporaryDirectory())
+        let receiver = ClipReceiver(store: store, pasteboard: pasteboard)
+        let png = try #require(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+        let payload = ClipPayload(
+            id: UUID(), type: .image, createdAt: Date(), text: nil,
+            imageBase64: png.base64EncodedString(), imageExtension: "PNG",
+            previewText: "Image", contentHash: "ignored", sourceDeviceName: "Phone"
+        )
+
+        let result = try receiver.receive(payload)
+
+        guard case .added(let clip) = result else {
+            Issue.record("Expected added")
+            return
+        }
+        #expect(clip.imagePath?.hasSuffix(".png") == true)
+        #expect(pasteboard.lastImageData == png)
+    }
+
     @Test("ClipSender broadcast")
     func clipSenderBroadcast() async throws {
         let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())

@@ -11,8 +11,13 @@ public enum ReceiveStatus
 
 public sealed record ReceiveResult(ReceiveStatus Status, ClipItem? Clip = null);
 
-public sealed class ClipReceiver(ClipStore store, IPasteboardClient pasteboard)
+public sealed class ClipReceiver(
+    ClipStore store,
+    IPasteboardClient pasteboard,
+    IImageValidator? imageValidator = null)
 {
+    private readonly IImageValidator _imageValidator = imageValidator ?? new MagicNumberImageValidator();
+
     public ReceiveResult Receive(ClipPayload payload)
     {
         var initialCount = store.Items.Count;
@@ -43,6 +48,11 @@ public sealed class ClipReceiver(ClipStore store, IPasteboardClient pasteboard)
                 catch (FormatException exception)
                 {
                     throw new InvalidDataException("Invalid image payload.", exception);
+                }
+
+                if (!_imageValidator.IsValidImage(imageData))
+                {
+                    throw new InvalidDataException("Image payload is not a decodable image.");
                 }
 
                 clip = store.AddImageData(

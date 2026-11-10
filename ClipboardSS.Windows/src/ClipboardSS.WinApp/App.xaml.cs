@@ -41,6 +41,7 @@ public partial class App : System.Windows.Application
     protected override async void OnStartup(StartupEventArgs args)
     {
         base.OnStartup(args);
+        DispatcherUnhandledException += App_OnDispatcherUnhandledException;
         AppActivationArguments? activation;
         try
         {
@@ -208,6 +209,28 @@ public partial class App : System.Windows.Application
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
+    }
+
+    private void App_OnDispatcherUnhandledException(
+        object sender,
+        System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
+    {
+        // Keep the app alive (e.g. a bad received image re-rendered on every launch) and leave a trace.
+        // Only the exception is logged, never clip contents.
+        try
+        {
+            var directory = _settings?.StorageDirectory ?? SettingsStore.ResolveStorageDirectory();
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(
+                Path.Combine(directory, "unhandled-exceptions.log"),
+                $"{DateTimeOffset.UtcNow:O} {args.Exception}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Logging is best effort; never throw from the last-chance handler.
+        }
+
+        args.Handled = true;
     }
 
     private void OpenFromTray()

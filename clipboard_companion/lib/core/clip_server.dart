@@ -12,6 +12,7 @@ import 'paired_device_store.dart';
 import 'crypto_utils.dart';
 import 'file_receiver.dart';
 import 'file_transfer_models.dart';
+import 'image_validation.dart';
 
 class ClipServerStartException implements Exception {
   final String message;
@@ -169,7 +170,11 @@ class ClipServer {
         return Response(401, body: 'Paused');
       }
 
-      final payload = await CryptoEnvelopeUtils.open(envelope, key);
+      final opened = await CryptoEnvelopeUtils.open(envelope, key);
+      final payload = acceptReceivedClip(opened);
+      if (payload == null) {
+        return Response(400, body: 'Invalid image payload');
+      }
       onClipReceived(payload);
 
       return Response.ok('OK');

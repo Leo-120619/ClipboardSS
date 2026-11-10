@@ -33,6 +33,9 @@ public final class ClipReceiver {
             guard let base64 = payload.imageBase64, let data = Data(base64Encoded: base64) else {
                 throw NSError(domain: "ClipReceiver", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing or invalid image payload"])
             }
+            guard ImageDataValidator.isDecodableImage(data) else {
+                throw NSError(domain: "ClipReceiver", code: 3, userInfo: [NSLocalizedDescriptionKey: "Image payload is not a decodable image"])
+            }
             let ext = payload.imageExtension ?? "png"
             addedClip = try store.addImageData(data, fileExtension: ext, previewText: payload.previewText)
             

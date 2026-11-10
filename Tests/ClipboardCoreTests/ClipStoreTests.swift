@@ -100,6 +100,37 @@ struct ClipStoreTests {
         #expect(pinnedClips.map(\.id).contains(pinnedImage.id))
         #expect(pinnedClips.map(\.id).contains(unpinnedText.id) == false)
     }
+
+    @Test(
+        "sanitizes peer-supplied image extensions",
+        arguments: [
+            ("png", "png"),
+            ("JPG", "jpg"),
+            ("", "png"),
+            ("x/../../evil.cmd", "png"),
+            ("a.b", "png"),
+            ("toolongext", "png"),
+        ]
+    )
+    func sanitizesImageExtension(input: String, expected: String) {
+        #expect(sanitizedImageExtension(input) == expected)
+    }
+
+    @Test("writes an image with a traversal extension inside the Images directory")
+    func addImageDataWithTraversalExtensionWritesInsideImagesDirectory() throws {
+        let root = try temporaryDirectory()
+        let storage = root.appendingPathComponent("store", isDirectory: true)
+        let store = try ClipStore(storageDirectory: storage)
+
+        let clip = try store.addImageData(Data([0x89, 0x50, 0x4E, 0x47]), fileExtension: "x/../../evil.cmd")
+
+        let imagePath = try #require(clip.imagePath)
+        #expect(imagePath.hasPrefix("Images/"))
+        #expect(imagePath.hasSuffix(".png"))
+        #expect(!imagePath.contains(".."))
+        let images = try FileManager.default.contentsOfDirectory(atPath: storage.appendingPathComponent("Images").path)
+        #expect(images.count == 1)
+    }
 }
 
 private final class TestClock {

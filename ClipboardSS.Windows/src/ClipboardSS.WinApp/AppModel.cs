@@ -5,6 +5,7 @@ using ClipboardSS.App.Net;
 using ClipboardSS.App.Notifications;
 using ClipboardSS.App.Pairing;
 using ClipboardSS.App.Settings;
+using ClipboardSS.App.UI;
 using ClipboardSS.App.Win32;
 using ClipboardSS.Core.Crypto;
 using ClipboardSS.Core.Models;
@@ -55,7 +56,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         PairingCoordinator = pairingCoordinator;
         _clipboard = clipboard;
         _writer = new ClipboardWriter(clipboard, store);
-        _receiver = new ClipReceiver(store, clipboard);
+        _receiver = new ClipReceiver(store, clipboard, new WicImageValidator());
         _sender = sender;
         _mdns = mdns;
         _sweeper = sweeper;

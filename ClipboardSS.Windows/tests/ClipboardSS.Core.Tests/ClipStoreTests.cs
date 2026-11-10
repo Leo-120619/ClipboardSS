@@ -109,6 +109,38 @@ public sealed class ClipStoreTests
         Assert.Equal([image.Id], store.Clips(string.Empty, ClipFilter.Pinned).Select(item => item.Id));
     }
 
+    [Theory]
+    [InlineData("png", "png")]
+    [InlineData("JPG", "jpg")]
+    [InlineData("", "png")]
+    [InlineData("x/../../evil.cmd", "png")]
+    [InlineData("a.b", "png")]
+    [InlineData("toolongext", "png")]
+    public void SanitizedImageExtension_AllowsOnlyShortAlphanumericExtensions(string input, string expected)
+    {
+        Assert.Equal(expected, ClipStore.SanitizedImageExtension(input));
+    }
+
+    [Fact]
+    public void AddImageData_WithTraversalExtension_WritesInsideImagesDirectory()
+    {
+        using var directory = new TemporaryDirectory();
+        var storage = System.IO.Path.Combine(directory.Path, "store");
+        var store = new ClipStore(storage);
+        var imagesDirectory = System.IO.Path.Combine(storage, "Images");
+        var before = Directory.GetFiles(directory.Path, "*", SearchOption.AllDirectories).ToHashSet();
+
+        store.AddImageData([0x89, 0x50, 0x4e, 0x47], "x/../../evil.cmd");
+
+        var newFiles = Directory.GetFiles(directory.Path, "*", SearchOption.AllDirectories)
+            .Where(path => !before.Contains(path))
+            .Where(path => System.IO.Path.GetFileName(path) != "clips.json")
+            .ToArray();
+        var imageFile = Assert.Single(newFiles);
+        Assert.Equal(imagesDirectory, System.IO.Path.GetDirectoryName(imageFile));
+        Assert.Equal(".png", System.IO.Path.GetExtension(imageFile));
+    }
+
     private sealed class TestClock(DateTimeOffset current)
     {
         private DateTimeOffset _current = current;

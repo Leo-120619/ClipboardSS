@@ -1,5 +1,17 @@
 import Foundation
 
+/// Returns the lowercased extension when it is 1-5 ASCII letters or digits, otherwise "png".
+/// The extension is peer-supplied, so anything else (separators, dots, "..") is discarded.
+public func sanitizedImageExtension(_ fileExtension: String) -> String {
+    let scalars = fileExtension.unicodeScalars
+    guard (1...5).contains(scalars.count),
+          scalars.allSatisfy({ $0.isASCII && CharacterSet.alphanumerics.contains($0) })
+    else {
+        return "png"
+    }
+    return fileExtension.lowercased()
+}
+
 public final class ClipStore {
     public let storageDirectory: URL
     public private(set) var items: [ClipItem]
@@ -62,8 +74,7 @@ public final class ClipStore {
             return try refreshExistingClip(existing)
         }
 
-        let normalizedExtension = fileExtension.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeExtension = normalizedExtension.isEmpty ? "png" : normalizedExtension
+        let safeExtension = sanitizedImageExtension(fileExtension)
         let relativePath = "Images/\(UUID().uuidString).\(safeExtension)"
         let imageURL = storageDirectory.appendingPathComponent(relativePath)
         try data.write(to: imageURL, options: .atomic)

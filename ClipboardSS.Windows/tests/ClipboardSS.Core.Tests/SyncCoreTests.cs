@@ -70,6 +70,84 @@ public sealed class SyncCoreTests
     }
 
     [Fact]
+    public void Receive_UndecodableImage_IsRejectedAndNotStored()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new ClipStore(directory.Path);
+        var pasteboard = new FakePasteboard();
+        var receiver = new ClipReceiver(store, pasteboard);
+        var garbage = new byte[32];
+        new Random(20261110).NextBytes(garbage);
+        byte[] imageData = [0x89, 0x50, 0x4e, 0x47, .. garbage];
+        var payload = new ClipPayload
+        {
+            Id = Guid.NewGuid(),
+            Type = ClipType.Image,
+            CreatedAt = DateTimeOffset.UtcNow,
+            ImageBase64 = Convert.ToBase64String(imageData),
+            ImageExtension = "png",
+            PreviewText = "Image",
+            ContentHash = "ignored-by-receiver",
+            SourceDeviceName = "Phone",
+        };
+
+        Assert.Throws<InvalidDataException>(() => receiver.Receive(payload));
+
+        Assert.Empty(store.Items);
+        Assert.Empty(Directory.GetFiles(System.IO.Path.Combine(directory.Path, "Images")));
+        Assert.Equal(0, pasteboard.ClearCount);
+        Assert.Null(pasteboard.LastImageData);
+    }
+
+    [Fact]
+    public void Receive_ValidPngImage_IsStoredAndWrittenToPasteboard()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new ClipStore(directory.Path);
+        var pasteboard = new FakePasteboard();
+        var receiver = new ClipReceiver(store, pasteboard);
+        var payload = new ClipPayload
+        {
+            Id = Guid.NewGuid(),
+            Type = ClipType.Image,
+            CreatedAt = DateTimeOffset.UtcNow,
+            ImageBase64 = Convert.ToBase64String(OnePixelPng),
+            ImageExtension = "PNG",
+            PreviewText = "Image",
+            ContentHash = "ignored-by-receiver",
+            SourceDeviceName = "Phone",
+        };
+
+        var result = receiver.Receive(payload);
+
+        Assert.Equal(ReceiveStatus.Added, result.Status);
+        Assert.EndsWith(".png", store.Items[0].ImagePath);
+        Assert.Equal(OnePixelPng, pasteboard.LastImageData);
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10 })]
+    [InlineData(new byte[] { 0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0 })]
+    [InlineData(new byte[] { 0x42, 0x4D, 0, 0, 0, 0 })]
+    [InlineData(new byte[] { 0x49, 0x49, 0x2A, 0x00, 8, 0 })]
+    [InlineData(new byte[] { 0x4D, 0x4D, 0x00, 0x2A, 0, 8 })]
+    [InlineData(new byte[] { 0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50 })]
+    public void MagicNumberImageValidator_AcceptsKnownSignatures(byte[] data)
+    {
+        Assert.True(new MagicNumberImageValidator().IsValidImage(data));
+    }
+
+    [Theory]
+    [InlineData(new byte[] { })]
+    [InlineData(new byte[] { 0x89, 0x50, 0x4E, 0x47 })]
+    [InlineData(new byte[] { 0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45 })]
+    [InlineData(new byte[] { 0x4D, 0x5A, 0x90, 0x00 })]
+    public void MagicNumberImageValidator_RejectsUnknownOrTruncatedData(byte[] data)
+    {
+        Assert.False(new MagicNumberImageValidator().IsValidImage(data));
+    }
+
+    [Fact]
     public void PairedDeviceStorePersistsOptionalHostAndLegacyRecord()
     {
         using var directory = new TemporaryDirectory();
@@ -132,6 +210,9 @@ public sealed class SyncCoreTests
         Assert.Equal(1, result.FailureCount);
         Assert.Equal(0, result.SuccessCount);
     }
+
+    private static readonly byte[] OnePixelPng = Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
 
     private static ClipPayload TextPayload(string text) => new()
     {
