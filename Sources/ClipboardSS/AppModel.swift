@@ -14,7 +14,6 @@ final class AppModel: ObservableObject {
     @Published var screenshotReview: ScreenshotReview?
     @Published var editingImage: NSImage?
     @Published var editingClipID: UUID?
-    @Published var clipboardHasImage = false
     @Published var showPreferences = false
     @Published var clipboardShortcut: KeyboardShortcut
     @Published var screenshotShortcut: KeyboardShortcut?
@@ -56,7 +55,7 @@ final class AppModel: ObservableObject {
     private let screenTextCaptureService: any ScreenTextCapturing
     private let launchAtLogin: LaunchAtLoginControlling
     private let pasteboard: PasteboardClient
-    private var lastBroadcastClipID: UUID?
+    private let clipboardMonitor: ClipboardMonitor?
     var onClipboardShortcutChanged: ((KeyboardShortcut) -> Void)?
     var onScreenshotShortcutChanged: ((KeyboardShortcut?) -> Void)?
     var onScreenTextShortcutChanged: ((KeyboardShortcut?) -> Void)?
@@ -68,6 +67,8 @@ final class AppModel: ObservableObject {
     var onCloseRequested: (() -> Void)?
     var onScreenTextSelectionReady: ((ScreenTextCapture) -> Void)?
     var onReceivedFileCompleted: ((URL) -> Void)?
+    /// Called once per clip queued for sending to paired devices.
+    var onClipBroadcast: ((ClipItem) -> Void)?
 
     init(
         store: ClipStore,
@@ -83,9 +84,11 @@ final class AppModel: ObservableObject {
         clipSender: ClipSender,
         clipServer: ClipServer,
         fileSender: FileSender,
-        fileReceiver: FileReceiver
+        fileReceiver: FileReceiver,
+        clipboardMonitor: ClipboardMonitor? = nil
     ) {
         self.store = store
+        self.clipboardMonitor = clipboardMonitor
         self.writer = writer
         self.screenshotCaptureService = screenshotCaptureService
         self.ocrService = ocrService
@@ -108,7 +111,6 @@ final class AppModel: ObservableObject {
             as? Bool ?? true
         let forceCoachMarks = ProcessInfo.processInfo.environment["CLIPBOARDSS_FORCE_COACH_MARKS"] == "1"
         self.showCoachMarks = forceCoachMarks || !UserDefaults.standard.bool(forKey: Self.coachMarksCompletedDefaultsKey)
-        self.clipboardHasImage = pasteboard.readSnapshot().imageData != nil
         applyLaunchAtLoginPreference()
     }
 
@@ -299,15 +301,19 @@ final class AppModel: ObservableObject {
         Array(filteredClips.dropFirst(filteredClips.first?.id == latestClip?.id ? 1 : 0))
     }
 
+    /// Republishes the store's clips. Never broadcasts: deleting, expiring or
+    /// re-ordering clips is not a new copy.
     func refresh() {
-        let previousLatestID = clips.first?.id
-        clips = store.items
-        clipboardHasImage = pasteboard.readSnapshot().imageData != nil
-        guard let latest = clips.first, latest.id != previousLatestID, latest.id != lastBroadcastClipID else {
-            return
-        }
-        lastBroadcastClipID = latest.id
-        Task { await broadcast(clip: latest) }
+        let items = store.items
+        guard items != clips else { return }
+        clips = items
+    }
+
+    /// Sends a clip that was just captured locally (a genuine copy or a new
+    /// screenshot) to paired devices.
+    func broadcastCaptured(_ clip: ClipItem) {
+        onClipBroadcast?(clip)
+        Task { await broadcast(clip: clip) }
     }
 
     func showPairingCode() -> String {
@@ -679,6 +685,7 @@ final class AppModel: ObservableObject {
     func copy(_ clip: ClipItem) {
         do {
             try writer.copy(clip)
+            clipboardMonitor?.ignoreCurrentChange()
             refresh()
         } catch {
             lastError = error.localizedDescription
@@ -688,6 +695,7 @@ final class AppModel: ObservableObject {
     func paste(_ clip: ClipItem, mode: PasteRequest) {
         do {
             try writer.copy(clip)
+            clipboardMonitor?.ignoreCurrentChange()
             refresh()
             onPasteRequested?(mode)
         } catch {
@@ -734,7 +742,8 @@ final class AppModel: ObservableObject {
             do {
                 let url = try await screenshotCaptureService.captureRegion()
                 let imageData = try Data(contentsOf: url)
-                _ = try store.addImageData(imageData, fileExtension: "png", previewText: "Screenshot")
+                let clip = try store.addImageData(imageData, fileExtension: "png", previewText: "Screenshot")
+                broadcastCaptured(clip)
                 let blocks = try await ocrService.recognizeText(in: url)
                 screenshotReview = ScreenshotReview(imageURL: url, selection: OCRSelectionState(blocks: blocks))
                 refresh()
@@ -902,6 +911,8 @@ final class AppModel: ObservableObject {
         do {
             let clip = try store.addImageData(pngData, fileExtension: "png", previewText: "Edited Image")
             try writer.copy(clip)
+            clipboardMonitor?.ignoreCurrentChange()
+            broadcastCaptured(clip)
             self.editingImage = nil
             self.editingClipID = nil
             refresh()

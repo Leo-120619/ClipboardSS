@@ -34,6 +34,17 @@ class FakeWindowsClipboard implements WindowsClipboard {
   }
 }
 
+/// Mirrors the real Windows clipboard, which re-encodes whatever image it is
+/// given and hands back PNG bytes (CF_DIB/PNG) on the next read.
+class TranscodingWindowsClipboard extends FakeWindowsClipboard {
+  @override
+  Future<void> writeImage(Uint8List imageBytes) async {
+    writtenImages.add(imageBytes);
+    final decoded = img.decodeImage(imageBytes)!;
+    content = WindowsClipboardContent.image(img.encodePng(decoded));
+  }
+}
+
 void main() {
   late FakeWindowsClipboard clipboard;
   late List<ClipPayload> broadcasts;
@@ -135,6 +146,30 @@ void main() {
 
     await service.writeIncoming(incoming);
     expect(clipboard.writtenImages, hasLength(1));
+
+    await service.processClipboardChange();
+    expect(broadcasts, isEmpty);
+  });
+
+  test('receivedJpegIsNotRebroadcast', () async {
+    clipboard = TranscodingWindowsClipboard();
+    final service = makeService();
+    final jpeg = img.encodeJpg(img.Image(width: 2, height: 2));
+    final incoming = ClipPayload(
+      id: 'in-3',
+      type: ClipType.image,
+      createdAt: DateTime.now(),
+      imageBase64: base64Encode(jpeg),
+      imageExtension: 'jpg',
+      contentHash: ContentHasher.imageHash(jpeg),
+      sourceDeviceName: 'Mac',
+    );
+
+    await service.writeIncoming(incoming);
+    expect(clipboard.writtenImages, hasLength(1));
+    // The clipboard now holds PNG bytes that hash differently from the JPEG.
+    expect(ContentHasher.imageHash(clipboard.content!.pngBytes!),
+        isNot(ContentHasher.imageHash(jpeg)));
 
     await service.processClipboardChange();
     expect(broadcasts, isEmpty);

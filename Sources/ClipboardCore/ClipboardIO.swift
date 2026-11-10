@@ -66,30 +66,34 @@ public final class ClipboardMonitor {
 
     /// Treats the pasteboard's current contents as already seen, so the next
     /// `poll()` does not record them. Used when the app itself writes to the
-    /// pasteboard temporarily (for example when pasting a text snippet).
+    /// pasteboard (a received clip, a copy from history, a snippet paste).
     public func ignoreCurrentChange() {
         lastChangeCount = pasteboard.currentChangeCount()
     }
 
-    public func poll() throws {
+    /// Records a new local copy and returns its clip, or nil when the
+    /// pasteboard has not changed, the change was the app's own write, or the
+    /// item is sensitive or empty. Only the returned clip should be broadcast.
+    @discardableResult
+    public func poll() throws -> ClipItem? {
         let currentChangeCount = pasteboard.currentChangeCount()
         guard currentChangeCount != lastChangeCount else {
-            return
+            return nil
         }
 
         lastChangeCount = currentChangeCount
         let snapshot = pasteboard.readSnapshot()
         guard !snapshot.isSensitive else {
-            return
+            return nil
         }
 
         if let imageData = snapshot.imageData, !imageData.isEmpty {
-            try store.addImageData(imageData, fileExtension: "png", previewText: "Image")
-            return
+            return try store.addImageData(imageData, fileExtension: "png", previewText: "Image")
         }
 
         if let text = snapshot.text, !text.isEmpty {
-            try store.addText(text)
+            return try store.addText(text)
         }
+        return nil
     }
 }

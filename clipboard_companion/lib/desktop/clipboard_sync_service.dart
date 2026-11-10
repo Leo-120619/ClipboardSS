@@ -11,11 +11,11 @@ import 'windows_clipboard.dart';
 /// Watches the Windows clipboard and auto-broadcasts new content to paired
 /// devices; writes incoming clips back to the clipboard.
 ///
-/// Loop prevention mirrors the Mac app (AppModel.refresh's
-/// lastBroadcastClipID guard + ClipStore content-hash dedup): the hash of
-/// whatever this service last wrote to the clipboard is recorded before the
-/// write, so the resulting WM_CLIPBOARDUPDATE is ignored, and content that
-/// matches the newest stored clip is never re-broadcast.
+/// Loop prevention mirrors the Mac app (ClipboardMonitor.ignoreCurrentChange
+/// after app-originated writes + ClipStore content-hash dedup): the hash of
+/// whatever this service last wrote to the clipboard (as read back, for
+/// images) is recorded, so the resulting WM_CLIPBOARDUPDATE is ignored, and
+/// content that matches the newest stored clip is never re-broadcast.
 class ClipboardSyncService {
   ClipboardSyncService({
     required this.clipboard,
@@ -107,6 +107,14 @@ class ClipboardSyncService {
     }
     _lastWrittenHash = ContentHasher.imageHash(bytes);
     await clipboard.writeImage(bytes);
+    // Windows re-encodes images (a received JPEG reads back as PNG), so the
+    // change event must be matched against what the clipboard now holds.
+    try {
+      final png = (await clipboard.read())?.pngBytes;
+      if (png != null) _lastWrittenHash = ContentHasher.imageHash(png);
+    } catch (e) {
+      debugPrint('Clipboard read-back failed: $e');
+    }
   }
 
   void dispose() {

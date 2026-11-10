@@ -181,6 +181,24 @@ struct ClipboardSyncTests {
         #expect(pasteboard.lastImageData == png)
     }
 
+    @Test("ClipReceiver marks its pasteboard write as seen, so the monitor does not capture it")
+    @MainActor
+    func receivedClipIsNotCapturedAsLocalCopy() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: try syncTemporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+        let receiver = ClipReceiver(store: store, pasteboard: pasteboard, monitor: monitor)
+        let payload = ClipPayload(id: UUID(), type: .text, createdAt: Date(), text: "from phone", previewText: "from phone", contentHash: "ignored", sourceDeviceName: "Phone")
+
+        _ = try receiver.receive(payload)
+        #expect(pasteboard.changeCount == 1)
+        #expect(try monitor.poll() == nil)
+
+        pasteboard.changeCount += 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "typed", imageData: nil)
+        #expect(try monitor.poll()?.text == "typed")
+    }
+
     @Test("ClipSender broadcast")
     func clipSenderBroadcast() async throws {
         let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
@@ -294,16 +312,20 @@ private final class FakePasteboard: PasteboardClient, @unchecked Sendable {
 
     func clearContents() {
         clearCount += 1
+        changeCount += 1
         lastText = nil
         lastImageData = nil
+        snapshot = ClipboardSnapshot(text: nil, imageData: nil)
     }
 
     func writeText(_ text: String) {
         lastText = text
+        snapshot.text = text
     }
 
     func writeImageData(_ data: Data) {
         lastImageData = data
+        snapshot.imageData = data
     }
 }
 

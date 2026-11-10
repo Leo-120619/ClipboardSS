@@ -50,7 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 pairedStore: pairedStore,
                 transport: transport
             )
-            let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard)
+            let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+            let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard, monitor: monitor)
 
             let transferEventSink = FileTransferEventSink()
             let fileReceiver = FileReceiver(
@@ -92,12 +93,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 clipSender: clipSender,
                 clipServer: clipServer,
                 fileSender: fileSender,
-                fileReceiver: fileReceiver
+                fileReceiver: fileReceiver,
+                clipboardMonitor: monitor
             )
             transferEventSink.setHandler { [weak model] event in
                 Task { @MainActor in model?.handleReceiveEvent(event) }
             }
-            let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
             let windowController = ClipboardWindowController(model: model)
             let hotKeyManager = HotKeyManager()
 
@@ -197,7 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func pollClipboard() {
         do {
-            try clipboardMonitor?.poll()
+            if let clip = try clipboardMonitor?.poll() {
+                model?.broadcastCaptured(clip)
+            }
             try model?.cleanupExpiredClips()
             model?.collectTransferGarbage()
             model?.refresh()
