@@ -189,32 +189,43 @@ public final class ClipStore {
             return try refreshExistingClip(existing)
         }
 
+        let previousItems = items
         items.insert(clip, at: 0)
-        enforceHistoryCaps()
-        try save()
+        let evicted = evictForHistoryCaps()
+        do {
+            try save()
+        } catch {
+            // Nothing is lost: memory goes back to what clips.json still lists.
+            items = previousItems
+            throw error
+        }
+        // Only once clips.json no longer lists them; a failure leaves an orphan file, not a broken clip.
+        for clip in evicted {
+            try? deleteImageFileIfNeeded(for: clip)
+        }
         return clip
     }
 
-    /// Evicts the oldest unpinned clips (the tail of `items`) until at most
-    /// `maxUnpinnedClips` unpinned clips remain and images use at most `maxImageBytes`.
-    /// Pinned clips are never evicted. A clip whose image cannot be deleted is kept.
-    private func enforceHistoryCaps() {
+    /// Removes the oldest unpinned clips (the tail of `items`) from memory until at most
+    /// `maxUnpinnedClips` unpinned clips remain and images use at most `maxImageBytes`,
+    /// and returns them so their files can be deleted after the save. Pinned clips and
+    /// the newest clip are never evicted.
+    private func evictForHistoryCaps() -> [ClipItem] {
         var unpinnedCount = items.lazy.filter { !$0.isPinned }.count
         var imageBytes = items.reduce(0) { $0 + imageFileSize(of: $1) }
+        var evicted: [ClipItem] = []
         var index = items.count - 1
         while index > 0, unpinnedCount > maxUnpinnedClips || imageBytes > maxImageBytes {
             let clip = items[index]
             let overCount = unpinnedCount > maxUnpinnedClips
             if !clip.isPinned, overCount || clip.imagePath != nil {
-                let size = imageFileSize(of: clip)
-                if (try? deleteImageFileIfNeeded(for: clip)) != nil {
-                    items.remove(at: index)
-                    unpinnedCount -= 1
-                    imageBytes -= size
-                }
+                imageBytes -= imageFileSize(of: clip)
+                unpinnedCount -= 1
+                evicted.append(items.remove(at: index))
             }
             index -= 1
         }
+        return evicted
     }
 
     private func imageFileSize(of clip: ClipItem) -> Int {

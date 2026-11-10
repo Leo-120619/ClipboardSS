@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitorTimer: Timer?
     private var clipboardMonitor: ClipboardMonitor?
     private var receivedFileNotifications: ReceivedFileNotificationService?
+    private var lastCleanupError: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -213,8 +214,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             try model?.cleanupExpiredClips()
+            lastCleanupError = nil
         } catch {
-            print("Clip cleanup failed: \(error.localizedDescription)")
+            // A file that cannot be deleted fails every tick; report it once, not every 0.75 s.
+            let message = error.localizedDescription
+            if message != lastCleanupError {
+                lastCleanupError = message
+                print("Clip cleanup failed: \(message)")
+            }
         }
         model?.collectTransferGarbage()
         model?.refresh()

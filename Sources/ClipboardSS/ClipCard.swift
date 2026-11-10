@@ -226,8 +226,11 @@ final class ThumbnailCache {
     static let shared = ThumbnailCache()
     private let cache = NSCache<NSString, NSImage>()
 
-    init(countLimit: Int = 200) {
+    /// Bounded by decoded pixel bytes (default 128 MB) as well as count, since a few
+    /// Retina screenshots alone can be tens of MB each.
+    init(countLimit: Int = 200, totalCostLimit: Int = 128 * 1024 * 1024) {
         cache.countLimit = countLimit
+        cache.totalCostLimit = totalCostLimit
     }
 
     func image(at url: URL) -> NSImage? {
@@ -236,7 +239,14 @@ final class ThumbnailCache {
             return cached
         }
         guard let image = NSImage(contentsOf: url) else { return nil }
-        cache.setObject(image, forKey: key)
+        cache.setObject(image, forKey: key, cost: Self.decodedByteCost(of: image))
         return image
+    }
+
+    /// Approximate decoded size: 4 bytes per pixel of the largest representation.
+    static func decodedByteCost(of image: NSImage) -> Int {
+        let pixels = image.representations.map { $0.pixelsWide * $0.pixelsHigh }.max() ?? 0
+        let fallback = Int(image.size.width * image.size.height)
+        return max(pixels, fallback, 1) * 4
     }
 }

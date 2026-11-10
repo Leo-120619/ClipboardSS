@@ -174,6 +174,23 @@ struct ClipStoreTests {
         #expect(reloaded.items.map(\.id) == store.items.map(\.id))
     }
 
+    @Test("evicted image files are deleted only after the metadata save succeeds")
+    func evictionWaitsForSuccessfulSave() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 5_500))
+        let store = try ClipStore(storageDirectory: temporaryDirectory(), now: clock.now, maxUnpinnedClips: 1)
+        let old = try store.addImageData(Data([4, 4, 4, 4]), fileExtension: "png")
+        let oldURL = old.resolvedImageURL(baseDirectory: store.storageDirectory)
+        let metadataURL = store.storageDirectory.appendingPathComponent("clips.json")
+        try FileManager.default.removeItem(at: metadataURL)
+        try FileManager.default.createDirectory(at: metadataURL, withIntermediateDirectories: true)
+
+        clock.advance(by: 1)
+        #expect(throws: (any Error).self) { try store.addText("new") }
+
+        #expect(FileManager.default.fileExists(atPath: oldURL.path), "clips.json on disk still lists the old image")
+        #expect(store.items.map(\.id) == [old.id], "a failed save leaves memory as it was")
+    }
+
     @Test("defaults cap history at 500 unpinned clips and 500 MB of images")
     func historyCapDefaults() {
         #expect(ClipStore.defaultMaxUnpinnedClips == 500)

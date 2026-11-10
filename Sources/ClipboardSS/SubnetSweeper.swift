@@ -39,14 +39,22 @@ extension SubnetSweeper {
         let name: String
         let ip: String
         let mask: String
+        /// False for point-to-point links (VPN `utunN`, PPP), which are never swept.
+        var isBroadcastCapable = true
     }
 
-    /// The primary (default-route) interface's address, else the first candidate.
+    /// The LAN interface to sweep: the primary (default-route) interface when it is a
+    /// broadcast LAN with hosts to probe, else the next such candidate. Point-to-point
+    /// links are never chosen, so a full-tunnel VPN (primary `utunN`) does not aim the
+    /// sweep into the remote network or leave it with nothing to probe.
     static func selectInterface(_ candidates: [InterfaceAddress], primaryInterface: String?) -> InterfaceAddress? {
-        if let primaryInterface, let primary = candidates.first(where: { $0.name == primaryInterface }) {
+        let sweepable = candidates.filter {
+            $0.isBroadcastCapable && !hostAddresses(ownIPv4: $0.ip, netmask: $0.mask).isEmpty
+        }
+        if let primaryInterface, let primary = sweepable.first(where: { $0.name == primaryInterface }) {
             return primary
         }
-        return candidates.first
+        return sweepable.first
     }
 
     /// Name of the interface carrying the default IPv4 route, e.g. "en0" or "en7".
@@ -62,7 +70,7 @@ extension SubnetSweeper {
         return selected.map { ($0.ip, $0.mask) }
     }
 
-    /// Up, non-loopback IPv4 interfaces in system order.
+    /// Up, non-loopback IPv4 interfaces in system order, point-to-point ones flagged.
     static func activeIPv4Interfaces() -> [InterfaceAddress] {
         var result: [InterfaceAddress] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
@@ -103,7 +111,13 @@ extension SubnetSweeper {
             let maskString = mask.withUnsafeBufferPointer { buffer in
                 String(cString: buffer.baseAddress!)
             }
-            result.append(InterfaceAddress(name: name, ip: hostString, mask: maskString))
+            let isBroadcastCapable = (flags & IFF_BROADCAST) == IFF_BROADCAST && (flags & IFF_POINTOPOINT) == 0
+            result.append(InterfaceAddress(
+                name: name,
+                ip: hostString,
+                mask: maskString,
+                isBroadcastCapable: isBroadcastCapable
+            ))
         }
 
         return result

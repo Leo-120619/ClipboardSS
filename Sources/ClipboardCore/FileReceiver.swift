@@ -262,23 +262,27 @@ public actor FileReceiver {
         try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
         let safeName = (session.offer.fileName as NSString).lastPathComponent
         let destination = Self.uniqueDestination(directory: destinationDir, fileName: safeName.isEmpty ? "download" : safeName)
-        try FileManager.default.moveItem(at: session.tempURL, to: destination)
-        if !Self.applyQuarantine(to: destination, now: now()) {
-            logToFile("Could not set the quarantine attribute on a received file (errno \(errno))")
+        // Quarantined before the move, so the file is never visible at its destination without it.
+        do {
+            try Self.applyQuarantine(to: session.tempURL, now: now())
+        } catch {
+            logToFile("Could not set the quarantine attribute on a received file: \(error)")
         }
+        try FileManager.default.moveItem(at: session.tempURL, to: destination)
         return destination
     }
 
     /// Marks a received file the way browsers mark downloads, so Gatekeeper checks it
-    /// before it is opened or run. Returns false if the attribute could not be set.
-    @discardableResult
-    public static func applyQuarantine(to url: URL, now: Date) -> Bool {
+    /// before it is opened or run.
+    public static func applyQuarantine(to url: URL, now: Date) throws {
         let timestamp = String(UInt64(max(0, now.timeIntervalSince1970)), radix: 16)
         let value = "0081;\(timestamp);ClipboardSS;\(UUID().uuidString)"
-        let result = value.withCString { bytes in
-            setxattr(url.path, "com.apple.quarantine", bytes, strlen(bytes), 0, 0)
+        let failureCode: Int32? = value.withCString { bytes in
+            setxattr(url.path, "com.apple.quarantine", bytes, strlen(bytes), 0, 0) == 0 ? nil : errno
         }
-        return result == 0
+        if let failureCode {
+            throw POSIXError(POSIXErrorCode(rawValue: failureCode) ?? .EIO)
+        }
     }
 
     /// `fileName` in `directory`, or "name (1).ext", "name (2).ext", … if it is taken.

@@ -55,4 +55,20 @@ struct SubnetSweeperTests {
         #expect(SubnetSweeper.selectInterface(Array(candidates.reversed()), primaryInterface: "utun3")?.name == "en7")
         #expect(SubnetSweeper.selectInterface([], primaryInterface: "en0") == nil)
     }
+
+    @Test("a VPN tunnel primary is skipped for the next LAN interface that has hosts")
+    func tunnelPrimaryFallsBackToLAN() {
+        let candidates = [
+            SubnetSweeper.InterfaceAddress(name: "utun4", ip: "10.8.0.2", mask: "255.255.255.255", isBroadcastCapable: false),
+            SubnetSweeper.InterfaceAddress(name: "utun5", ip: "172.16.4.9", mask: "255.255.0.0", isBroadcastCapable: false),
+            SubnetSweeper.InterfaceAddress(name: "en5", ip: "192.168.9.9", mask: "255.255.255.255"),
+            SubnetSweeper.InterfaceAddress(name: "en0", ip: "192.168.0.4", mask: "255.255.255.0"),
+        ]
+        // Point-to-point tunnels are never swept, even as the primary; a broadcast
+        // interface with no host range (a /32) is passed over too.
+        #expect(SubnetSweeper.selectInterface(candidates, primaryInterface: "utun4")?.name == "en0")
+        #expect(SubnetSweeper.selectInterface(candidates, primaryInterface: "utun5")?.name == "en0")
+        #expect(SubnetSweeper.selectInterface(candidates, primaryInterface: "en5")?.name == "en0")
+        #expect(SubnetSweeper.selectInterface(Array(candidates.prefix(2)), primaryInterface: "utun5") == nil)
+    }
 }
