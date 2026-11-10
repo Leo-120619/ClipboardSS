@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -6,12 +7,16 @@ import 'models.dart';
 import 'replay_guard.dart';
 
 class PairingSession {
+  /// Length of the random salt the initiator commits with (pairing v2).
+  static const saltLength = 16;
+
   late SimpleKeyPair _privateKey;
   late List<int> _ephemeralPublicKey;
 
   List<int> get ephemeralPublicKey => _ephemeralPublicKey;
 
   static final _x25519 = X25519();
+  static final _sha256 = Sha256();
   static final _hkdfPairKey = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   static final _hkdfCodeKey = Hkdf(hmac: Hmac.sha256(), outputLength: 4);
 
@@ -21,13 +26,46 @@ class PairingSession {
     _ephemeralPublicKey = pk.bytes;
   }
 
+  /// A session from a fixed X25519 private key; used to reproduce the pinned vector.
+  @visibleForTesting
+  Future<void> initFromPrivateKey(List<int> privateKey) async {
+    _privateKey = await _x25519.newKeyPairFromSeed(privateKey);
+    final pk = await _privateKey.extractPublicKey();
+    _ephemeralPublicKey = pk.bytes;
+  }
+
+  static List<int> randomSalt() {
+    final random = Random.secure();
+    return List<int>.generate(saltLength, (_) => random.nextInt(256));
+  }
+
+  /// `SHA256(initiatorPublicKey || salt)`: sent in `/v1/pair/start` so the initiator's
+  /// key stays hidden until the target has answered with its own.
+  static Future<List<int>> commitment(
+    List<int> publicKey,
+    List<int> salt,
+  ) async => (await _sha256.hash([...publicKey, ...salt])).bytes;
+
+  /// Constant-time check that [publicKey] and [salt] open [commitment].
+  static Future<bool> commitmentMatches(
+    List<int> commitment,
+    List<int> publicKey,
+    List<int> salt,
+  ) async => constantTimeEquals(
+    commitment,
+    await PairingSession.commitment(publicKey, salt),
+  );
+
+  /// Derives `pairKey` and the 6-digit `confirmCode` both screens show. HKDF `info`
+  /// is the transcript `code || initiatorPublicKey || targetPublicKey`.
   Future<PairingResult> completePairing({
     required List<int> remotePublicKeyBytes,
-    required String initiatorId,
-    required String targetId,
     required bool isInitiator,
     required String code,
   }) async {
+    if (remotePublicKeyBytes.length != 32) {
+      throw ArgumentError('An X25519 public key must be 32 bytes.');
+    }
     final remotePublicKey = SimplePublicKey(
       remotePublicKeyBytes,
       type: KeyPairType.x25519,
@@ -36,7 +74,17 @@ class PairingSession {
       keyPair: _privateKey,
       remotePublicKey: remotePublicKey,
     );
-    final info = utf8.encode(code);
+    final initiatorPublicKey = isInitiator
+        ? _ephemeralPublicKey
+        : remotePublicKeyBytes;
+    final targetPublicKey = isInitiator
+        ? remotePublicKeyBytes
+        : _ephemeralPublicKey;
+    final info = [
+      ...utf8.encode(code),
+      ...initiatorPublicKey,
+      ...targetPublicKey,
+    ];
 
     final pairKey = await _hkdfPairKey.deriveKey(
       secretKey: sharedSecret,
@@ -82,14 +130,18 @@ class PairingSession {
       initiatorId,
       targetId,
     );
-    // Constant-time: inspect every byte regardless of where a mismatch occurs.
-    if (proof.length != expectedProof.length) return false;
-    var diff = 0;
-    for (int i = 0; i < proof.length; i++) {
-      diff |= proof[i] ^ expectedProof[i];
-    }
-    return diff == 0;
+    return constantTimeEquals(proof, expectedProof);
   }
+}
+
+/// Compares two byte lists, inspecting every byte regardless of where a mismatch occurs.
+bool constantTimeEquals(List<int> left, List<int> right) {
+  if (left.length != right.length) return false;
+  var diff = 0;
+  for (int i = 0; i < left.length; i++) {
+    diff |= left[i] ^ right[i];
+  }
+  return diff == 0;
 }
 
 class PairingResult {

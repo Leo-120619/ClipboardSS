@@ -16,6 +16,7 @@ import 'core/clip_sender.dart';
 import 'core/content_hasher.dart';
 import 'core/file_transfer_ui.dart';
 import 'core/models.dart';
+import 'core/pairing_coordinator.dart' show PairingComparison;
 import 'desktop/clipboard_sync_service.dart';
 import 'desktop/desktop_shell.dart';
 import 'desktop/windows_clipboard.dart';
@@ -1432,6 +1433,8 @@ class _PairingCodeCard extends StatefulWidget {
 }
 
 class _PairingCodeCardState extends State<_PairingCodeCard> {
+  String? _selectedPeerId;
+
   @override
   void initState() {
     super.initState();
@@ -1462,8 +1465,16 @@ class _PairingCodeCardState extends State<_PairingCodeCard> {
     final state = context.watch<AppState>();
     final theme = Theme.of(context);
     final hostCode = state.hostCode;
+    final hostComparison = state.hostComparison;
+    final joinComparison = state.joinComparison;
+    final candidates = state.pairingCandidates;
+    final selectedPeer = candidates
+        .where((peer) => peer.id == _selectedPeerId)
+        .firstOrNull;
     final canConnect =
-        widget.codeController.text.length == 6 && !state.joinInProgress;
+        widget.codeController.text.length == 6 &&
+        selectedPeer != null &&
+        !state.joinInProgress;
 
     return Card(
       child: Padding(
@@ -1478,67 +1489,124 @@ class _PairingCodeCardState extends State<_PairingCodeCard> {
               ),
             ),
             const SizedBox(height: 16),
-            if (hostCode != null) ...[
-              Text(
-                'Show this code on the other device',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.primary,
-                  fontWeight: FontWeight.w600,
+            if (hostComparison != null)
+              PairingComparisonPanel(
+                localName: state.identity.name,
+                comparison: hostComparison,
+                onConfirm: state.confirmHostedPairing,
+                onCancel: state.cancelHostedPairing,
+              )
+            else if (joinComparison != null)
+              PairingComparisonPanel(
+                localName: state.identity.name,
+                comparison: joinComparison,
+                onConfirm: state.confirmJoin,
+                onCancel: state.cancelJoin,
+              )
+            else ...[
+              if (hostCode != null) ...[
+                Text(
+                  'Enter this code on the other device',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                hostCode,
-                style: theme.textTheme.headlineMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 8,
-                  color: theme.colorScheme.onSurface,
+                const SizedBox(height: 8),
+                Text(
+                  hostCode,
+                  style: theme.textTheme.headlineMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 8,
+                    color: theme.colorScheme.onSurface,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton(
-                  onPressed: state.stopHosting,
-                  child: const Text('Stop showing code'),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: state.stopHosting,
+                    child: const Text('Stop showing code'),
+                  ),
                 ),
-              ),
-            ] else ...[
-              FilledButton.icon(
-                onPressed: state.startHosting,
-                icon: const Icon(Icons.password_rounded, size: 18),
-                label: const Text('Show pairing code'),
-              ),
-            ],
-            const SizedBox(height: 20),
-            TextField(
-              controller: widget.codeController,
-              keyboardType: TextInputType.number,
-              maxLength: 6,
-              inputFormatters: [
-                FilteringTextInputFormatter.digitsOnly,
-                LengthLimitingTextInputFormatter(6),
+              ] else ...[
+                FilledButton.icon(
+                  onPressed: state.startHosting,
+                  icon: const Icon(Icons.password_rounded, size: 18),
+                  label: const Text('Show pairing code'),
+                ),
+                const SizedBox(height: 20),
+                DropdownButtonFormField<String>(
+                  key: ValueKey(selectedPeer?.id),
+                  initialValue: selectedPeer?.id,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Pair with',
+                    border: OutlineInputBorder(),
+                  ),
+                  hint: Text(
+                    candidates.isEmpty
+                        ? 'No devices found yet'
+                        : 'Choose a device',
+                  ),
+                  items: [
+                    for (final peer in candidates)
+                      DropdownMenuItem(
+                        value: peer.id,
+                        child: Text(
+                          '${peer.name} (${peer.host})',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
+                  onChanged: (id) => setState(() => _selectedPeerId = id),
+                ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: state.scanInProgress
+                        ? null
+                        : state.scanForDevices,
+                    icon: const Icon(Icons.wifi_find_rounded, size: 18),
+                    label: Text(
+                      state.scanInProgress ? 'Scanning…' : 'Scan network',
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: widget.codeController,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(6),
+                  ],
+                  decoration: const InputDecoration(
+                    labelText: '6-digit code',
+                    counterText: '',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: canConnect
+                      ? () => state.joinWithCode(
+                          widget.codeController.text,
+                          selectedPeer,
+                        )
+                      : null,
+                  icon: state.joinInProgress
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.link_rounded, size: 18),
+                  label: const Text('Connect'),
+                ),
               ],
-              decoration: const InputDecoration(
-                labelText: '6-digit code',
-                counterText: '',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: canConnect
-                  ? () => state.joinWithCode(widget.codeController.text)
-                  : null,
-              icon: state.joinInProgress
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.link_rounded, size: 18),
-              label: const Text('Connect'),
-            ),
+            ],
             if (state.lastError != null) ...[
               const SizedBox(height: 12),
               Text(
@@ -1552,6 +1620,94 @@ class _PairingCodeCardState extends State<_PairingCodeCard> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Both device names and the 6-digit number, with Confirm / Cancel.
+class PairingComparisonPanel extends StatelessWidget {
+  final String localName;
+  final PairingComparison comparison;
+  final VoidCallback onConfirm;
+  final VoidCallback onCancel;
+
+  const PairingComparisonPanel({
+    super.key,
+    required this.localName,
+    required this.comparison,
+    required this.onConfirm,
+    required this.onCancel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          '$localName ↔ ${comparison.deviceName}',
+          style: theme.textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Check that ${comparison.deviceName} shows the same number:',
+          style: theme.textTheme.bodySmall,
+        ),
+        const SizedBox(height: 8),
+        Semantics(
+          label:
+              'Confirmation number ${comparison.confirmCode.split('').join(' ')}',
+          excludeSemantics: true,
+          child: Text(
+            comparison.confirmCode,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.displayMedium?.copyWith(
+              fontWeight: FontWeight.bold,
+              letterSpacing: 8,
+              fontFeatures: const [FontFeature.tabularFigures()],
+              color: theme.colorScheme.onSurface,
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (comparison.localConfirmed)
+          Row(
+            children: [
+              const SizedBox.square(
+                dimension: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Waiting for ${comparison.deviceName} to confirm…',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+            ],
+          ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: onCancel,
+                child: const Text('Cancel'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: FilledButton(
+                onPressed: comparison.localConfirmed ? null : onConfirm,
+                child: const Text('Numbers match'),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 }

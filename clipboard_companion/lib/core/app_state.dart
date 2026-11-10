@@ -330,6 +330,7 @@ class AppState extends ChangeNotifier {
   bool _discoveryRunning = false;
 
   StreamSubscription<FileTransferReceiveEvent>? _transferSub;
+  StreamSubscription<List<Peer>>? _peersSub;
   Timer? _transferGcTimer;
   Timer? _livenessTimer;
   http.Client? _livenessClient;
@@ -371,6 +372,32 @@ class AppState extends ChangeNotifier {
 
   String? get hostCode =>
       _coreNetworkingStarted ? pairingCoordinator.hostCode : null;
+
+  /// The number to compare while this device is the pairing target.
+  PairingComparison? get hostComparison =>
+      _coreNetworkingStarted ? pairingCoordinator.hostComparison : null;
+
+  /// The number to compare while this device is the pairing initiator.
+  PairingComparison? get joinComparison =>
+      _coreNetworkingStarted ? pairingCoordinator.joinComparison : null;
+
+  /// Devices found by the last "Scan network" (subnet sweep).
+  List<Peer> sweptPeers = const [];
+  bool scanInProgress = false;
+
+  /// Devices the user can pick to pair with: discovered, not paired yet, and on v2.
+  List<Peer> get pairingCandidates {
+    if (!_coreNetworkingStarted) return const [];
+    final paired = {
+      for (final device in pairedStore.devices) canonicalDeviceId(device.id),
+    };
+    return composeJoinCandidates(peerBrowser.peers, sweptPeers)
+        .where(
+          (peer) =>
+              !peer.needsUpdate && !paired.contains(canonicalDeviceId(peer.id)),
+        )
+        .toList();
+  }
 
   bool isReady = false;
   bool isStartingSync = false;
@@ -597,6 +624,10 @@ class AppState extends ChangeNotifier {
       fileReceiver = nextFileReceiver;
       clipServer = nextClipServer;
       _transferSub = fileReceiver.events.listen(handleReceiveEvent);
+      // The pairing card shows the hosted code, the number to compare and the
+      // devices to pair with; refresh it when any of them changes.
+      pairingCoordinator.onHostingChanged = notifyListeners;
+      _peersSub = peerBrowser.peersStream.listen((_) => notifyListeners());
       _transferGcTimer = Timer.periodic(
         const Duration(seconds: 30),
         (_) => fileReceiver.garbageCollect(),
@@ -629,7 +660,22 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> joinWithCode(String code) async {
+  /// Sweeps the local subnet for devices mDNS missed, so the user can pick one.
+  Future<void> scanForDevices() async {
+    if (scanInProgress) return;
+    scanInProgress = true;
+    notifyListeners();
+    try {
+      sweptPeers = await SubnetSweeper.sweep();
+    } finally {
+      scanInProgress = false;
+      notifyListeners();
+    }
+  }
+
+  /// Starts pairing with the one device the user selected. On success both
+  /// screens show a number; the user then calls [confirmJoin] or [cancelJoin].
+  Future<void> joinWithCode(String code, Peer peer) async {
     final normalizedCode = code.trim();
     if (!RegExp(r'^\d{6}$').hasMatch(normalizedCode)) {
       lastError = 'Enter a 6-digit pairing code.';
@@ -640,52 +686,50 @@ class AppState extends ChangeNotifier {
     joinInProgress = true;
     lastError = null;
     notifyListeners();
-
     try {
-      final mdnsCandidates = peerBrowser.peers;
-      if (await _tryPairing(mdnsCandidates, normalizedCode) ||
-          lastError == alreadyPairedMessage) {
-        return;
-      }
-
-      final sweptCandidates = composeJoinCandidates(
-        mdnsCandidates,
-        await SubnetSweeper.sweep(),
-      );
-      if (await _tryPairing(sweptCandidates, normalizedCode) ||
-          lastError == alreadyPairedMessage) {
-        return;
-      }
-
-      lastError =
-          'No device accepted that code. Make sure the other device shows a code on the same Wi-Fi.';
+      await pairingCoordinator.startPairing(peer, normalizedCode);
+    } catch (e) {
+      lastError = joinErrorMessage(e);
     } finally {
       joinInProgress = false;
       notifyListeners();
     }
   }
 
+  /// The user confirmed the numbers match on this device.
+  Future<void> confirmJoin() async {
+    joinInProgress = true;
+    lastError = null;
+    notifyListeners();
+    try {
+      await pairingCoordinator.confirmPairing();
+      unawaited(refreshDeviceLiveness());
+    } catch (e) {
+      lastError = joinErrorMessage(e);
+    } finally {
+      joinInProgress = false;
+      notifyListeners();
+    }
+  }
+
+  void cancelJoin() => pairingCoordinator.cancelPairing();
+
+  void confirmHostedPairing() => pairingCoordinator.confirmHostedPairing();
+
+  void cancelHostedPairing() => pairingCoordinator.cancelHostedPairing();
+
   static const alreadyPairedMessage =
       'Remove the existing pairing on the other device first';
 
-  Future<bool> _tryPairing(List<Peer> candidates, String code) async {
-    for (final peer in candidates) {
-      try {
-        await pairingCoordinator.startPairing(peer, code);
-        lastError = null;
-        notifyListeners();
-        unawaited(refreshDeviceLiveness());
-        return true;
-      } on PairingAlreadyPairedException {
-        // The target accepted the code but already knows this device; its code is now spent.
-        lastError = alreadyPairedMessage;
-        return false;
-      } catch (_) {
-        // Wrong code, not in hosting mode, or unreachable: try the next candidate.
-      }
-    }
-    return false;
-  }
+  static String joinErrorMessage(Object error) => switch (error) {
+    PairingAlreadyPairedException() => alreadyPairedMessage,
+    PairingTimedOutException() =>
+      'The other device did not confirm in time. Show a new code and try again.',
+    PairingNotAcceptedException() =>
+      'The other device did not accept. Check the code, or show a new one, and try again.',
+    _ =>
+      'Could not reach that device. Make sure it is showing a code on the same Wi-Fi.',
+  };
 
   Future<void> pauseSyncServices() {
     _resumeGate.paused();
@@ -1270,6 +1314,7 @@ class AppState extends ChangeNotifier {
     _livenessTimer?.cancel();
     _livenessClient?.close();
     unawaited(_transferSub?.cancel());
+    unawaited(_peersSub?.cancel());
     if (_coreNetworkingStarted) {
       unawaited(peerBrowser.stop());
       unawaited(peerAdvertiser.stop());

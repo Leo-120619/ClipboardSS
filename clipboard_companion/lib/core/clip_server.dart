@@ -126,6 +126,9 @@ class ClipServer {
       );
     });
     router.post('/v1/pair/start', _handlePairStart);
+    router.post('/v1/pair/reveal', _handlePairReveal);
+    // The target may hold this up to 60 s for its user; shelf has no request
+    // deadline, and clients use a 75 s timeout for it.
     router.post('/v1/pair/confirm', _handlePairConfirm);
     router.post(LivenessPing.path, _handlePing);
     router.post('/v1/clip', _handleClip);
@@ -161,7 +164,7 @@ class ClipServer {
 
       final initiatorId = body['deviceId'] as String;
       final initiatorName = body['deviceName'] as String;
-      final initiatorPubKeyBase64 = body['ephemeralPublicKey'] as String;
+      final commitmentBase64 = body['commitment'] as String;
 
       final connInfo =
           request.context['shelf.io.connection_info'] as HttpConnectionInfo?;
@@ -169,7 +172,7 @@ class ClipServer {
       final targetPubKeyBase64 = await pairingCoordinator.handlePairStart(
         initiatorId,
         initiatorName,
-        initiatorPubKeyBase64,
+        commitmentBase64,
         remoteHost,
       );
 
@@ -194,6 +197,33 @@ class ClipServer {
     }
   }
 
+  Future<Response> _handlePairReveal(Request request) async {
+    try {
+      final body = await _readJsonCapped(request);
+      final outcome = await pairingCoordinator.handlePairReveal(
+        body['deviceId'] as String,
+        body['ephemeralPublicKey'] as String,
+        body['salt'] as String,
+      );
+      switch (outcome) {
+        case PairRevealOutcome.ok:
+          return Response.ok(
+            jsonEncode({'status': 'ok'}),
+            headers: {'Content-Type': 'application/json'},
+          );
+        case PairRevealOutcome.rejected:
+          return Response(401, body: 'Unauthorized');
+        case PairRevealOutcome.invalid:
+          return Response(400, body: 'Bad request');
+      }
+    } on BodyTooLargeException {
+      return _payloadTooLarge();
+    } catch (e) {
+      developer.log('Pair reveal error: ${e.runtimeType}', name: 'ClipServer');
+      return Response(400, body: 'Bad request');
+    }
+  }
+
   Future<Response> _handlePairConfirm(Request request) async {
     try {
       final body = await _readJsonCapped(request);
@@ -207,7 +237,16 @@ class ClipServer {
       );
       switch (outcome) {
         case PairConfirmOutcome.paired:
-          return Response.ok('OK');
+          return Response.ok(
+            jsonEncode({'status': 'ok'}),
+            headers: {'Content-Type': 'application/json'},
+          );
+        case PairConfirmOutcome.timedOut:
+          return Response(
+            408,
+            body: jsonEncode({'status': 'timeout'}),
+            headers: {'Content-Type': 'application/json'},
+          );
         case PairConfirmOutcome.alreadyPaired:
           return Response(
             409,
