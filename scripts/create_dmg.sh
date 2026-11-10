@@ -46,4 +46,6 @@ hdiutil create \
   "$DMG_NAME"
 
 echo "✅ Successfully created DMG at $DMG_NAME"
-echo "You can now share this DMG file. Users can open it and drag $APP_NAME to their Applications folder."
+echo "Users can open it and drag $APP_NAME to their Applications folder."
+echo "Note: the app is self-signed and not notarized, so other Macs will show a Gatekeeper"
+echo "warning (and may refuse to open it) until the app is signed with a Developer ID and notarized."
