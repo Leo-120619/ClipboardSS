@@ -250,6 +250,7 @@ struct DropDevicePicker: View {
                     model.cancelPendingSend()
                     dismiss()
                 }
+                .keyboardShortcut(.cancelAction)
             }
             .padding()
 

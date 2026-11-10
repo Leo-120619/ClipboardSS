@@ -130,6 +130,12 @@ public enum ShareInbox {
 
     // MARK: - Helpers
 
+    /// True when `url` itself (not a symlink target) is a regular file.
+    public static func isRegularFile(_ url: URL) -> Bool {
+        let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
+        return type == .typeRegular
+    }
+
     private static func isRegularDirectory(_ url: URL) -> Bool {
         let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         return values?.isDirectory == true && values?.isSymbolicLink != true
@@ -144,8 +150,7 @@ public enum ShareInbox {
         }
         let url = dir.appendingPathComponent(name, isDirectory: false)
         guard url.deletingLastPathComponent().standardizedFileURL.path == dir.standardizedFileURL.path,
-              let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType,
-              type == .typeRegular else {
+              isRegularFile(url) else {
             return nil
         }
         return url

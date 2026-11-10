@@ -57,4 +57,18 @@ struct ShareInboxTests {
 
         #expect(ShareInbox.pendingDrops(in: outbox).isEmpty)
     }
+
+    @Test("a tampered drop is skipped while a valid sibling is returned")
+    func tamperedDropSkippedValidSiblingReturned() throws {
+        let valid = try makeDrop(names: ["photo.png"]) { dir in
+            try Data("png".utf8).write(to: dir.appendingPathComponent("photo.png"))
+        }
+        _ = try makeDrop(names: ["ok.txt", "../ok.txt"]) { dir in
+            try Data("ok".utf8).write(to: dir.appendingPathComponent("ok.txt"))
+        }
+
+        let drops = ShareInbox.pendingDrops(in: outbox)
+
+        #expect(drops.map { $0.directory.standardizedFileURL } == [valid.standardizedFileURL])
+    }
 }

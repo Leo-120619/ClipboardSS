@@ -32,8 +32,11 @@ struct FileTransferState: Identifiable, Equatable {
 struct PendingSend: Identifiable, Equatable {
     let id = UUID()
     let files: [URL]
-    /// True for files queued by the share extension (sent via the share queue).
-    var isShare = false
+    /// Outbox drops (`AppModel.shareKey`) this picker offers. Only these are sent or discarded when it
+    /// closes; drops that arrive while it is open wait for the next offer.
+    var shareDrops: [String] = []
+
+    var isShare: Bool { !shareDrops.isEmpty }
 }
 
 /// Thread-safe cancellation flag polled by `FileSender.sendFile(isCancelled:)`.

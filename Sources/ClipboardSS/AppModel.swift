@@ -36,7 +36,12 @@ final class AppModel: ObservableObject {
     /// Paired devices whose `/v1/id` probe advertised an older wire protocol.
     @Published private(set) var outdatedDeviceIds: Set<UUID> = []
     @Published private(set) var transfers: [FileTransferState] = []
-    @Published var pendingSend: PendingSend?
+    @Published var pendingSend: PendingSend? {
+        // However the picker closes (button or sheet binding), offer any shares still waiting.
+        didSet {
+            if pendingSend == nil, oldValue != nil { processPendingShares() }
+        }
+    }
 
     let store: ClipStore
     let pairingCoordinator: PairingCoordinator
@@ -295,11 +300,7 @@ final class AppModel: ObservableObject {
             return false
         }
 
-        if match.needsUpdate {
-            outdatedDeviceIds.insert(id)
-        } else {
-            outdatedDeviceIds.remove(id)
-        }
+        recordProtocolStatus(id, needsUpdate: match.needsUpdate)
 
         do {
             try await pairingCoordinator.pairedStore.updateHost(id, host: match.host)
@@ -310,6 +311,15 @@ final class AppModel: ObservableObject {
         } catch {
             if reportError { lastError = error.localizedDescription }
             return false
+        }
+    }
+
+    /// Records whether a probe found the device on an older wire protocol.
+    func recordProtocolStatus(_ id: UUID, needsUpdate: Bool) {
+        if needsUpdate {
+            outdatedDeviceIds.insert(id)
+        } else {
+            outdatedDeviceIds.remove(id)
         }
     }
 
@@ -559,29 +569,42 @@ final class AppModel: ObservableObject {
     }
 
     func completePendingSend(to deviceId: UUID) {
-        let pending = pendingSend
-        pendingSend = nil
-        if pending?.isShare == true {
-            sendPendingShares(to: deviceId)
-            return
+        guard let pending = pendingSend else { return }
+        if pending.isShare {
+            sendPendingShares(to: deviceId, only: Set(pending.shareDrops))
+        } else {
+            for url in pending.files { sendFile(url: url, to: deviceId) }
         }
-        for url in pending?.files ?? [] { sendFile(url: url, to: deviceId) }
+        pendingSend = nil
     }
 
-    /// Dismisses the device picker. Cancelling a share discards it: the user chose not to send.
+    /// Dismisses the device picker. Cancelling a share discards the drops it showed: the user
+    /// chose not to send them. Drops that arrived while it was open are offered next.
     func cancelPendingSend() {
-        if pendingSend?.isShare == true {
-            pendingShares.forEach(ShareInbox.remove)
-            pendingShares = []
+        if let pending = pendingSend, pending.isShare {
+            let shown = Set(pending.shareDrops)
+            let discarded = pendingShares.filter { shown.contains(Self.shareKey($0)) }
+            discarded.forEach(ShareInbox.remove)
+            pendingShares.removeAll { shown.contains(Self.shareKey($0)) }
         }
         pendingSend = nil
+    }
+
+    /// Identity of an outbox drop: its folder name, unique within the one outbox. Full paths
+    /// are unreliable keys because listings may spell `/var` as `/private/var`.
+    nonisolated static func shareKey(_ directory: URL) -> String {
+        directory.lastPathComponent
+    }
+
+    private nonisolated static func shareKey(_ drop: ShareInbox.PendingDrop) -> String {
+        shareKey(drop.directory)
     }
 
     /// Queues complete drops from the share extension. Drops already queued are ignored, so
     /// callers can pass the whole outbox on every poll.
     func enqueueShares(_ drops: [ShareInbox.PendingDrop], now: Date = Date()) {
-        let known = Set(pendingShares.map { $0.directory.standardizedFileURL })
-        let fresh = drops.filter { !known.contains($0.directory.standardizedFileURL) }
+        let known = Set(pendingShares.map(Self.shareKey))
+        let fresh = drops.filter { !known.contains(Self.shareKey($0)) }
         guard !fresh.isEmpty else { return }
         pendingShares.append(contentsOf: fresh)
         processPendingShares(now: now, reportUnreachable: hasCompletedLivenessPass)
@@ -603,7 +626,10 @@ final class AppModel: ObservableObject {
         case 1:
             sendPendingShares(to: targets[0].id)
         default:
-            pendingSend = PendingSend(files: pendingShares.flatMap(\.fileURLs), isShare: true)
+            pendingSend = PendingSend(
+                files: pendingShares.flatMap(\.fileURLs),
+                shareDrops: pendingShares.map(Self.shareKey)
+            )
             onShareNeedsAttention?()
         }
     }
@@ -612,13 +638,14 @@ final class AppModel: ObservableObject {
         let expired = pendingShares.filter { now.timeIntervalSince($0.createdAt) > Self.shareMaxAge }
         guard !expired.isEmpty else { return }
         expired.forEach(ShareInbox.remove)
-        let expiredDirs = Set(expired.map(\.directory))
-        pendingShares.removeAll { expiredDirs.contains($0.directory) }
+        let expiredDirs = Set(expired.map(Self.shareKey))
+        pendingShares.removeAll { expiredDirs.contains(Self.shareKey($0)) }
     }
 
-    /// Stages every queued share and hands it to `FileSender`; the outbox drop is removed only
-    /// after that hand-off. An unreachable or outdated device leaves the queue untouched.
-    private func sendPendingShares(to deviceId: UUID) {
+    /// Stages queued shares (all, or only the drops in `only`) and hands them to `FileSender`;
+    /// each outbox drop is removed only after that hand-off. An unreachable or outdated
+    /// device leaves the queue untouched.
+    private func sendPendingShares(to deviceId: UUID, only: Set<String>? = nil) {
         guard resolvePeer(for: deviceId) != nil else {
             lastError = "That device is not reachable right now."
             return
@@ -627,8 +654,9 @@ final class AppModel: ObservableObject {
             lastError = ProtocolMismatch.updateOtherDeviceMessage
             return
         }
-        let shares = pendingShares
-        pendingShares = []
+        let selected: (ShareInbox.PendingDrop) -> Bool = { only?.contains(Self.shareKey($0)) ?? true }
+        let shares = pendingShares.filter(selected)
+        pendingShares.removeAll(where: selected)
         for share in shares {
             for source in share.fileURLs {
                 guard let staged = stageSharedFile(source) else { continue }
@@ -642,6 +670,8 @@ final class AppModel: ObservableObject {
 
     /// Moves (or copies) a shared file into its own `ShareStaging/<uuid>/` folder.
     private func stageSharedFile(_ source: URL) -> URL? {
+        // Re-checked at use: the file may have been swapped for a symlink since it was listed.
+        guard ShareInbox.isRegularFile(source) else { return nil }
         let destDir = shareStagingDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let dest = destDir.appendingPathComponent(source.lastPathComponent)
         do {

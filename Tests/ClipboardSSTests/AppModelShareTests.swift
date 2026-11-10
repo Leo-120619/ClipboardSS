@@ -61,25 +61,79 @@ struct AppModelShareTests {
         #expect(!fixture.model.transfers.contains { $0.isActive })
         #expect(fixture.stagedEntries().isEmpty)
     }
+
+    @Test("a reachable device that needs an update keeps the drop queued")
+    func outdatedDeviceKeepsDropQueued() async throws {
+        let fixture = try await ShareFixture()
+        let drop = try fixture.makeDrop()
+        fixture.model.recordProtocolStatus(fixture.deviceId, needsUpdate: true)
+        fixture.model.updateOnlineDeviceIds([fixture.deviceId])
+
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+
+        #expect(FileManager.default.fileExists(atPath: drop.path))
+        #expect(fixture.model.transfers.isEmpty)
+        #expect(fixture.model.pendingShares.count == 1)
+    }
+
+    @Test("cancelling the picker discards only the drops it showed")
+    func cancelRemovesOnlyShownDrops() async throws {
+        let fixture = try await ShareFixture(deviceCount: 2)
+        fixture.model.updateOnlineDeviceIds(Set(fixture.deviceIds))
+        let shown = try fixture.makeDrop()
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        let late = try fixture.makeDrop()
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        #expect(fixture.model.pendingSend?.shareDrops == [AppModel.shareKey(shown)])
+
+        fixture.model.cancelPendingSend()
+
+        #expect(!FileManager.default.fileExists(atPath: shown.path))
+        #expect(FileManager.default.fileExists(atPath: late.path))
+        #expect(fixture.model.pendingSend?.shareDrops == [AppModel.shareKey(late)])
+    }
+
+    @Test("picking a device sends only the drops the picker showed")
+    func completeSendsOnlyShownDrops() async throws {
+        let fixture = try await ShareFixture(deviceCount: 2)
+        fixture.model.updateOnlineDeviceIds(Set(fixture.deviceIds))
+        let shown = try fixture.makeDrop()
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        let late = try fixture.makeDrop()
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+
+        fixture.model.completePendingSend(to: fixture.deviceIds[0])
+
+        #expect(!FileManager.default.fileExists(atPath: shown.path))
+        #expect(fixture.model.transfers.count == 1)
+        #expect(FileManager.default.fileExists(atPath: late.path))
+        #expect(fixture.model.pendingSend?.shareDrops == [AppModel.shareKey(late)])
+    }
 }
 
 @MainActor
 private struct ShareFixture {
     let model: AppModel
     let outbox: URL
-    let deviceId = UUID()
+    let deviceIds: [UUID]
+    var deviceId: UUID { deviceIds[0] }
 
-    init() async throws {
+    /// Devices use a TEST-NET address; sends go through the fake transport in
+    /// `makeTestAppModel`, so nothing touches the network.
+    init(deviceCount: Int = 1) async throws {
+        deviceIds = (0..<deviceCount).map { _ in UUID() }
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppModelShareTests-\(UUID().uuidString)", isDirectory: true)
         let store = try ClipStore(storageDirectory: directory)
         model = try makeTestAppModel(store: store, pasteboard: ShareFakePasteboard())
         outbox = directory.appendingPathComponent("ShareOutbox", isDirectory: true)
         try FileManager.default.createDirectory(at: outbox, withIntermediateDirectories: true)
-        try await model.pairingCoordinator.pairedStore.addDevice(
-            PairedDevice(id: deviceId, name: "Phone", host: "127.0.0.1"),
-            key: SymmetricKey(size: .bits256)
-        )
+        for (index, id) in deviceIds.enumerated() {
+            try await model.pairingCoordinator.pairedStore.addDevice(
+                PairedDevice(id: id, name: "Device \(index)", host: "192.0.2.\(index + 1)"),
+                key: SymmetricKey(size: .bits256)
+            )
+        }
         await model.refreshPairedDevices()
     }
 
