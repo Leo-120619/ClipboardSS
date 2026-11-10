@@ -22,7 +22,7 @@ source "$REPO_ROOT/scripts/xcode_env.sh"
 
 CLEANUP_DIRS=()
 cleanup() {
-    for dir in "${CLEANUP_DIRS[@]}"; do
+    for dir in ${CLEANUP_DIRS[@]+"${CLEANUP_DIRS[@]}"}; do
         rm -rf "$dir"
     done
 }
