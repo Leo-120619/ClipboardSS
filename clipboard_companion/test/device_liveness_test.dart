@@ -181,4 +181,50 @@ void main() {
 
     expect(online, {'a-b': true});
   });
+
+  group('ResumeGate', () {
+    test('settled waits for the resume probe after a pause', () async {
+      final gate = ResumeGate();
+      final probe = Completer<void>();
+      final events = <String>[];
+
+      gate.paused();
+      final settled = gate.settled().then((_) => events.add('settled'));
+      await Future<void>.delayed(Duration.zero);
+      expect(events, isEmpty);
+
+      final resumed = gate.resumed(() async {
+        events.add('probe-start');
+        await probe.future;
+        events.add('probe-end');
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(events, ['probe-start']);
+
+      probe.complete();
+      await Future.wait([settled, resumed]);
+      expect(events, ['probe-start', 'probe-end', 'settled']);
+    });
+
+    test('settled completes at once when nothing paused', () async {
+      var done = false;
+      await ResumeGate().settled().then((_) => done = true);
+      expect(done, isTrue);
+    });
+
+    test('a failed resume probe still releases waiters', () async {
+      final gate = ResumeGate()..paused();
+      final settled = gate.settled();
+      await expectLater(
+        gate.resumed(() async => throw StateError('offline')),
+        throwsStateError,
+      );
+      await settled;
+    });
+
+    test('settled gives up after the timeout if resume never comes', () async {
+      final gate = ResumeGate()..paused();
+      await gate.settled(timeout: const Duration(milliseconds: 10));
+    });
+  });
 }

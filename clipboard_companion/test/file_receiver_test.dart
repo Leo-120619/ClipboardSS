@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:clipboard_companion/core/crypto_utils.dart';
@@ -809,5 +810,96 @@ void main() {
       expect(results.map((e) => e.statusCode).toList()..sort(), [200, 409]);
       expect(r.receiver.activeSessionCount, 1);
     });
+
+    test('concurrentChunksAreWrittenInOrder', () async {
+      // The production writer: setPosition + writeFrom on one shared handle.
+      final r = await makeRobust();
+      final payload = List<int>.generate(64, (i) => (i * 7) & 0xFF);
+      final t = await prepareTransfer(
+        data: payload,
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      await r.receiver.handleOffer(t.offer);
+
+      final results = await Future.wait([
+        for (var i = 0; i < t.chunks.length; i++)
+          r.receiver.handleChunk(t.transferId, i, t.chunks[i]),
+      ]);
+      expect(results.map(statusOf).toSet(), {'ok'});
+      expect(
+        (await r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        )).statusCode,
+        200,
+      );
+      expect(await File('${r.dest.path}/file.bin').readAsBytes(), payload);
+    });
+
+    test('chunk writes for one session never overlap', () async {
+      var inFlight = 0;
+      var maxInFlight = 0;
+      final r = await makeRobust(
+        chunkWriter: (raf, offset, bytes) async {
+          inFlight++;
+          if (inFlight > maxInFlight) maxInFlight = inFlight;
+          await Future<void>.delayed(const Duration(milliseconds: 2));
+          await raf.setPosition(offset);
+          await raf.writeFrom(bytes);
+          inFlight--;
+        },
+      );
+      final t = await prepareTransfer(
+        data: List<int>.generate(16, (i) => i),
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      await r.receiver.handleOffer(t.offer);
+      await Future.wait([
+        for (var i = 0; i < t.chunks.length; i++)
+          r.receiver.handleChunk(t.transferId, i, t.chunks[i]),
+      ]);
+      expect(maxInFlight, 1);
+    });
+
+    test(
+      'a cancel landing mid-write leaves the torn-down session alone',
+      () async {
+        final writeStarted = Completer<void>();
+        final release = Completer<void>();
+        final r = await makeRobust(
+          chunkWriter: (raf, offset, bytes) async {
+            writeStarted.complete();
+            await release.future;
+          },
+        );
+        final t = await prepareTransfer(
+          data: [1, 2, 3, 4],
+          chunkSize: 4,
+          peerId: peerId,
+          key: key,
+        );
+        await r.receiver.handleOffer(t.offer);
+        final events = <String>[];
+        final sub = r.receiver.events.listen((e) => events.add(e.type));
+
+        final cancelEnvelope = await cancelFor(t.transferId);
+        final chunk = r.receiver.handleChunk(t.transferId, 0, t.chunks[0]);
+        await writeStarted.future;
+        final cancel = r.receiver.handleCancel(cancelEnvelope);
+        await Future<void>.delayed(Duration.zero);
+        release.complete();
+        expect((await cancel).statusCode, 200);
+        final response = await chunk;
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+
+        expect(statusOf(response), 'cancelled');
+        expect(events, ['cancelled']);
+        expect(r.receiver.activeSessionCount, 0);
+      },
+    );
   });
 }

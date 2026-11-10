@@ -41,6 +41,8 @@ class FileTransferResponse {
   FileTransferResponse(this.statusCode, this.body);
 }
 
+enum _WriteOutcome { written, alreadyReceived, failed }
+
 class _Session {
   final FileOfferPayload offer;
   final String sourceDeviceId;
@@ -52,6 +54,10 @@ class _Session {
   /// Plaintext bytes of the distinct chunks already on disk.
   int bytesWritten = 0;
   DateTime lastActivity;
+
+  /// Tail of this session's chunk writes. Every write runs after the previous
+  /// one settles: the writes share [raf]'s file position.
+  Future<void> writeChain = Future<void>.value();
 
   _Session({
     required this.offer,
@@ -297,31 +303,42 @@ class FileReceiver {
       return FileTransferResponse(400, {'status': 'badSize'});
     }
 
-    if (session.received.contains(chunkIndex)) {
-      session.lastActivity = now();
+    // The index counts as received only once its bytes are on disk; a retry
+    // rewrites it. A cancel, finish or GC may tear the session down while a
+    // write is queued or in flight, so liveness is checked on both sides.
+    final outcome = await _serializedWrite(session, () async {
+      if (!_isLive(transferId, session)) return _WriteOutcome.failed;
+      if (session.received.contains(chunkIndex)) {
+        return _WriteOutcome.alreadyReceived;
+      }
+      try {
+        await chunkWriter(
+          session.raf,
+          chunkIndex * session.offer.chunkSize,
+          plaintext,
+        );
+        return _WriteOutcome.written;
+      } catch (_) {
+        return _WriteOutcome.failed;
+      }
+    });
+    if (!_isLive(transferId, session)) {
+      return _cancelled.containsKey(transferId)
+          ? FileTransferResponse(410, {'status': 'cancelled'})
+          : FileTransferResponse(404, {'status': 'unknown'});
+    }
+    if (outcome == _WriteOutcome.failed) {
+      return FileTransferResponse(400, {'status': 'writeFailed'});
+    }
+    session.lastActivity = now();
+    if (outcome == _WriteOutcome.alreadyReceived) {
       return FileTransferResponse(200, {
         'status': 'ok',
         'received': session.received.length,
       });
     }
-
-    // The index counts as received only once its bytes are on disk; a retry
-    // rewrites it.
-    try {
-      await chunkWriter(
-        session.raf,
-        chunkIndex * session.offer.chunkSize,
-        plaintext,
-      );
-    } catch (_) {
-      return FileTransferResponse(400, {'status': 'writeFailed'});
-    }
-
-    // A concurrent identical chunk may have landed during the awaited write.
-    if (session.received.add(chunkIndex)) {
-      session.bytesWritten += plaintext.length;
-    }
-    session.lastActivity = now();
+    session.received.add(chunkIndex);
+    session.bytesWritten += plaintext.length;
     _emit(
       FileTransferReceiveEvent(
         'progress',
@@ -371,6 +388,12 @@ class FileReceiver {
 
     if (session.received.length != session.offer.chunkCount) {
       return FileTransferResponse(409, {'status': 'incomplete'});
+    }
+
+    // A duplicate chunk may still hold the handle.
+    await session.writeChain;
+    if (!_isLive(finish.transferId, session)) {
+      return FileTransferResponse(404, {'status': 'unknown'});
     }
 
     final String computed;
@@ -499,14 +522,30 @@ class FileReceiver {
 
   // MARK: - Internals
 
+  bool _isLive(String transferId, _Session session) =>
+      identical(_sessions[transferId], session);
+
+  /// Runs [write] after every earlier write of [session] has settled.
+  Future<_WriteOutcome> _serializedWrite(
+    _Session session,
+    Future<_WriteOutcome> Function() write,
+  ) {
+    final result = session.writeChain.then((_) => write());
+    session.writeChain = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
+  /// Unregisters the session first so queued writes skip it, then waits for
+  /// the in-flight write before closing the handle.
   Future<void> _destroy(String transferId, _Session session) async {
+    if (_isLive(transferId, session)) _sessions.remove(transferId);
+    await session.writeChain;
     try {
       await session.raf.close();
     } catch (_) {}
     try {
       if (await session.tempFile.exists()) await session.tempFile.delete();
     } catch (_) {}
-    _sessions.remove(transferId);
   }
 
   Future<File> _finalize(_Session session) async {

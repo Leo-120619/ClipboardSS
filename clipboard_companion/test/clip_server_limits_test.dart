@@ -147,4 +147,29 @@ void main() {
     );
     expect(body.pulled, 0);
   });
+
+  group('error bodies do not echo exception text', () {
+    for (final (path, status) in [
+      ('/v1/pair/start', 500),
+      ('/v1/pair/confirm', 400),
+      ('/v1/clip', 400),
+    ]) {
+      test('$path returns a generic $status body', () async {
+        final handler = await makeHandler();
+        // Wrong field types make the handler throw a TypeError.
+        final response = await handler(
+          Request(
+            'POST',
+            uri(path),
+            body: '{"deviceId": 5, "deviceName": 6, "v": "x"}',
+          ),
+        );
+        expect(response.statusCode, status);
+        final text = await response.readAsString();
+        expect(text, isNot(contains('subtype')));
+        expect(text, isNot(contains('Exception')));
+        expect(text, isNot(contains('Error')));
+      });
+    }
+  });
 }
