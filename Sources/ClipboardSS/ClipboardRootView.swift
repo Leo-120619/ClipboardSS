@@ -247,9 +247,10 @@ struct DropDevicePicker: View {
                     .font(.headline)
                 Spacer()
                 Button("Cancel") {
-                    model.pendingSend = nil
+                    model.cancelPendingSend()
                     dismiss()
                 }
+                .keyboardShortcut(.cancelAction)
             }
             .padding()
 

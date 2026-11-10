@@ -61,8 +61,11 @@ final class ShareViewController: SLComposeServiceViewController {
         "id": batchID, "attachments": attachments, "skippedCount": skipped,
       ]
       let data = try? JSONSerialization.data(withJSONObject: manifest)
+      // The manifest is written last: every batch folder holding one is a complete,
+      // pending share. The app reads them all, so a second share cannot hide the first.
       try? data?.write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
-      UserDefaults(suiteName: self.appGroup)?.set(batchID, forKey: "pendingShareBatchID")
+      // Best effort only: share extensions usually cannot open their app. The app also
+      // picks pending shares up whenever its scene becomes active.
       let url = URL(string: "clipboardcompanion://incoming-share")!
       self.extensionContext?.open(url) { _ in
         self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)

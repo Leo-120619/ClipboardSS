@@ -30,7 +30,6 @@ final class AppModel: ObservableObject {
     @Published var screenshotReview: ScreenshotReview?
     @Published var editingImage: NSImage?
     @Published var editingClipID: UUID?
-    @Published var clipboardHasImage = false
     @Published var showPreferences = false
     @Published var clipboardShortcut: KeyboardShortcut
     @Published var screenshotShortcut: KeyboardShortcut?
@@ -44,12 +43,23 @@ final class AppModel: ObservableObject {
     @Published private(set) var pairedDevices: [PairedDevice] = []
     /// Live reachability per paired device. In-memory only: it is rebuilt from scratch
     /// on every refresh, so unpaired devices drop out on their own.
-    @Published private(set) var onlineDeviceIds: Set<UUID> = []
+    @Published private(set) var onlineDeviceIds: Set<UUID> = [] {
+        // Every online transition (full liveness pass or reconnect, both via
+        // `applyLiveness`) retries queued shares.
+        didSet {
+            if !onlineDeviceIds.isSubset(of: oldValue) { processPendingShares() }
+        }
+    }
     /// Paired devices that answered a ping with 426 (or, found only by the reconnect sweep,
     /// advertised an older `v` on `/v1/id`). A valid pong clears the flag.
     @Published private(set) var outdatedDeviceIds: Set<UUID> = []
     @Published private(set) var transfers: [FileTransferState] = []
-    @Published var pendingSend: PendingSend?
+    @Published var pendingSend: PendingSend? {
+        // However the picker closes (button or sheet binding), offer any shares still waiting.
+        didSet {
+            if pendingSend == nil, oldValue != nil { processPendingShares() }
+        }
+    }
 
     let store: ClipStore
     let pairingCoordinator: PairingCoordinator
@@ -63,6 +73,17 @@ final class AppModel: ObservableObject {
     private var receiveBatch = ReceiveBatchDestination()
     private var sendTokens: [UUID: CancellationToken] = [:]
     private var livenessTask: Task<Void, Never>?
+    /// Where shared files are staged while they are being sent.
+    let shareStagingDirectory: URL
+    /// Share-extension drops waiting for a reachable, up-to-date device. A drop leaves the
+    /// outbox only once its files are handed to `FileSender`.
+    private(set) var pendingShares: [ShareInbox.PendingDrop] = []
+    /// Staging folder per send, removed when that send finishes.
+    private var shareStagingBySend: [UUID: URL] = [:]
+    private var hasCompletedLivenessPass = false
+    nonisolated static let shareMaxAge: TimeInterval = 24 * 60 * 60
+    nonisolated static let shareQueuedMessage =
+        "No paired device is reachable. Shared files will be sent when one comes online."
     private static let livenessInterval = Duration.seconds(5)
     nonisolated static let coachMarksCompletedDefaultsKey = "hasCompletedCoachMarks"
     nonisolated static let launchAtLoginDefaultsKey = "launchAtLoginEnabled"
@@ -73,7 +94,7 @@ final class AppModel: ObservableObject {
     private let screenTextCaptureService: any ScreenTextCapturing
     private let launchAtLogin: LaunchAtLoginControlling
     private let pasteboard: PasteboardClient
-    private var lastBroadcastClipID: UUID?
+    private let clipboardMonitor: ClipboardMonitor?
     var onClipboardShortcutChanged: ((KeyboardShortcut) -> Void)?
     var onScreenshotShortcutChanged: ((KeyboardShortcut?) -> Void)?
     var onScreenTextShortcutChanged: ((KeyboardShortcut?) -> Void)?
@@ -85,6 +106,10 @@ final class AppModel: ObservableObject {
     var onCloseRequested: (() -> Void)?
     var onScreenTextSelectionReady: ((ScreenTextCapture) -> Void)?
     var onReceivedFileCompleted: ((URL) -> Void)?
+    /// Called once per clip queued for sending to paired devices.
+    var onClipBroadcast: ((ClipItem) -> Void)?
+    /// Called when queued shares need the user: a device must be picked, or none is reachable.
+    var onShareNeedsAttention: (() -> Void)?
 
     init(
         store: ClipStore,
@@ -100,9 +125,11 @@ final class AppModel: ObservableObject {
         clipSender: ClipSender,
         clipServer: ClipServer,
         fileSender: FileSender,
-        fileReceiver: FileReceiver
+        fileReceiver: FileReceiver,
+        clipboardMonitor: ClipboardMonitor? = nil
     ) {
         self.store = store
+        self.clipboardMonitor = clipboardMonitor
         self.writer = writer
         self.screenshotCaptureService = screenshotCaptureService
         self.ocrService = ocrService
@@ -118,6 +145,7 @@ final class AppModel: ObservableObject {
         self.fileSender = fileSender
         self.fileReceiver = fileReceiver
         self.clips = store.items
+        self.shareStagingDirectory = store.storageDirectory.appendingPathComponent("ShareStaging", isDirectory: true)
         self.clipboardShortcut = .savedClipboardShortcut
         self.screenshotShortcut = .savedScreenshotShortcut
         self.screenTextShortcut = .savedScreenTextShortcut
@@ -125,7 +153,6 @@ final class AppModel: ObservableObject {
             as? Bool ?? true
         let forceCoachMarks = ProcessInfo.processInfo.environment["CLIPBOARDSS_FORCE_COACH_MARKS"] == "1"
         self.showCoachMarks = forceCoachMarks || !UserDefaults.standard.bool(forKey: Self.coachMarksCompletedDefaultsKey)
-        self.clipboardHasImage = pasteboard.readSnapshot().imageData != nil
         applyLaunchAtLoginPreference()
     }
 
@@ -196,7 +223,7 @@ final class AppModel: ObservableObject {
     /// its outdated flag changed, and only from ping results: `/v1/id` and mDNS nominate
     /// hosts but never prove identity. `scope` limits the online rebuild to those devices;
     /// nil rebuilds the whole set (so unpaired devices drop out).
-    private func applyLiveness(_ report: LivenessReport, scope: Set<UUID>? = nil) async {
+    func applyLiveness(_ report: LivenessReport, scope: Set<UUID>? = nil) async {
         let updates = Self.hostUpdates(devices: pairedDevices, report: report)
         for (id, host) in updates {
             do {
@@ -212,6 +239,12 @@ final class AppModel: ObservableObject {
 
         let online = scope.map { onlineDeviceIds.subtracting($0).union(report.onlineIds) } ?? report.onlineIds
         if online != onlineDeviceIds { onlineDeviceIds = online }
+
+        // After the first full pass, shares queued for still-offline devices report it.
+        if scope == nil, !hasCompletedLivenessPass {
+            hasCompletedLivenessPass = true
+            processPendingShares(reportUnreachable: true)
+        }
     }
 
     func isDeviceOnline(_ id: UUID) -> Bool {
@@ -336,15 +369,19 @@ final class AppModel: ObservableObject {
         Array(filteredClips.dropFirst(filteredClips.first?.id == latestClip?.id ? 1 : 0))
     }
 
+    /// Republishes the store's clips. Never broadcasts: deleting, expiring or
+    /// re-ordering clips is not a new copy.
     func refresh() {
-        let previousLatestID = clips.first?.id
-        clips = store.items
-        clipboardHasImage = pasteboard.readSnapshot().imageData != nil
-        guard let latest = clips.first, latest.id != previousLatestID, latest.id != lastBroadcastClipID else {
-            return
-        }
-        lastBroadcastClipID = latest.id
-        Task { await broadcast(clip: latest) }
+        let items = store.items
+        guard items != clips else { return }
+        clips = items
+    }
+
+    /// Sends a clip that was just captured locally (a genuine copy or a new
+    /// screenshot) to paired devices.
+    func broadcastCaptured(_ clip: ClipItem) {
+        onClipBroadcast?(clip)
+        Task { await broadcast(clip: clip) }
     }
 
     func showPairingCode() -> String {
@@ -533,19 +570,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func startFileSend(url: URL, to deviceId: UUID) {
+    /// Returns true once the file is handed to `FileSender`. `stagingDirectory` is removed
+    /// when that send finishes.
+    @discardableResult
+    private func startFileSend(url: URL, to deviceId: UUID, stagingDirectory: URL? = nil) -> Bool {
         guard !deviceNeedsUpdate(deviceId) else {
             lastError = ProtocolMismatch.updateOtherDeviceMessage
-            return
+            return false
         }
         guard let peer = resolvePeer(for: deviceId) else {
             lastError = "That device is not reachable right now."
-            return
+            return false
         }
 
         let uiId = UUID()
         let token = CancellationToken()
         sendTokens[uiId] = token
+        if let stagingDirectory { shareStagingBySend[uiId] = stagingDirectory }
         transfers.insert(
             FileTransferState(
                 id: uiId,
@@ -579,6 +620,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self?.completeSend(uiId: uiId, status: .failed(error.localizedDescription)) }
             }
         }
+        return true
     }
 
     /// Cancels an in-flight send (receiver-side transfers finish on their own in v1).
@@ -604,9 +646,123 @@ final class AppModel: ObservableObject {
     }
 
     func completePendingSend(to deviceId: UUID) {
-        let files = pendingSend?.files ?? []
+        guard let pending = pendingSend else { return }
+        if pending.isShare {
+            sendPendingShares(to: deviceId, only: Set(pending.shareDrops))
+        } else {
+            for url in pending.files { sendFile(url: url, to: deviceId) }
+        }
         pendingSend = nil
-        for url in files { sendFile(url: url, to: deviceId) }
+    }
+
+    /// Dismisses the device picker. Cancelling a share discards the drops it showed: the user
+    /// chose not to send them. Drops that arrived while it was open are offered next.
+    func cancelPendingSend() {
+        if let pending = pendingSend, pending.isShare {
+            let shown = Set(pending.shareDrops)
+            let discarded = pendingShares.filter { shown.contains(Self.shareKey($0)) }
+            discarded.forEach(ShareInbox.remove)
+            pendingShares.removeAll { shown.contains(Self.shareKey($0)) }
+        }
+        pendingSend = nil
+    }
+
+    /// Identity of an outbox drop: its folder name, unique within the one outbox. Full paths
+    /// are unreliable keys because listings may spell `/var` as `/private/var`.
+    nonisolated static func shareKey(_ directory: URL) -> String {
+        directory.lastPathComponent
+    }
+
+    private nonisolated static func shareKey(_ drop: ShareInbox.PendingDrop) -> String {
+        shareKey(drop.directory)
+    }
+
+    /// Queues complete drops from the share extension. Drops already queued are ignored, so
+    /// callers can pass the whole outbox on every poll.
+    func enqueueShares(_ drops: [ShareInbox.PendingDrop], now: Date = Date()) {
+        let known = Set(pendingShares.map(Self.shareKey))
+        let fresh = drops.filter { !known.contains(Self.shareKey($0)) }
+        guard !fresh.isEmpty else { return }
+        pendingShares.append(contentsOf: fresh)
+        processPendingShares(now: now, reportUnreachable: hasCompletedLivenessPass)
+    }
+
+    /// Sends queued shares when exactly one reachable, up-to-date device exists, asks which
+    /// device when several do, and otherwise leaves them queued.
+    func processPendingShares(now: Date = Date(), reportUnreachable: Bool = false) {
+        discardExpiredShares(now: now)
+        guard !pendingShares.isEmpty, pendingSend == nil else { return }
+
+        let reachable = pairedDevices.filter { resolvePeer(for: $0.id) != nil }
+        let targets = reachable.filter { !deviceNeedsUpdate($0.id) }
+        switch targets.count {
+        case 0:
+            guard reportUnreachable else { return }
+            lastError = reachable.isEmpty ? Self.shareQueuedMessage : ProtocolMismatch.updateOtherDeviceMessage
+            onShareNeedsAttention?()
+        case 1:
+            sendPendingShares(to: targets[0].id)
+        default:
+            pendingSend = PendingSend(
+                files: pendingShares.flatMap(\.fileURLs),
+                shareDrops: pendingShares.map(Self.shareKey)
+            )
+            onShareNeedsAttention?()
+        }
+    }
+
+    private func discardExpiredShares(now: Date) {
+        let expired = pendingShares.filter { now.timeIntervalSince($0.createdAt) > Self.shareMaxAge }
+        guard !expired.isEmpty else { return }
+        expired.forEach(ShareInbox.remove)
+        let expiredDirs = Set(expired.map(Self.shareKey))
+        pendingShares.removeAll { expiredDirs.contains(Self.shareKey($0)) }
+    }
+
+    /// Stages queued shares (all, or only the drops in `only`) and hands them to `FileSender`;
+    /// each outbox drop is removed only after that hand-off. An unreachable or outdated
+    /// device leaves the queue untouched.
+    private func sendPendingShares(to deviceId: UUID, only: Set<String>? = nil) {
+        guard resolvePeer(for: deviceId) != nil else {
+            lastError = "That device is not reachable right now."
+            return
+        }
+        guard !deviceNeedsUpdate(deviceId) else {
+            lastError = ProtocolMismatch.updateOtherDeviceMessage
+            return
+        }
+        let selected: (ShareInbox.PendingDrop) -> Bool = { only?.contains(Self.shareKey($0)) ?? true }
+        let shares = pendingShares.filter(selected)
+        pendingShares.removeAll(where: selected)
+        for share in shares {
+            for source in share.fileURLs {
+                guard let staged = stageSharedFile(source) else { continue }
+                if !startFileSend(url: staged, to: deviceId, stagingDirectory: staged.deletingLastPathComponent()) {
+                    try? FileManager.default.removeItem(at: staged.deletingLastPathComponent())
+                }
+            }
+            ShareInbox.remove(share)
+        }
+    }
+
+    /// Moves (or copies) a shared file into its own `ShareStaging/<uuid>/` folder.
+    private func stageSharedFile(_ source: URL) -> URL? {
+        // Re-checked at use: the file may have been swapped for a symlink since it was listed.
+        guard ShareInbox.isRegularFile(source) else { return nil }
+        let destDir = shareStagingDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dest = destDir.appendingPathComponent(source.lastPathComponent)
+        do {
+            try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
+            do {
+                try FileManager.default.moveItem(at: source, to: dest)
+            } catch {
+                try FileManager.default.copyItem(at: source, to: dest)
+            }
+            return dest
+        } catch {
+            try? FileManager.default.removeItem(at: destDir)
+            return nil
+        }
     }
 
     var reachablePairedDevices: [PairedDevice] {
@@ -723,6 +879,9 @@ final class AppModel: ObservableObject {
 
     private func completeSend(uiId: UUID, status: FileTransferState.Status) {
         sendTokens[uiId] = nil
+        if let staging = shareStagingBySend.removeValue(forKey: uiId) {
+            try? FileManager.default.removeItem(at: staging)
+        }
         guard let i = transfers.firstIndex(where: { $0.id == uiId }) else { return }
         if status == .completed { transfers[i].progress = 1.0 }
         transfers[i].status = status
@@ -763,6 +922,7 @@ final class AppModel: ObservableObject {
     func copy(_ clip: ClipItem) {
         do {
             try writer.copy(clip)
+            clipboardMonitor?.ignoreCurrentChange()
             refresh()
         } catch {
             lastError = error.localizedDescription
@@ -772,6 +932,7 @@ final class AppModel: ObservableObject {
     func paste(_ clip: ClipItem, mode: PasteRequest) {
         do {
             try writer.copy(clip)
+            clipboardMonitor?.ignoreCurrentChange()
             refresh()
             onPasteRequested?(mode)
         } catch {
@@ -818,7 +979,8 @@ final class AppModel: ObservableObject {
             do {
                 let url = try await screenshotCaptureService.captureRegion()
                 let imageData = try Data(contentsOf: url)
-                _ = try store.addImageData(imageData, fileExtension: "png", previewText: "Screenshot")
+                let clip = try store.addImageData(imageData, fileExtension: "png", previewText: "Screenshot")
+                broadcastCaptured(clip)
                 let blocks = try await ocrService.recognizeText(in: url)
                 screenshotReview = ScreenshotReview(imageURL: url, selection: OCRSelectionState(blocks: blocks))
                 refresh()
@@ -986,6 +1148,8 @@ final class AppModel: ObservableObject {
         do {
             let clip = try store.addImageData(pngData, fileExtension: "png", previewText: "Edited Image")
             try writer.copy(clip)
+            clipboardMonitor?.ignoreCurrentChange()
+            broadcastCaptured(clip)
             self.editingImage = nil
             self.editingClipID = nil
             refresh()

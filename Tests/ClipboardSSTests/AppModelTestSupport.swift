@@ -11,7 +11,8 @@ func makeTestAppModel(
     screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
     snippetStore: TextSnippetStore = TextSnippetStore(
         defaults: UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)") ?? .standard
-    )
+    ),
+    clipboardMonitor: ClipboardMonitor? = nil
 ) throws -> AppModel {
     let identity = DeviceIdentity(id: UUID(), name: "Test Mac")
     let pairedStore = try PairedDeviceStore(
@@ -24,7 +25,7 @@ func makeTestAppModel(
         pairedStore: pairedStore,
         transport: transport
     )
-    let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard)
+    let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard, monitor: clipboardMonitor)
     let clipServer = try ClipServer(
         identity: identity,
         receiver: clipReceiver,
@@ -64,7 +65,8 @@ func makeTestAppModel(
         clipSender: clipSender,
         clipServer: clipServer,
         fileSender: fileSender,
-        fileReceiver: fileReceiver
+        fileReceiver: fileReceiver,
+        clipboardMonitor: clipboardMonitor
     )
 }
 
