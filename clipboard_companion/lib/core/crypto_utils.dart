@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'models.dart';
 
 class PairingSession {
@@ -97,57 +98,152 @@ class PairingResult {
   PairingResult({required this.pairKey, required this.confirmCode});
 }
 
+/// What an envelope is for. Bound into the AEAD associated data so an envelope sealed
+/// for one endpoint cannot be replayed against another.
+enum EnvelopePurpose {
+  clip('clip'),
+  fileOffer('file-offer'),
+  fileFinish('file-finish'),
+  fileCancel('file-cancel');
+
+  const EnvelopePurpose(this.wire);
+
+  /// Value used in the associated data.
+  final String wire;
+}
+
+/// The envelope's `v` is not [wireProtocolVersion]; servers answer 426.
+class UnsupportedEnvelopeVersionException implements Exception {
+  final int version;
+  const UnsupportedEnvelopeVersionException(this.version);
+
+  @override
+  String toString() => 'Unsupported envelope version $version';
+}
+
+/// Wire envelope v2: ChaCha20-Poly1305 over the inner JSON with associated data
+/// `ClipboardSS/2|<purpose>|<source lowercase>|<recipient lowercase>`, binding sender,
+/// recipient and purpose. See docs/wire-protocol.md.
 class CryptoEnvelopeUtils {
   static final _chacha = Chacha20.poly1305Aead();
 
-  static Future<ClipEnvelope> seal(
-    ClipPayload payload,
+  static List<int> associatedData(
+    EnvelopePurpose purpose,
     String sourceDeviceId,
-    SecretKey pairKey,
-  ) async {
-    return sealJson(payload.toJson(), sourceDeviceId, pairKey);
-  }
+    String recipientDeviceId,
+  ) => utf8.encode(
+    'ClipboardSS/$wireProtocolVersion|${purpose.wire}|'
+    '${canonicalDeviceId(sourceDeviceId)}|${canonicalDeviceId(recipientDeviceId)}',
+  );
+
+  static Future<ClipEnvelope> seal(
+    ClipPayload payload, {
+    required EnvelopePurpose purpose,
+    required String sourceDeviceId,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+  }) => sealJson(
+    payload.toJson(),
+    purpose: purpose,
+    sourceDeviceId: sourceDeviceId,
+    recipientDeviceId: recipientDeviceId,
+    pairKey: pairKey,
+  );
 
   static Future<ClipPayload> open(
-    ClipEnvelope envelope,
-    SecretKey pairKey,
-  ) async {
-    return ClipPayload.fromJson(await openJson(envelope, pairKey));
-  }
+    ClipEnvelope envelope, {
+    required EnvelopePurpose purpose,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+  }) async => ClipPayload.fromJson(
+    await openJson(
+      envelope,
+      purpose: purpose,
+      recipientDeviceId: recipientDeviceId,
+      pairKey: pairKey,
+    ),
+  );
 
-  /// Seals an arbitrary JSON map into an envelope — used by the file-transfer control
-  /// messages (offer / finish / cancel). Same construction as [seal].
+  /// Seals an arbitrary JSON map (file-transfer control messages use this directly).
   static Future<ClipEnvelope> sealJson(
-    Map<String, dynamic> json,
-    String sourceDeviceId,
-    SecretKey pairKey,
-  ) async {
-    final plaintext = utf8.encode(jsonEncode(json));
-    final secretBox = await _chacha.encrypt(plaintext, secretKey: pairKey);
-    final combinedCiphertext = Uint8List.fromList([
-      ...secretBox.cipherText,
-      ...secretBox.mac.bytes,
-    ]);
+    Map<String, dynamic> json, {
+    required EnvelopePurpose purpose,
+    required String sourceDeviceId,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+  }) => sealBytes(
+    utf8.encode(jsonEncode(json)),
+    purpose: purpose,
+    sourceDeviceId: sourceDeviceId,
+    recipientDeviceId: recipientDeviceId,
+    pairKey: pairKey,
+  );
+
+  /// Seals raw inner bytes. [nonce] is injectable only so the pinned vector can be
+  /// reproduced; production callers leave it null (random).
+  @visibleForTesting
+  static Future<ClipEnvelope> sealBytes(
+    List<int> plaintext, {
+    required EnvelopePurpose purpose,
+    required String sourceDeviceId,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+    List<int>? nonce,
+  }) async {
+    final secretBox = await _chacha.encrypt(
+      plaintext,
+      secretKey: pairKey,
+      nonce: nonce,
+      aad: associatedData(purpose, sourceDeviceId, recipientDeviceId),
+    );
     return ClipEnvelope(
-      v: 1,
+      v: wireProtocolVersion,
       sourceDeviceId: canonicalDeviceId(sourceDeviceId),
       nonce: base64Encode(secretBox.nonce),
-      ciphertext: base64Encode(combinedCiphertext),
+      ciphertext: base64Encode([
+        ...secretBox.cipherText,
+        ...secretBox.mac.bytes,
+      ]),
     );
   }
 
-  /// Opens an envelope into an arbitrary JSON map.
+  /// Opens an envelope addressed to [recipientDeviceId] (the local device) for [purpose].
   static Future<Map<String, dynamic>> openJson(
-    ClipEnvelope envelope,
-    SecretKey pairKey,
-  ) async {
+    ClipEnvelope envelope, {
+    required EnvelopePurpose purpose,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+  }) async {
+    final plaintext = await openBytes(
+      envelope,
+      purpose: purpose,
+      recipientDeviceId: recipientDeviceId,
+      pairKey: pairKey,
+    );
+    return jsonDecode(utf8.decode(plaintext)) as Map<String, dynamic>;
+  }
+
+  static Future<List<int>> openBytes(
+    ClipEnvelope envelope, {
+    required EnvelopePurpose purpose,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+  }) async {
+    if (envelope.v != wireProtocolVersion) {
+      throw UnsupportedEnvelopeVersionException(envelope.v);
+    }
     final nonce = base64Decode(envelope.nonce);
     final combinedData = base64Decode(envelope.ciphertext);
-    if (combinedData.length < 16) throw Exception('Invalid ciphertext length');
+    if (nonce.length != 12 || combinedData.length < 16) {
+      throw Exception('Invalid envelope nonce or ciphertext');
+    }
     final ciphertext = combinedData.sublist(0, combinedData.length - 16);
     final macBytes = combinedData.sublist(combinedData.length - 16);
     final secretBox = SecretBox(ciphertext, nonce: nonce, mac: Mac(macBytes));
-    final plaintext = await _chacha.decrypt(secretBox, secretKey: pairKey);
-    return jsonDecode(utf8.decode(plaintext)) as Map<String, dynamic>;
+    return _chacha.decrypt(
+      secretBox,
+      secretKey: pairKey,
+      aad: associatedData(purpose, envelope.sourceDeviceId, recipientDeviceId),
+    );
   }
 }

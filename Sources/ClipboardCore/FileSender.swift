@@ -1,11 +1,23 @@
 import Foundation
 import CryptoKit
 
-public enum FileSendError: Error, Equatable {
+public enum FileSendError: Error, Equatable, LocalizedError {
     case notPaired
     case fileUnreadable
     case cancelled
+    /// The peer runs another wire protocol version (advertised, or answered 426).
+    case peerNeedsUpdate
     case httpStatus(endpoint: String, statusCode: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notPaired: return "That device is not paired."
+        case .fileUnreadable: return "The file could not be read."
+        case .cancelled: return "The transfer was cancelled."
+        case .peerNeedsUpdate: return ProtocolMismatch.updateOtherDeviceMessage
+        case let .httpStatus(endpoint, statusCode): return "\(endpoint) failed with HTTP \(statusCode)."
+        }
+    }
 }
 
 /// Sends a single file to one paired peer using the chunked protocol. Streams the file in
@@ -35,6 +47,9 @@ public struct FileSender: Sendable {
     ) async throws {
         guard let key = try? await pairedStore.getKey(for: peer.id) else {
             throw FileSendError.notPaired
+        }
+        guard !peer.needsUpdate else {
+            throw FileSendError.peerNeedsUpdate
         }
 
         let chunkSize = FileTransferConstants.chunkSize
@@ -67,7 +82,7 @@ public struct FileSender: Sendable {
         )
 
         // Offer. No cancel needed on failure — nothing is registered on the receiver yet.
-        let offerEnvelope = try ClipEnvelope.seal(payload: offer, sourceDeviceId: identity.id, pairKey: key)
+        let offerEnvelope = try seal(offer, purpose: .fileOffer, to: peer, key: key)
         try await post("/v1/file/offer", body: encodeJSON(offerEnvelope), contentType: "application/json", headers: [:], to: peer)
 
         // Chunks.
@@ -101,7 +116,7 @@ public struct FileSender: Sendable {
 
             // Finish.
             let finish = FileFinishPayload(transferId: transferId)
-            let finishEnvelope = try ClipEnvelope.seal(payload: finish, sourceDeviceId: identity.id, pairKey: key)
+            let finishEnvelope = try seal(finish, purpose: .fileFinish, to: peer, key: key)
             try await post("/v1/file/finish", body: encodeJSON(finishEnvelope), contentType: "application/json", headers: [:], to: peer)
             progress?(1.0)
         } catch {
@@ -113,12 +128,19 @@ public struct FileSender: Sendable {
     // MARK: - Internals
 
     private func bestEffortCancel(transferId: String, peer: Peer, key: SymmetricKey) async {
-        guard let envelope = try? ClipEnvelope.seal(
-            payload: FileCancelPayload(transferId: transferId),
-            sourceDeviceId: identity.id,
-            pairKey: key
-        ), let body = try? encodeJSON(envelope) else { return }
+        guard let envelope = try? seal(FileCancelPayload(transferId: transferId), purpose: .fileCancel, to: peer, key: key),
+              let body = try? encodeJSON(envelope) else { return }
         _ = try? await post("/v1/file/cancel", body: body, contentType: "application/json", headers: [:], to: peer)
+    }
+
+    private func seal<T: Encodable>(_ payload: T, purpose: EnvelopePurpose, to peer: Peer, key: SymmetricKey) throws -> ClipEnvelope {
+        try ClipEnvelope.seal(
+            payload: payload,
+            purpose: purpose,
+            sourceDeviceId: identity.id,
+            recipientDeviceId: peer.id,
+            pairKey: key
+        )
     }
 
     @discardableResult
@@ -135,6 +157,9 @@ public struct FileSender: Sendable {
         let requestData = HTTPCodec.encodeRequest(request, host: "\(peer.host):\(peer.port)")
         let responseData = try await transport.send(requestData, to: peer)
         let response = try HTTPCodec.parseResponse(responseData)
+        if response.statusCode == 426 {
+            throw FileSendError.peerNeedsUpdate
+        }
         guard response.statusCode == 200 else {
             throw FileSendError.httpStatus(endpoint: path, statusCode: response.statusCode)
         }

@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using ClipboardSS.Core.Json;
 using ClipboardSS.Core.Models;
@@ -6,33 +7,115 @@ using Org.BouncyCastle.Security;
 
 namespace ClipboardSS.Core.Crypto;
 
-public sealed class EnvelopeCryptoException(string message, Exception? innerException = null)
+public class EnvelopeCryptoException(string message, Exception? innerException = null)
     : Exception(message, innerException);
 
+/// <summary>The envelope's <c>v</c> is not <see cref="WireProtocol.Version"/>; servers answer 426.</summary>
+public sealed class UnsupportedEnvelopeVersionException(int version)
+    : EnvelopeCryptoException($"Unsupported envelope version {version}.")
+{
+    public int Version { get; } = version;
+}
+
+/// <summary>
+/// What an envelope is for. Bound into the AEAD associated data so an envelope sealed for
+/// one endpoint cannot be replayed against another.
+/// </summary>
+public enum EnvelopePurpose
+{
+    Clip,
+    FileOffer,
+    FileFinish,
+    FileCancel,
+}
+
+public static class EnvelopePurposeExtensions
+{
+    /// <summary>Value used in the associated data.</summary>
+    public static string WireName(this EnvelopePurpose purpose) => purpose switch
+    {
+        EnvelopePurpose.Clip => "clip",
+        EnvelopePurpose.FileOffer => "file-offer",
+        EnvelopePurpose.FileFinish => "file-finish",
+        EnvelopePurpose.FileCancel => "file-cancel",
+        _ => throw new ArgumentOutOfRangeException(nameof(purpose), purpose, null),
+    };
+}
+
+/// <summary>
+/// Wire envelope v2: ChaCha20-Poly1305 over the inner JSON with associated data
+/// <c>ClipboardSS/2|&lt;purpose&gt;|&lt;source lowercase&gt;|&lt;recipient lowercase&gt;</c>,
+/// binding sender, recipient and purpose. See docs/wire-protocol.md.
+/// </summary>
 public static class EnvelopeCrypto
 {
-    public static ClipEnvelope Seal(ClipPayload payload, Guid sourceDeviceId, ReadOnlySpan<byte> pairKey)
-        => SealJson(payload, sourceDeviceId, pairKey);
+    public static byte[] AssociatedData(EnvelopePurpose purpose, Guid sourceDeviceId, Guid recipientDeviceId) =>
+        Encoding.UTF8.GetBytes(
+            $"ClipboardSS/{WireProtocol.Version}|{purpose.WireName()}|" +
+            $"{sourceDeviceId.ToString("D").ToLowerInvariant()}|{recipientDeviceId.ToString("D").ToLowerInvariant()}");
 
-    public static ClipEnvelope SealJson<T>(T payload, Guid sourceDeviceId, ReadOnlySpan<byte> pairKey)
+    public static ClipEnvelope Seal(
+        ClipPayload payload, EnvelopePurpose purpose, Guid sourceDeviceId, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
+        => SealJson(payload, purpose, sourceDeviceId, recipientDeviceId, pairKey);
+
+    public static ClipEnvelope SealJson<T>(
+        T payload, EnvelopePurpose purpose, Guid sourceDeviceId, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
+        => SealPlaintext(
+            JsonSerializer.SerializeToUtf8Bytes(payload, WireJson.Options),
+            purpose, sourceDeviceId, recipientDeviceId, pairKey);
+
+    /// <summary>Seals raw inner bytes. <paramref name="nonce"/> is injectable only to reproduce the pinned vector.</summary>
+    public static ClipEnvelope SealPlaintext(
+        byte[] plaintext,
+        EnvelopePurpose purpose,
+        Guid sourceDeviceId,
+        Guid recipientDeviceId,
+        ReadOnlySpan<byte> pairKey,
+        byte[]? nonce = null)
     {
-        var nonce = new byte[12];
-        new SecureRandom().NextBytes(nonce);
-        var plaintext = JsonSerializer.SerializeToUtf8Bytes(payload, WireJson.Options);
-        var ciphertext = ChaCha20Poly1305Cipher.Encrypt(pairKey, nonce, plaintext);
+        if (nonce is null)
+        {
+            nonce = new byte[12];
+            new SecureRandom().NextBytes(nonce);
+        }
+        var ciphertext = ChaCha20Poly1305Cipher.Encrypt(
+            pairKey, nonce, plaintext, AssociatedData(purpose, sourceDeviceId, recipientDeviceId));
         return new ClipEnvelope
         {
+            V = WireProtocol.Version,
             SourceDeviceId = sourceDeviceId,
             Nonce = Convert.ToBase64String(nonce),
             Ciphertext = Convert.ToBase64String(ciphertext),
         };
     }
 
-    public static ClipPayload Open(ClipEnvelope envelope, ReadOnlySpan<byte> pairKey)
-        => OpenJson<ClipPayload>(envelope, pairKey);
+    public static ClipPayload Open(
+        ClipEnvelope envelope, EnvelopePurpose purpose, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
+        => OpenJson<ClipPayload>(envelope, purpose, recipientDeviceId, pairKey);
 
-    public static T OpenJson<T>(ClipEnvelope envelope, ReadOnlySpan<byte> pairKey)
+    /// <summary>Opens an envelope addressed to <paramref name="recipientDeviceId"/> (the local device).</summary>
+    public static T OpenJson<T>(
+        ClipEnvelope envelope, EnvelopePurpose purpose, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
     {
+        var plaintext = OpenPlaintext(envelope, purpose, recipientDeviceId, pairKey);
+        try
+        {
+            return JsonSerializer.Deserialize<T>(plaintext, WireJson.Options)
+                ?? throw new EnvelopeCryptoException("The envelope payload is empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw new EnvelopeCryptoException("The envelope could not be decrypted.", exception);
+        }
+    }
+
+    public static byte[] OpenPlaintext(
+        ClipEnvelope envelope, EnvelopePurpose purpose, Guid recipientDeviceId, ReadOnlySpan<byte> pairKey)
+    {
+        if (envelope.V != WireProtocol.Version)
+        {
+            throw new UnsupportedEnvelopeVersionException(envelope.V);
+        }
         try
         {
             var nonce = Convert.FromBase64String(envelope.Nonce);
@@ -42,14 +125,13 @@ public static class EnvelopeCrypto
                 throw new EnvelopeCryptoException("The envelope nonce or ciphertext is malformed.");
             }
 
-            var plaintext = ChaCha20Poly1305Cipher.Decrypt(pairKey, nonce, ciphertext);
-            return JsonSerializer.Deserialize<T>(plaintext, WireJson.Options)
-                ?? throw new EnvelopeCryptoException("The envelope payload is empty.");
+            return ChaCha20Poly1305Cipher.Decrypt(
+                pairKey, nonce, ciphertext,
+                AssociatedData(purpose, envelope.SourceDeviceId, recipientDeviceId));
         }
         catch (Exception exception) when (
             exception is InvalidCipherTextException
                 or FormatException
-                or JsonException
                 or ArgumentException)
         {
             throw new EnvelopeCryptoException("The envelope could not be decrypted.", exception);

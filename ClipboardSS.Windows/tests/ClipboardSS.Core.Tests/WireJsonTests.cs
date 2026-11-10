@@ -61,7 +61,7 @@ public sealed class WireJsonTests
         };
 
         Assert.Equal(
-            "{\"v\":1,\"sourceDeviceId\":\"550e8400-e29b-41d4-a716-446655440000\",\"nonce\":\"AA==\",\"ciphertext\":\"AQ==\"}",
+            "{\"v\":2,\"sourceDeviceId\":\"550e8400-e29b-41d4-a716-446655440000\",\"nonce\":\"AA==\",\"ciphertext\":\"AQ==\"}",
             JsonSerializer.Serialize(envelope, WireJson.Options));
     }
 }

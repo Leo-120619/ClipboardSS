@@ -88,14 +88,15 @@ struct ClipboardSyncTests {
         let payload = ClipPayload(id: UUID(), type: .text, createdAt: Date(), text: "secret message", previewText: "secret", contentHash: "hash123", sourceDeviceName: "Mac")
         let key = SymmetricKey(size: .bits256)
         
-        let envelope = try ClipEnvelope.seal(payload: payload, sourceDeviceId: UUID(), pairKey: key)
+        let recipient = UUID()
+        let envelope = try ClipEnvelope.seal(payload: payload, purpose: .clip, sourceDeviceId: UUID(), recipientDeviceId: recipient, pairKey: key)
         
-        let opened = try envelope.open(pairKey: key)
+        let opened = try envelope.open(ClipPayload.self, purpose: .clip, recipientDeviceId: recipient, pairKey: key)
         #expect(opened.text == "secret message")
         
         let wrongKey = SymmetricKey(size: .bits256)
         #expect(throws: EnvelopeError.decryptionFailed) {
-            try envelope.open(pairKey: wrongKey)
+            try envelope.open(ClipPayload.self, purpose: .clip, recipientDeviceId: recipient, pairKey: wrongKey)
         }
     }
     
@@ -204,6 +205,54 @@ struct ClipboardSyncTests {
         let secondResult = try await sender.broadcast(clip: clip, to: [peer, selfPeer])
         #expect(transport.sentRequests.count == 2)
         #expect(secondResult.successCount == 1)
+    }
+
+    @Test("ClipSender seals for the recipient and skips peers that need an update")
+    func clipSenderSealsForRecipientAndSkipsOutdatedPeers() async throws {
+        let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
+        let transport = FakePeerTransport()
+        let myId = UUID()
+        let sender = ClipSender(identity: DeviceIdentity(id: myId, name: "Mac"), pairedStore: pairedStore, transport: transport, storageDirectory: try syncTemporaryDirectory())
+
+        let currentId = UUID()
+        let outdatedId = UUID()
+        let key = SymmetricKey(size: .bits256)
+        try await pairedStore.addDevice(PairedDevice(id: currentId, name: "Phone"), key: key)
+        try await pairedStore.addDevice(PairedDevice(id: outdatedId, name: "Old"), key: key)
+
+        let clip = ClipItem(type: .text, createdAt: Date(), text: "hi", previewText: "hi", contentHash: "123")
+        let result = try await sender.broadcast(clip: clip, to: [
+            Peer(id: currentId, name: "Phone", host: "10.0.0.1", port: 8080),
+            Peer(id: outdatedId, name: "Old", host: "10.0.0.2", port: 8080, protocolVersion: 1),
+        ])
+
+        #expect(transport.sentRequests.count == 1)
+        #expect(transport.sentRequests[0].1.id == currentId)
+        #expect(result.successCount == 1)
+        #expect(result.needsUpdateCount == 1)
+
+        let request = try HTTPCodec.parseRequest(transport.sentRequests[0].0)
+        let envelope = try JSONDecoder().decode(ClipEnvelope.self, from: request.body)
+        #expect(envelope.v == 2)
+        let opened = try envelope.open(ClipPayload.self, purpose: .clip, recipientDeviceId: currentId, pairKey: key)
+        #expect(opened.text == "hi")
+    }
+
+    @Test("ClipSender counts a 426 answer as needing an update")
+    func clipSenderCounts426AsNeedsUpdate() async throws {
+        let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
+        let transport = FakePeerTransport()
+        transport.responseData = HTTPCodec.encodeResponse(
+            HTTPResponse(statusCode: 426, headers: [:], body: Data(#"{"status":"upgradeRequired","minVersion":2}"#.utf8))
+        )
+        let sender = ClipSender(identity: DeviceIdentity(id: UUID(), name: "Mac"), pairedStore: pairedStore, transport: transport, storageDirectory: try syncTemporaryDirectory())
+        let peerId = UUID()
+        try await pairedStore.addDevice(PairedDevice(id: peerId, name: "Phone"), key: SymmetricKey(size: .bits256))
+
+        let clip = ClipItem(type: .text, createdAt: Date(), text: "hi", previewText: "hi", contentHash: "123")
+        let result = try await sender.broadcast(clip: clip, to: [Peer(id: peerId, name: "Phone", host: "10.0.0.1", port: 8080)])
+        #expect(result.failureCount == 1)
+        #expect(result.needsUpdateCount == 1)
     }
 
     @Test("ClipSender treats non-200 responses as failed sends")

@@ -10,6 +10,8 @@ struct FileReceiverTests {
     struct Fixture {
         let receiver: FileReceiver
         let peerId: UUID
+        /// The receiving device's own id (envelope recipient).
+        let localId: UUID
         let key: SymmetricKey
         let destinationDir: URL
         let clock: MutableClock
@@ -21,14 +23,16 @@ struct FileReceiverTests {
         let store = try await makePairedStore(peerId: peerId, key: key)
         let clock = MutableClock(now)
         let destinationDir = try temporaryDirectory()
+        let localId = UUID()
         let receiver = FileReceiver(
             pairedStore: store,
+            localDeviceId: localId,
             transfersDirectory: try temporaryDirectory().appendingPathComponent("Transfers"),
             destinationProvider: { destinationDir },
             now: clock.now,
             idleTimeout: 60
         )
-        return Fixture(receiver: receiver, peerId: peerId, key: key, destinationDir: destinationDir, clock: clock)
+        return Fixture(receiver: receiver, peerId: peerId, localId: localId, key: key, destinationDir: destinationDir, clock: clock)
     }
 
     /// Builds an offer for `data` split at `chunkSize`, returning the offer + sealed chunks.
@@ -61,7 +65,7 @@ struct FileReceiverTests {
             createdAt: Date(),
             sourceDeviceName: "Peer"
         )
-        let offer = try sealedEnvelope(payload, sourceDeviceId: fixture.peerId, key: fixture.key)
+        let offer = try sealedEnvelope(payload, purpose: .fileOffer, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
         return (offer, chunks, transferId)
     }
 
@@ -81,7 +85,7 @@ struct FileReceiverTests {
         for (i, chunk) in chunks.enumerated() {
             #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: i, body: chunk).statusCode == 200)
         }
-        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), sourceDeviceId: fixture.peerId, key: fixture.key)
+        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), purpose: .fileFinish, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
         #expect(await fixture.receiver.handleFinish(envelope: finish).statusCode == 200)
 
         let dest = fixture.destinationDir.appendingPathComponent("file.bin")
@@ -97,7 +101,7 @@ struct FileReceiverTests {
         for i in [2, 0, 1] {
             #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: i, body: chunks[i]).statusCode == 200)
         }
-        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), sourceDeviceId: fixture.peerId, key: fixture.key)
+        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), purpose: .fileFinish, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
         #expect(await fixture.receiver.handleFinish(envelope: finish).statusCode == 200)
         #expect(try Data(contentsOf: fixture.destinationDir.appendingPathComponent("file.bin")) == data)
     }
@@ -134,7 +138,7 @@ struct FileReceiverTests {
                 transferId: id, fileName: "file.bin", fileSize: size,
                 mimeType: "application/octet-stream", fileHash: "h", chunkSize: chunkSize,
                 chunkCount: count, createdAt: Date(), sourceDeviceName: "Peer"
-            ), sourceDeviceId: fixture.peerId, key: fixture.key)
+            ), purpose: .fileOffer, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
         }
         let invalidId = try offer(id: "../../evil", size: 1, chunkSize: 1, count: 1)
         let invalidIdResponse = await fixture.receiver.handleOffer(envelope: invalidId)
@@ -153,7 +157,7 @@ struct FileReceiverTests {
         let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
         _ = await fixture.receiver.handleOffer(envelope: offer)
         _ = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0])
-        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), sourceDeviceId: fixture.peerId, key: fixture.key)
+        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), purpose: .fileFinish, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
         let response = await fixture.receiver.handleFinish(envelope: finish)
         #expect(response.statusCode == 409)
         #expect(status(response) == "incomplete")
@@ -182,7 +186,7 @@ struct FileReceiverTests {
         for (i, chunk) in chunks.enumerated() {
             _ = await fixture.receiver.handleChunk(transferId: id, chunkIndex: i, body: chunk)
         }
-        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), sourceDeviceId: fixture.peerId, key: fixture.key)
+        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), purpose: .fileFinish, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
         let response = await fixture.receiver.handleFinish(envelope: finish)
         #expect(response.statusCode == 422)
         #expect(status(response) == "hashMismatch")
@@ -196,7 +200,7 @@ struct FileReceiverTests {
         let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
         _ = await fixture.receiver.handleOffer(envelope: offer)
         _ = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0])
-        let cancel = try sealedEnvelope(FileCancelPayload(transferId: id), sourceDeviceId: fixture.peerId, key: fixture.key)
+        let cancel = try sealedEnvelope(FileCancelPayload(transferId: id), purpose: .fileCancel, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
         #expect(await fixture.receiver.handleCancel(envelope: cancel).statusCode == 200)
         #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 1, body: chunks[1]).statusCode == 410)
     }
@@ -229,7 +233,7 @@ struct FileReceiverTests {
             mimeType: "application/octet-stream", fileHash: "h", chunkSize: 4, chunkCount: 1,
             createdAt: Date(), sourceDeviceName: "Stranger"
         )
-        let offer = try sealedEnvelope(payload, sourceDeviceId: strangerId, key: strangerKey)
+        let offer = try sealedEnvelope(payload, purpose: .fileOffer, sourceDeviceId: strangerId, recipientDeviceId: fixture.localId, key: strangerKey)
         #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 401)
     }
 
@@ -251,8 +255,51 @@ struct FileReceiverTests {
         let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
         _ = await fixture.receiver.handleOffer(envelope: offer)
         _ = await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0])
-        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), sourceDeviceId: fixture.peerId, key: fixture.key)
+        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), purpose: .fileFinish, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
         #expect(await fixture.receiver.handleFinish(envelope: finish).statusCode == 200)
         #expect(try Data(contentsOf: fixture.destinationDir.appendingPathComponent("file (1).bin")) == data)
+    }
+
+    @Test("a captured offer envelope is not accepted as finish or cancel")
+    func offerEnvelopeCannotFinishOrCancel() async throws {
+        let fixture = try await makeFixture()
+        let data = Data((0..<8).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+
+        #expect(await fixture.receiver.handleFinish(envelope: offer).statusCode == 401)
+        _ = await fixture.receiver.handleCancel(envelope: offer)
+
+        // The session survived: chunks are still accepted.
+        #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 0, body: chunks[0]).statusCode == 200)
+    }
+
+    @Test("an offer sealed for another recipient is rejected")
+    func offerForAnotherRecipientIsRejected() async throws {
+        let fixture = try await makeFixture()
+        let payload = FileOfferPayload(
+            transferId: UUID().uuidString.lowercased(), fileName: "x.bin", fileSize: 1,
+            mimeType: "application/octet-stream", fileHash: "h", chunkSize: 4, chunkCount: 1,
+            createdAt: Date(), sourceDeviceName: "Peer"
+        )
+        let offer = try sealedEnvelope(payload, purpose: .fileOffer, sourceDeviceId: fixture.peerId, recipientDeviceId: UUID(), key: fixture.key)
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 401)
+    }
+
+    @Test("v1 envelopes get 426 upgradeRequired on offer, finish and cancel")
+    func v1EnvelopeGetsUpgradeRequired() async throws {
+        let fixture = try await makeFixture()
+        let (offer, _, _) = try makeTransfer(fixture, data: Data([1]), chunkSize: 4)
+        let v1 = ClipEnvelope(v: 1, sourceDeviceId: offer.sourceDeviceId, nonce: offer.nonce, ciphertext: offer.ciphertext)
+        for response in [
+            await fixture.receiver.handleOffer(envelope: v1),
+            await fixture.receiver.handleFinish(envelope: v1),
+            await fixture.receiver.handleCancel(envelope: v1),
+        ] {
+            #expect(response.statusCode == 426)
+            let obj = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+            #expect(obj?["status"] as? String == "upgradeRequired")
+            #expect(obj?["minVersion"] as? Int == 2)
+        }
     }
 }

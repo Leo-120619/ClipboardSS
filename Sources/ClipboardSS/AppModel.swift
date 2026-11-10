@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     /// Live reachability per paired device. In-memory only: it is rebuilt from scratch
     /// on every refresh, so unpaired devices drop out on their own.
     @Published private(set) var onlineDeviceIds: Set<UUID> = []
+    /// Paired devices whose `/v1/id` probe advertised an older wire protocol.
+    @Published private(set) var outdatedDeviceIds: Set<UUID> = []
     @Published private(set) var transfers: [FileTransferState] = []
     @Published var pendingSend: PendingSend?
 
@@ -166,6 +168,15 @@ final class AppModel: ObservableObject {
         onlineDeviceIds.contains(id)
     }
 
+    /// True when the device advertises an older wire protocol: it is listed, but nothing is sent to it.
+    func deviceNeedsUpdate(_ id: UUID) -> Bool {
+        Self.deviceNeedsUpdate(id, mdnsPeers: peerBrowser.peers, outdatedDeviceIds: outdatedDeviceIds)
+    }
+
+    nonisolated static func deviceNeedsUpdate(_ id: UUID, mdnsPeers: [Peer], outdatedDeviceIds: Set<UUID>) -> Bool {
+        outdatedDeviceIds.contains(id) || mdnsPeers.contains { $0.id == id && $0.needsUpdate }
+    }
+
     func unpairDevice(_ id: UUID) {
         Task {
             do {
@@ -252,6 +263,12 @@ final class AppModel: ObservableObject {
             onlineDeviceIds.remove(id)
             if reportError { lastError = "That device is not reachable right now." }
             return false
+        }
+
+        if match.needsUpdate {
+            outdatedDeviceIds.insert(id)
+        } else {
+            outdatedDeviceIds.remove(id)
         }
 
         do {
@@ -399,7 +416,10 @@ final class AppModel: ObservableObject {
     private func broadcast(clip: ClipItem) async {
         let targets = Self.composeSendTargets(mdnsPeers: peerBrowser.peers, pairedDevices: pairedDevices)
         do {
-            _ = try await clipSender.broadcast(clip: clip, to: targets)
+            let result = try await clipSender.broadcast(clip: clip, to: targets)
+            if result.needsUpdateCount > 0 {
+                lastError = ProtocolMismatch.updateOtherDeviceMessage
+            }
         } catch {
             lastError = error.localizedDescription
         }
@@ -430,6 +450,10 @@ final class AppModel: ObservableObject {
     }
 
     private func startFileSend(url: URL, to deviceId: UUID) {
+        guard !deviceNeedsUpdate(deviceId) else {
+            lastError = ProtocolMismatch.updateOtherDeviceMessage
+            return
+        }
         guard let peer = resolvePeer(for: deviceId) else {
             lastError = "That device is not reachable right now."
             return

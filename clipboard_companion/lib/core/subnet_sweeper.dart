@@ -48,12 +48,14 @@ class SubnetSweeper {
       final deviceId = body['deviceId'];
       if (deviceId is! String || deviceId.isEmpty) return null;
       final deviceName = body['deviceName'];
+      final version = body['v'];
 
       return Peer(
         id: deviceId,
         name: deviceName is String && deviceName.isNotEmpty ? deviceName : host,
         host: host,
         port: fixedPort,
+        protocolVersion: version is int ? version : 1,
       );
     } catch (_) {
       return null;
@@ -103,7 +105,9 @@ class SubnetSweeper {
   }
 
   static Future<String?> _ownIPv4() async {
-    final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
+    final interfaces = await NetworkInterface.list(
+      type: InternetAddressType.IPv4,
+    );
     for (final ni in interfaces) {
       for (final address in ni.addresses) {
         final value = address.address;

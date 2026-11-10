@@ -74,7 +74,7 @@ public sealed class MdnsService : IDisposable
         {
             _identity.Id.ToString("D").ToLowerInvariant(),
             ClipServerRouter.BonjourSafeTxtValue(_identity.Name),
-            "1",
+            WireProtocol.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
         };
         using var nativeKeys = new NativeStringArray(keys);
         using var nativeValues = new NativeStringArray(values);
@@ -164,7 +164,11 @@ public sealed class MdnsService : IDisposable
             if (status != 0 || instancePointer == IntPtr.Zero) return;
             var instance = Marshal.PtrToStructure<DnsServiceInstance>(instancePointer);
             var properties = ReadProperties(instance);
-            if (!properties.TryGetValue("v", out var version) || version != "1"
+            // Older peers are still listed (marked "needs update"), never hidden.
+            if (!properties.TryGetValue("v", out var versionText)
+                || !int.TryParse(versionText, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out var version)
+                || version < 1
                 || !properties.TryGetValue("deviceId", out var idValue)
                 || !Guid.TryParse(idValue, out var id)
                 || id == _identity.Id)
@@ -177,7 +181,7 @@ public sealed class MdnsService : IDisposable
             var name = properties.GetValueOrDefault("deviceName");
             if (string.IsNullOrWhiteSpace(name)) name = id.ToString("D");
             var port = instance.Port == 0 ? (ushort)51888 : instance.Port;
-            _peers[id] = new Peer(id, name, host, port);
+            _peers[id] = new Peer(id, name, host, port, version);
             PeersChanged?.Invoke(this, EventArgs.Empty);
         }
         finally

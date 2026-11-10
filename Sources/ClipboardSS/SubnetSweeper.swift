@@ -114,7 +114,8 @@ extension SubnetSweeper {
         }
 
         let name = (obj["deviceName"] as? String) ?? host
-        return Peer(id: id, name: name, host: host, port: 51888)
+        let version = (obj["v"] as? Int) ?? 1
+        return Peer(id: id, name: name, host: host, port: 51888, protocolVersion: version)
     }
 
     private static func sendProbe(_ data: Data, host: String, timeoutMs: Int) async throws -> Data {

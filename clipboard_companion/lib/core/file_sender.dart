@@ -22,6 +22,14 @@ class FileSendException implements Exception {
 
 class FileSendCancelledException implements Exception {}
 
+/// The peer runs another wire protocol version (advertised, or answered 426).
+class FileSendNeedsUpdateException extends FileSendException {
+  FileSendNeedsUpdateException() : super(updateOtherDeviceMessage);
+
+  @override
+  String toString() => updateOtherDeviceMessage;
+}
+
 /// Sends a single file to one paired peer using the chunked protocol. Streams the file in
 /// 4 MiB slices via [RandomAccessFile] — never loads the whole file. Two passes: a
 /// streaming hash pass, then offer -> chunks -> finish. Reports monotonic progress and
@@ -48,6 +56,7 @@ class FileSender {
   }) async {
     final key = await pairedStore.getKey(peer.id);
     if (key == null) throw FileSendException('not paired');
+    if (peer.needsUpdate) throw FileSendNeedsUpdateException();
 
     const chunkSize = FileTransferConstants.chunkSize;
     final fileSize = await file.length();
@@ -75,9 +84,10 @@ class FileSender {
     );
 
     // Offer — nothing registered on the receiver yet, so no cancel on failure.
-    final offerEnvelope = await CryptoEnvelopeUtils.sealJson(
+    final offerEnvelope = await _seal(
       offer.toJson(),
-      identity.id,
+      EnvelopePurpose.fileOffer,
+      peer,
       key,
     );
     await _post(
@@ -119,9 +129,10 @@ class FileSender {
       }
 
       final finish = FileFinishPayload(transferId);
-      final finishEnvelope = await CryptoEnvelopeUtils.sealJson(
+      final finishEnvelope = await _seal(
         finish.toJson(),
-        identity.id,
+        EnvelopePurpose.fileFinish,
+        peer,
         key,
       );
       await _post(
@@ -143,9 +154,10 @@ class FileSender {
     SecretKey key,
   ) async {
     try {
-      final envelope = await CryptoEnvelopeUtils.sealJson(
+      final envelope = await _seal(
         FileCancelPayload(transferId).toJson(),
-        identity.id,
+        EnvelopePurpose.fileCancel,
+        peer,
         key,
       );
       await _post(
@@ -158,6 +170,19 @@ class FileSender {
       // best effort
     }
   }
+
+  Future<ClipEnvelope> _seal(
+    Map<String, dynamic> json,
+    EnvelopePurpose purpose,
+    Peer peer,
+    SecretKey key,
+  ) => CryptoEnvelopeUtils.sealJson(
+    json,
+    purpose: purpose,
+    sourceDeviceId: identity.id,
+    recipientDeviceId: peer.id,
+    pairKey: key,
+  );
 
   Future<void> _post(
     Peer peer,
@@ -184,6 +209,7 @@ class FileSender {
     } on TimeoutException {
       throw FileSendException('$path timed out');
     }
+    if (response.statusCode == 426) throw FileSendNeedsUpdateException();
     if (response.statusCode != 200) {
       throw FileSendException('$path returned ${response.statusCode}');
     }

@@ -8,7 +8,8 @@ class PeerBrowser {
   BonsoirDiscovery? _browser;
   StreamSubscription? _subscription;
 
-  final StreamController<List<Peer>> _peersController = StreamController<List<Peer>>.broadcast();
+  final StreamController<List<Peer>> _peersController =
+      StreamController<List<Peer>>.broadcast();
   Stream<List<Peer>> get peersStream => _peersController.stream;
 
   final Map<String, Peer> _peers = {};
@@ -55,7 +56,10 @@ class PeerBrowser {
     await _browser!.start();
   }
 
-  static String? _getValueCaseInsensitive(Map<String, String>? map, String key) {
+  static String? _getValueCaseInsensitive(
+    Map<String, String>? map,
+    String key,
+  ) {
     if (map == null) return null;
     if (map.containsKey(key)) return map[key];
     final lowerKey = key.toLowerCase();
@@ -74,17 +78,23 @@ class PeerBrowser {
     required int port,
     required String selfId,
   }) {
-    final id = canonicalDeviceId(_getValueCaseInsensitive(attrs, 'deviceId') ?? serviceName);
+    final id = canonicalDeviceId(
+      _getValueCaseInsensitive(attrs, 'deviceId') ?? serviceName,
+    );
     if (id == selfId) {
       return null;
     }
     final name = _getValueCaseInsensitive(attrs, 'deviceName') ?? serviceName;
+    // Older peers are still listed (marked "needs update"), never hidden.
+    final version =
+        int.tryParse(_getValueCaseInsensitive(attrs, 'v') ?? '') ?? 1;
 
     return Peer(
       id: id,
       name: name,
       host: host,
       port: port,
+      protocolVersion: version,
     );
   }
 
@@ -125,7 +135,7 @@ class PeerAdvertiser {
       attributes: {
         'deviceId': identity.id,
         'deviceName': identity.name,
-        'v': '1',
+        'v': '$wireProtocolVersion',
       },
     );
 

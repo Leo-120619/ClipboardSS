@@ -134,6 +134,47 @@ void main() {
     expect(requests.map((r) => r.url.path), ['/v1/file/offer']);
   });
 
+  test('refuses to send to a peer that advertises an older protocol', () async {
+    final requests = <http.Request>[];
+    final client = MockClient((request) async {
+      requests.add(request);
+      return http.Response('{}', 200);
+    });
+    final sender = await makeSender(client);
+    final outdated = Peer(
+      id: peerId,
+      name: 'Peer',
+      host: '10.0.0.1',
+      port: 51888,
+      protocolVersion: 1,
+    );
+
+    await expectLater(
+      sender.sendFile(file: makeFile(16), peer: outdated),
+      throwsA(isA<FileSendNeedsUpdateException>()),
+    );
+    expect(requests, isEmpty);
+  });
+
+  test('a 426 answer surfaces as needs-update, not unauthorized', () async {
+    final client = MockClient(
+      (request) async =>
+          http.Response('{"status":"upgradeRequired","minVersion":2}', 426),
+    );
+    final sender = await makeSender(client);
+
+    await expectLater(
+      sender.sendFile(file: makeFile(16), peer: peer),
+      throwsA(
+        isA<FileSendNeedsUpdateException>().having(
+          (e) => e.toString(),
+          'message',
+          updateOtherDeviceMessage,
+        ),
+      ),
+    );
+  });
+
   test('sending to an unpaired peer throws', () async {
     final client = MockClient((request) async => http.Response('{}', 200));
     final sender = await makeSender(client);
@@ -177,6 +218,8 @@ void main() {
       final destDir = makeTempDir('dest');
       final receiver = FileReceiver(
         pairedStore: store,
+        // One shared store: the receiver is the `peer` the sender addresses.
+        localDeviceId: peer.id,
         transfersDirectory: makeTempDir('transfers'),
         destinationProvider: () => destDir,
       );

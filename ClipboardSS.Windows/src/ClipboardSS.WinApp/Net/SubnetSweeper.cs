@@ -75,7 +75,7 @@ public sealed class SubnetSweeper(TimeSpan? timeout = null, int concurrency = 32
             var identity = JsonSerializer.Deserialize<IdentityResponse>(response.Body, WireJson.Options);
             return identity is null
                 ? null
-                : new Peer(identity.DeviceId, identity.DeviceName, host, 51888);
+                : new Peer(identity.DeviceId, identity.DeviceName, host, 51888, identity.V ?? 1);
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -83,5 +83,5 @@ public sealed class SubnetSweeper(TimeSpan? timeout = null, int concurrency = 32
         }
     }
 
-    private sealed record IdentityResponse(Guid DeviceId, string DeviceName, int V);
+    private sealed record IdentityResponse(Guid DeviceId, string DeviceName, int? V);
 }

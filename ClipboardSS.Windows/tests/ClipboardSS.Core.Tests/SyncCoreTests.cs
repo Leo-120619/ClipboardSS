@@ -1,3 +1,6 @@
+using System.Text.Json;
+using ClipboardSS.Core.Crypto;
+using ClipboardSS.Core.Json;
 using System.Text;
 using ClipboardSS.Core.Models;
 using ClipboardSS.Core.Protocol;
@@ -209,6 +212,68 @@ public sealed class SyncCoreTests
             TestContext.Current.CancellationToken);
         Assert.Equal(1, result.FailureCount);
         Assert.Equal(0, result.SuccessCount);
+    }
+
+    [Fact]
+    public async Task SenderSealsForRecipientAndSkipsPeersThatNeedAnUpdate()
+    {
+        using var directory = new TemporaryDirectory();
+        var myId = Guid.NewGuid();
+        var currentId = Guid.NewGuid();
+        var outdatedId = Guid.NewGuid();
+        var key = Enumerable.Repeat((byte)9, 32).ToArray();
+        var pairedStore = new PairedDeviceStore(
+            System.IO.Path.Combine(directory.Path, "paired.json"),
+            new InMemoryPairKeyStorage());
+        pairedStore.AddDevice(new PairedDevice(currentId, "Phone"), key);
+        pairedStore.AddDevice(new PairedDevice(outdatedId, "Old"), key);
+        var transport = new FakePeerTransport();
+        var sender = new ClipSender(new DeviceIdentity(myId, "Windows"), pairedStore, transport, directory.Path);
+        var clip = new ClipStore(directory.Path).AddText("hi");
+
+        var result = await sender.BroadcastAsync(clip, [
+            new Peer(currentId, "Phone", "10.0.0.3", 51888),
+            new Peer(outdatedId, "Old", "10.0.0.4", 51888, ProtocolVersion: 1),
+        ], TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, result.SuccessCount);
+        Assert.Equal(1, result.NeedsUpdateCount);
+        var request = HttpCodec.ParseRequest(Assert.Single(transport.Requests).Data);
+        var envelope = JsonSerializer.Deserialize<ClipEnvelope>(request.Body, WireJson.Options)!;
+        Assert.Equal(2, envelope.V);
+        Assert.Equal("hi", EnvelopeCrypto.Open(envelope, EnvelopePurpose.Clip, currentId, key).Text);
+
+        transport.Response = HttpCodec.EncodeResponse(new HttpResponse(426, new Dictionary<string, string>(), []));
+        result = await sender.BroadcastAsync(
+            clip, [new Peer(currentId, "Phone", "10.0.0.3", 51888)], TestContext.Current.CancellationToken);
+        Assert.Equal(1, result.FailureCount);
+        Assert.Equal(1, result.NeedsUpdateCount);
+    }
+
+    [Fact]
+    public async Task FileSenderRefusesOutdatedPeersAndMaps426ToNeedsUpdate()
+    {
+        using var directory = new TemporaryDirectory();
+        var peerId = Guid.NewGuid();
+        var pairedStore = new PairedDeviceStore(
+            System.IO.Path.Combine(directory.Path, "paired.json"),
+            new InMemoryPairKeyStorage());
+        pairedStore.AddDevice(new PairedDevice(peerId, "Phone"), Enumerable.Repeat((byte)9, 32).ToArray());
+        var file = System.IO.Path.Combine(directory.Path, "payload.bin");
+        await File.WriteAllBytesAsync(file, [1, 2, 3], TestContext.Current.CancellationToken);
+        var transport = new FakePeerTransport();
+        var sender = new FileSender(new DeviceIdentity(Guid.NewGuid(), "Windows"), pairedStore, transport);
+
+        var outdated = await Assert.ThrowsAsync<PeerNeedsUpdateException>(() => sender.SendAsync(
+            file, new Peer(peerId, "Phone", "10.0.0.3", 51888, ProtocolVersion: 1),
+            cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(WireProtocol.UpdateOtherDeviceMessage, outdated.Message);
+        Assert.Empty(transport.Requests);
+
+        transport.Response = HttpCodec.EncodeResponse(new HttpResponse(426, new Dictionary<string, string>(), []));
+        await Assert.ThrowsAsync<PeerNeedsUpdateException>(() => sender.SendAsync(
+            file, new Peer(peerId, "Phone", "10.0.0.3", 51888),
+            cancellationToken: TestContext.Current.CancellationToken));
     }
 
     private static readonly byte[] OnePixelPng = Convert.FromBase64String(

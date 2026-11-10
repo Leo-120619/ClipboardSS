@@ -6,13 +6,25 @@ public struct Peer: Equatable, Hashable, Sendable {
     public let name: String
     public let host: String
     public let port: UInt16
-    
-    public init(id: UUID, name: String, host: String, port: UInt16) {
+    /// Wire protocol version the peer advertised (mDNS TXT `v` or `/v1/id` `v`).
+    /// Peers resolved without an advertisement (stored host) are assumed current.
+    public let protocolVersion: Int
+
+    public init(id: UUID, name: String, host: String, port: UInt16, protocolVersion: Int = ClipEnvelope.currentVersion) {
         self.id = id
         self.name = name
         self.host = host
         self.port = port
+        self.protocolVersion = protocolVersion
     }
+
+    /// The peer speaks an older wire protocol: list it, but never send to it.
+    public var needsUpdate: Bool { protocolVersion < ClipEnvelope.currentVersion }
+}
+
+/// User-facing text for a peer that runs an older (or newer) wire protocol.
+public enum ProtocolMismatch {
+    public static let updateOtherDeviceMessage = "Update ClipboardSS on the other device to keep syncing."
 }
 
 public protocol PeerTransport: Sendable {
@@ -29,12 +41,15 @@ public struct ClipSendResult: Equatable, Sendable {
     public let pairedPeerCount: Int
     public let successCount: Int
     public let failureCount: Int
+    /// Paired peers skipped or refused (426) because they run another protocol version.
+    public let needsUpdateCount: Int
 
-    public init(visiblePeerCount: Int, pairedPeerCount: Int, successCount: Int, failureCount: Int) {
+    public init(visiblePeerCount: Int, pairedPeerCount: Int, successCount: Int, failureCount: Int, needsUpdateCount: Int = 0) {
         self.visiblePeerCount = visiblePeerCount
         self.pairedPeerCount = pairedPeerCount
         self.successCount = successCount
         self.failureCount = failureCount
+        self.needsUpdateCount = needsUpdateCount
     }
 
     public var hasVisiblePeers: Bool { visiblePeerCount > 0 }
@@ -47,6 +62,9 @@ public struct ClipSendHTTPStatusError: Error, Equatable, Sendable {
     public init(statusCode: Int) {
         self.statusCode = statusCode
     }
+
+    /// 426: the receiver speaks a different wire protocol version.
+    public var isUpgradeRequired: Bool { statusCode == 426 }
 }
 
 public struct ClipSender: Sendable {
@@ -69,14 +87,19 @@ public struct ClipSender: Sendable {
         }
         
         var pairedTargets: [(Peer, SymmetricKey)] = []
+        var outdatedCount = 0
         for peer in targets {
             if let key = try? await pairedStore.getKey(for: peer.id) {
-                pairedTargets.append((peer, key))
+                if peer.needsUpdate {
+                    outdatedCount += 1
+                } else {
+                    pairedTargets.append((peer, key))
+                }
             }
         }
         
         if pairedTargets.isEmpty {
-            return ClipSendResult(visiblePeerCount: targets.count, pairedPeerCount: 0, successCount: 0, failureCount: 0)
+            return ClipSendResult(visiblePeerCount: targets.count, pairedPeerCount: 0, successCount: 0, failureCount: 0, needsUpdateCount: outdatedCount)
         }
         
         var imageBase64: String? = nil
@@ -105,7 +128,13 @@ public struct ClipSender: Sendable {
             for (peer, key) in pairedTargets {
                 group.addTask {
                     do {
-                        let envelope = try ClipEnvelope.seal(payload: payload, sourceDeviceId: identity.id, pairKey: key)
+                        let envelope = try ClipEnvelope.seal(
+                            payload: payload,
+                            purpose: .clip,
+                            sourceDeviceId: identity.id,
+                            recipientDeviceId: peer.id,
+                            pairKey: key
+                        )
                         let encoder = JSONEncoder()
                         encoder.dateEncodingStrategy = .iso8601
                         let envelopeData = try encoder.encode(envelope)
@@ -130,9 +159,13 @@ public struct ClipSender: Sendable {
             }
             
             var failures: [Peer: Error] = [:]
+            var refusedCount = 0
             for try await (peer, error) in group {
                 if let error = error {
                     failures[peer] = error
+                    if (error as? ClipSendHTTPStatusError)?.isUpgradeRequired == true {
+                        refusedCount += 1
+                    }
                 }
             }
 
@@ -140,7 +173,8 @@ public struct ClipSender: Sendable {
                 visiblePeerCount: targets.count,
                 pairedPeerCount: pairedTargets.count,
                 successCount: pairedTargets.count - failures.count,
-                failureCount: failures.count
+                failureCount: failures.count,
+                needsUpdateCount: outdatedCount + refusedCount
             )
         }
     }

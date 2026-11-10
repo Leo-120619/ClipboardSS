@@ -54,7 +54,7 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
             {
                 deviceId = identity.Id,
                 deviceName = identity.Name,
-                v = 1,
+                v = WireProtocol.Version,
             }, WireJson.Options);
             return JsonResponse(200, body);
         }
@@ -65,6 +65,7 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
             {
                 var envelope = JsonSerializer.Deserialize<ClipEnvelope>(request.Body, WireJson.Options)
                     ?? throw new JsonException("Missing envelope.");
+                if (envelope.V != WireProtocol.Version) return UpgradeRequiredResponse();
                 var key = backend.GetPairKey(envelope.SourceDeviceId);
                 if (key is null)
                 {
@@ -73,7 +74,7 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
                 if (!backend.IsConnected(envelope.SourceDeviceId))
                     return TextResponse(401, "Unauthorized");
 
-                var payload = EnvelopeCrypto.Open(envelope, key);
+                var payload = EnvelopeCrypto.Open(envelope, EnvelopePurpose.Clip, identity.Id, key);
                 var result = backend.Receive(payload);
                 var status = result.Status == ReceiveStatus.Duplicate ? "duplicate" : "ok";
                 return JsonResponse(200, Encoding.UTF8.GetBytes($"{{\"status\":\"{status}\"}}"));
@@ -99,16 +100,17 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
             {
                 var envelope = JsonSerializer.Deserialize<ClipEnvelope>(request.Body, WireJson.Options)
                     ?? throw new JsonException("Missing envelope.");
+                if (envelope.V != WireProtocol.Version) return UpgradeRequiredResponse();
                 var key = backend.GetPairKey(envelope.SourceDeviceId);
                 if (key is null) return TextResponse(401, "Unauthorized");
                 if (!backend.IsConnected(envelope.SourceDeviceId)) return TextResponse(401, "Unauthorized");
                 FileReceiveResult result;
                 if (request.Path == "/v1/file/offer")
-                    result = await backend.HandleFileOfferAsync(EnvelopeCrypto.OpenJson<FileOfferPayload>(envelope, key), key, cancellationToken);
+                    result = await backend.HandleFileOfferAsync(EnvelopeCrypto.OpenJson<FileOfferPayload>(envelope, EnvelopePurpose.FileOffer, identity.Id, key), key, cancellationToken);
                 else if (request.Path == "/v1/file/finish")
-                    result = await backend.HandleFileFinishAsync(EnvelopeCrypto.OpenJson<FileFinishPayload>(envelope, key).TransferId, cancellationToken);
+                    result = await backend.HandleFileFinishAsync(EnvelopeCrypto.OpenJson<FileFinishPayload>(envelope, EnvelopePurpose.FileFinish, identity.Id, key).TransferId, cancellationToken);
                 else
-                    result = await backend.HandleFileCancelAsync(EnvelopeCrypto.OpenJson<FileCancelPayload>(envelope, key).TransferId, cancellationToken);
+                    result = await backend.HandleFileCancelAsync(EnvelopeCrypto.OpenJson<FileCancelPayload>(envelope, EnvelopePurpose.FileCancel, identity.Id, key).TransferId, cancellationToken);
                 return FileResponse(result);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested) { return TextResponse(400, "Bad Request"); }
@@ -161,6 +163,11 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
         .Replace('\u201d', '"')
         .Where(character => character <= 0x7f)
         .ToArray());
+
+    /// <summary>426 for an envelope whose <c>v</c> is not <see cref="WireProtocol.Version"/>.</summary>
+    private static HttpResponse UpgradeRequiredResponse() =>
+        JsonResponse(426, Encoding.UTF8.GetBytes(
+            $"{{\"status\":\"upgradeRequired\",\"minVersion\":{WireProtocol.Version}}}"));
 
     private static HttpResponse JsonResponse(int statusCode, byte[] body) =>
         new(statusCode, new Dictionary<string, string> { ["Content-Type"] = "application/json" }, body);

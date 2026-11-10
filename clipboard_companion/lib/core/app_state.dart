@@ -70,6 +70,21 @@ Peer? resolveVerifiedPeer({
   );
 }
 
+/// True when a paired device advertises an older wire protocol (via mDNS, or via the
+/// last `/v1/id` probe recorded in [outdatedDeviceIds]): it is listed, but nothing is
+/// sent to it.
+bool deviceNeedsUpdate({
+  required String deviceId,
+  required List<Peer> mdnsPeers,
+  required Set<String> outdatedDeviceIds,
+}) {
+  final canonical = canonicalDeviceId(deviceId);
+  return outdatedDeviceIds.contains(canonical) ||
+      mdnsPeers.any(
+        (peer) => canonicalDeviceId(peer.id) == canonical && peer.needsUpdate,
+      );
+}
+
 List<Peer> composeSendTargets(
   List<Peer> mdnsPeers,
   List<PairedDevice> pairedDevices,
@@ -214,6 +229,9 @@ class AppState extends ChangeNotifier {
   /// Live reachability per paired device id. In-memory only: it is rebuilt from
   /// scratch on every refresh, so unpaired devices drop out on their own.
   final Map<String, bool> deviceOnline = {};
+
+  /// Paired devices whose `/v1/id` probe advertised an older wire protocol.
+  final Set<String> outdatedDeviceIds = {};
   final Map<String, TransferCancelToken> _sendTokens = {};
   final Set<String> _consumedShareBatchIds = {};
   IncomingShareBatch? pendingShareBatch;
@@ -412,6 +430,7 @@ class AppState extends ChangeNotifier {
       final destinationDir = await _resolveDestinationDir();
       final nextFileReceiver = FileReceiver(
         pairedStore: pairedStore,
+        localDeviceId: identity.id,
         transfersDirectory: transfersDir,
         destinationProvider: () => destinationDir,
       );
@@ -612,12 +631,24 @@ class AppState extends ChangeNotifier {
       return false;
     }
 
+    if (matched.needsUpdate) {
+      outdatedDeviceIds.add(canonical);
+    } else {
+      outdatedDeviceIds.remove(canonical);
+    }
     await pairedStore.updateHost(canonical, matched.host);
     deviceOnline[canonical] = true;
     lastError = null;
     notifyListeners();
     return true;
   }
+
+  /// Whether [id] advertises an older wire protocol (see [deviceNeedsUpdate]).
+  bool isDeviceOutdated(String id) => deviceNeedsUpdate(
+    deviceId: id,
+    mdnsPeers: _coreNetworkingStarted ? peerBrowser.peers : const [],
+    outdatedDeviceIds: outdatedDeviceIds,
+  );
 
   /// Whether [id] answered on the network as of the last liveness refresh.
   bool isDeviceOnline(String id) =>
@@ -694,6 +725,11 @@ class AppState extends ChangeNotifier {
       pairedStore.devices.where((d) => resolvePeer(d.id) != null).toList();
 
   Future<bool> sendFileTo(File file, String deviceId) async {
+    if (isDeviceOutdated(deviceId)) {
+      lastError = updateOtherDeviceMessage;
+      notifyListeners();
+      return false;
+    }
     final connected = await reconnectDevice(deviceId, reportError: false);
     final peer = connected ? resolvePeer(deviceId) : null;
     if (peer == null) {

@@ -96,7 +96,13 @@ void main() {
         contentHash: 'ignored',
         sourceDeviceName: 'Peer',
       );
-      final envelope = await CryptoEnvelopeUtils.seal(payload, peerId, key);
+      final envelope = await CryptoEnvelopeUtils.seal(
+        payload,
+        purpose: EnvelopePurpose.clip,
+        sourceDeviceId: peerId,
+        recipientDeviceId: 'cccccccc-0000-0000-0000-000000000000',
+        pairKey: key,
+      );
       return handler(
         Request(
           'POST',

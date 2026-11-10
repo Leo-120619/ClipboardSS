@@ -170,11 +170,12 @@ public sealed class CryptoParityTests
             SourceDeviceName = "Mac",
         };
         var key = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
-        var envelope = EnvelopeCrypto.Seal(payload, Guid.NewGuid(), key);
+        var recipient = Guid.NewGuid();
+        var envelope = EnvelopeCrypto.Seal(payload, EnvelopePurpose.Clip, Guid.NewGuid(), recipient, key);
 
-        Assert.Equal(payload, EnvelopeCrypto.Open(envelope, key));
+        Assert.Equal(payload, EnvelopeCrypto.Open(envelope, EnvelopePurpose.Clip, recipient, key));
         Assert.Throws<EnvelopeCryptoException>(() =>
-            EnvelopeCrypto.Open(envelope, Enumerable.Repeat((byte)42, 32).ToArray()));
+            EnvelopeCrypto.Open(envelope, EnvelopePurpose.Clip, recipient, Enumerable.Repeat((byte)42, 32).ToArray()));
     }
 
     private static string Hex(ReadOnlySpan<byte> data) => Convert.ToHexString(data).ToLowerInvariant();

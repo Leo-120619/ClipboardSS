@@ -49,6 +49,7 @@ void main() {
       fileReceiver: withReceiver
           ? FileReceiver(
               pairedStore: store,
+              localDeviceId: identity.id,
               transfersDirectory: makeTempDir('transfers'),
               destinationProvider: () => makeTempDir('dest'),
             )

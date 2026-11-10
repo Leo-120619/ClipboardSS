@@ -16,7 +16,7 @@ struct PeerBrowserTests {
             txt: [
                 "deviceName": "Android Device",
                 "deviceId": androidId.uuidString.lowercased(),
-                "v": "1",
+                "v": "2",
             ],
             identityId: identityId
         )
@@ -33,12 +33,36 @@ struct PeerBrowserTests {
             serviceName: "Android Device",
             txt: [
                 "deviceId": androidId.uuidString.lowercased(),
-                "v": "1",
+                "v": "2",
             ],
             identityId: identityId
         )
 
         #expect(peer == Peer(id: androidId, name: "Android Device", host: "Android Device", port: 0))
+    }
+
+    @Test("lists a v1 peer but marks it as needing an update")
+    func listsV1PeerAsNeedingUpdate() throws {
+        let oldId = try #require(UUID(uuidString: "367c33ad-2707-4c1f-b9dc-5ff7f482bd00"))
+
+        let peer = try #require(PeerBrowser.peer(
+            serviceName: "Old Phone",
+            txt: ["deviceName": "Old Phone", "deviceId": oldId.uuidString.lowercased(), "v": "1"],
+            identityId: UUID()
+        ))
+
+        #expect(peer.protocolVersion == 1)
+        #expect(peer.needsUpdate)
+    }
+
+    @Test("a v2 peer does not need an update")
+    func v2PeerIsCurrent() throws {
+        let peer = try #require(PeerBrowser.peer(
+            serviceName: "Phone",
+            txt: ["deviceId": UUID().uuidString.lowercased(), "v": "2"],
+            identityId: UUID()
+        ))
+        #expect(!peer.needsUpdate)
     }
 
     @Test("ignores the local device")
@@ -50,7 +74,7 @@ struct PeerBrowserTests {
             txt: [
                 "deviceName": "Leonardo's MacBook",
                 "deviceId": identityId.uuidString.lowercased(),
-                "v": "1",
+                "v": "2",
             ],
             identityId: identityId
         )
@@ -86,5 +110,18 @@ struct PeerBrowserTests {
         )
 
         #expect(peers.isEmpty)
+    }
+}
+
+@Suite("Needs-update resolution")
+struct DeviceNeedsUpdateTests {
+    @Test("a paired device needs an update when mDNS or a probe reports an older protocol")
+    func needsUpdateFromMdnsOrProbe() {
+        let id = UUID()
+        let old = Peer(id: id, name: "Old", host: "old", port: 0, protocolVersion: 1)
+        let current = Peer(id: id, name: "New", host: "new", port: 0)
+        #expect(AppModel.deviceNeedsUpdate(id, mdnsPeers: [old], outdatedDeviceIds: []))
+        #expect(AppModel.deviceNeedsUpdate(id, mdnsPeers: [], outdatedDeviceIds: [id]))
+        #expect(!AppModel.deviceNeedsUpdate(id, mdnsPeers: [current], outdatedDeviceIds: []))
     }
 }

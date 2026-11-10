@@ -1134,6 +1134,9 @@ String _relativeTime(DateTime createdAt) {
 }
 
 String _sendSummaryMessage(ClipSendSummary summary) {
+  if (summary.needsUpdateCount > 0 && summary.successCount == 0) {
+    return updateOtherDeviceMessage;
+  }
   if (!summary.hasVisiblePeers || !summary.hasPairedTargets) {
     return 'No paired devices nearby';
   }
@@ -1217,6 +1220,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
         _PairedDevicesCard(
           devices: state.pairedStore.devices,
           isOnline: state.isDeviceOnline,
+          needsUpdate: state.isDeviceOutdated,
           onSetConnected: state.setDeviceConnected,
           onUnpair: (id) async {
             await state.pairedStore.removeDevice(id);
@@ -1549,6 +1553,7 @@ class _PairingCodeCardState extends State<_PairingCodeCard> {
 class _PairedDevicesCard extends StatelessWidget {
   final List<PairedDevice> devices;
   final bool Function(String id) isOnline;
+  final bool Function(String id) needsUpdate;
   final Future<void> Function(String id) onUnpair;
   final Future<void> Function(String id)? onSendFile;
   final Future<void> Function(String id, bool connected) onSetConnected;
@@ -1556,6 +1561,7 @@ class _PairedDevicesCard extends StatelessWidget {
   const _PairedDevicesCard({
     required this.devices,
     required this.isOnline,
+    required this.needsUpdate,
     required this.onUnpair,
     required this.onSetConnected,
     this.onSendFile,
@@ -1649,6 +1655,20 @@ class _PairedDevicesCard extends StatelessWidget {
                                                   ).withValues(alpha: 0.6),
                                           ),
                                     ),
+                                    if (needsUpdate(device.id)) ...[
+                                      const SizedBox(width: 6),
+                                      Tooltip(
+                                        message: updateOtherDeviceMessage,
+                                        child: Text(
+                                          'Needs update',
+                                          style: theme.textTheme.bodySmall
+                                              ?.copyWith(
+                                                fontWeight: FontWeight.w600,
+                                                color: const Color(0xFFB45309),
+                                              ),
+                                        ),
+                                      ),
+                                    ],
                                     if (device.host != null) ...[
                                       Text(
                                         ' · ',
@@ -1690,9 +1710,10 @@ class _PairedDevicesCard extends StatelessWidget {
                             TextButton.icon(
                               onPressed:
                                   isDeviceConnectionActive(
-                                    enabled: device.connected,
-                                    online: isOnline(device.id),
-                                  )
+                                        enabled: device.connected,
+                                        online: isOnline(device.id),
+                                      ) &&
+                                      !needsUpdate(device.id)
                                   ? () => onSendFile!(device.id)
                                   : null,
                               icon: const Icon(

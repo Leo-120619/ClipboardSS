@@ -12,7 +12,8 @@ public sealed record ClipSendResult(
     int VisiblePeerCount,
     int PairedPeerCount,
     int SuccessCount,
-    int FailureCount)
+    int FailureCount,
+    int NeedsUpdateCount = 0)
 {
     public bool HasVisiblePeers => VisiblePeerCount > 0;
     public bool HasPairedTargets => PairedPeerCount > 0;
@@ -35,14 +36,17 @@ public sealed class ClipSender(
             return new ClipSendResult(0, 0, 0, 0);
         }
 
-        var pairedTargets = targets
+        var allPaired = targets
             .Select(peer => (Peer: peer, Key: pairedStore.GetKey(peer.Id)))
             .Where(target => target.Key is not null)
             .Select(target => (target.Peer, Key: target.Key!))
             .ToArray();
+        // Peers on an older wire protocol are listed but never sent to.
+        var outdatedCount = allPaired.Count(target => target.Peer.NeedsUpdate);
+        var pairedTargets = allPaired.Where(target => !target.Peer.NeedsUpdate).ToArray();
         if (pairedTargets.Length == 0)
         {
-            return new ClipSendResult(targets.Length, 0, 0, 0);
+            return new ClipSendResult(targets.Length, 0, 0, 0, outdatedCount);
         }
 
         string? imageBase64 = null;
@@ -72,7 +76,7 @@ public sealed class ClipSender(
         {
             try
             {
-                var envelope = EnvelopeCrypto.Seal(payload, identity.Id, target.Key);
+                var envelope = EnvelopeCrypto.Seal(payload, EnvelopePurpose.Clip, identity.Id, target.Peer.Id, target.Key);
                 var envelopeData = JsonSerializer.SerializeToUtf8Bytes(envelope, WireJson.Options);
                 var request = new HttpRequest(
                     "POST",
@@ -84,6 +88,7 @@ public sealed class ClipSender(
                     target.Peer,
                     cancellationToken);
                 var response = HttpCodec.ParseResponse(responseData);
+                if (response.StatusCode == 426) throw new PeerNeedsUpdateException();
                 if (response.StatusCode != 200)
                 {
                     throw new HttpRequestException(
@@ -102,6 +107,7 @@ public sealed class ClipSender(
             targets.Length,
             pairedTargets.Length,
             pairedTargets.Length - failures.Count,
-            failures.Count);
+            failures.Count,
+            outdatedCount + failures.Count(failure => failure is PeerNeedsUpdateException));
     }
 }

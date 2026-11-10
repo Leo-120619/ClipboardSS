@@ -14,6 +14,6 @@ void main() {
 
     expect(body['deviceId'], '367c33ad-64ef-48ac-9c7f-f08f55b7d780');
     expect(body['deviceName'], 'Android Device');
-    expect(body['v'], 1);
+    expect(body['v'], 2);
   });
 }

@@ -6,7 +6,8 @@
 - **TXT Record**:
   - `deviceId`: Lowercase canonical UUID string representing the device's unique identity.
   - `deviceName`: Human-readable string.
-  - `v`: "1" (protocol version).
+  - `v`: "2" (protocol version). Browsers still list peers advertising an older `v`, marked
+    "needs update", and never send to them.
 
 ## HTTP Transport
 Transport is plain HTTP (unencrypted at the transport layer). Confidentiality and authenticity are provided by the application-level encryption (ChaCha20-Poly1305).
@@ -23,7 +24,7 @@ All clip servers listen on TCP port `51888`. Devices may discover peers through 
   {
     "deviceId": "<uuid>",
     "deviceName": "<string>",
-    "v": 1
+    "v": 2
   }
   ```
 
@@ -69,10 +70,10 @@ The target must be in pairing mode before it accepts `POST /v1/pair/start`. Pair
   `POST /v1/clip`
   Content-Type: `application/json`
 
-  **Envelope Payload**:
+  **Envelope Payload** (v2):
   ```json
   {
-    "v": 1,
+    "v": 2,
     "sourceDeviceId": "<lowercase uuid>",
     "nonce": "<base64>", // 12-byte ChaCha20-Poly1305 nonce
     "ciphertext": "<base64>" // Encrypted inner JSON + 16-byte Poly1305 auth tag
@@ -94,6 +95,47 @@ The target must be in pairing mode before it accepts `POST /v1/pair/start`. Pair
   }
   ```
 
+## Envelope v2 (all envelope-carrying endpoints)
+
+Every envelope is ChaCha20-Poly1305 under the device `pairKey` with **associated data**
+binding sender, recipient and purpose:
+
+```
+aad = UTF-8("ClipboardSS/2|" + purpose + "|" + lowercase(sourceDeviceId) + "|" + lowercase(recipientDeviceId))
+```
+
+- `sourceDeviceId` is the envelope field (the sender); `recipientDeviceId` is the device the
+  envelope is addressed to. A receiver always uses **its own** device id as the recipient,
+  so an envelope reflected back to its sender, or delivered to another device, fails the tag.
+- `purpose` is one of:
+
+  | purpose       | endpoint            |
+  |---------------|---------------------|
+  | `clip`        | `POST /v1/clip`        |
+  | `file-offer`  | `POST /v1/file/offer`  |
+  | `file-finish` | `POST /v1/file/finish` |
+  | `file-cancel` | `POST /v1/file/cancel` |
+
+  An envelope sealed for one endpoint fails the tag on any other (e.g. a captured offer can
+  no longer cancel or finish a transfer).
+- Receivers check `v` before anything else. `v != 2` gets
+  `426 {"status":"upgradeRequired","minVersion":2}` on every envelope endpoint. Senders that
+  receive `426`, or whose peer advertises an older `v`, show "update the other device" —
+  never "unauthorized" or a re-pair prompt.
+
+### Envelope v2 Test Vector (pinned, cross-platform)
+
+Swift, Dart, and .NET MUST reproduce this byte-for-byte.
+
+- `pairKey` = 32 bytes `000102...1e1f` (`00`..`1f`)
+- `nonce` = `000000000000000000000001`
+- `sourceDeviceId` = `11111111-1111-1111-1111-111111111111`
+- `recipientDeviceId` = `22222222-2222-2222-2222-222222222222`
+- `purpose` = `clip`
+- `aad` = `ClipboardSS/2|clip|11111111-1111-1111-1111-111111111111|22222222-2222-2222-2222-222222222222`
+- plaintext = UTF-8 `{"a":1}`
+- → `ciphertext || tag` (hex) = `127e1dfb0b3bc54f07dfeda46cd545278be6adeef430c1`
+
 ## File Transfer Protocol
 
 QuickDrop-style explicit file send between paired devices. Large files (videos, zips)
@@ -112,9 +154,9 @@ request body per 4 MiB slice.
 
 ### Crypto
 
-Control messages (offer / finish / cancel) reuse the existing clip envelope
-`{v, sourceDeviceId, nonce, ciphertext}` sealed with the device `pairKey` (see Clip
-Synchronization Protocol). Only the inner JSON differs.
+Control messages (offer / finish / cancel) reuse the v2 envelope
+`{v, sourceDeviceId, nonce, ciphertext}` sealed with the device `pairKey` (see Envelope v2),
+with purposes `file-offer`, `file-finish` and `file-cancel`. Only the inner JSON differs.
 
 Chunks are **not** enveloped. They use a per-transfer key with deterministic nonces, so
 each chunk is cryptographically bound to its index — a chunk replayed at the wrong offset
@@ -160,7 +202,7 @@ All on port `51888`, same host as the clip server.
      "sourceDeviceName": "Leo's Mac"
    }
    ```
-   Responses: `200 {"status":"ready"}` · `401` unpaired · `403 {"status":"declined"}`
+   Responses: `200 {"status":"ready"}` · `401` unpaired · `426` upgradeRequired · `403 {"status":"declined"}`
    (reserved for a future accept prompt; v1 auto-accepts) · `409` duplicate active
  transferId.
 

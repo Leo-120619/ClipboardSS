@@ -31,6 +31,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private readonly MdnsService _mdns;
     private readonly SubnetSweeper _sweeper;
     private readonly HashSet<Guid> _onlineDevices = [];
+    /// <summary>Paired devices whose <c>/v1/id</c> probe advertised an older wire protocol.</summary>
+    private readonly HashSet<Guid> _outdatedDevices = [];
     private readonly System.Threading.Timer _livenessTimer;
     private readonly SemaphoreSlim _livenessRefreshLock = new(1, 1);
     private CancellationTokenSource? _clipboardDebounce;
@@ -314,12 +316,29 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
             return false;
         }
 
+        lock (_outdatedDevices)
+        {
+            if (match.NeedsUpdate) _outdatedDevices.Add(deviceId);
+            else _outdatedDevices.Remove(deviceId);
+        }
         PairingCoordinator.PairedStore.UpdateHost(deviceId, match.Host);
         LastError = null;
         OnPropertyChanged(nameof(PairedDevices));
         StateChanged?.Invoke(this, EventArgs.Empty);
         return true;
     }
+    /// <summary>True when the device advertises an older wire protocol: listed, but nothing is sent to it.</summary>
+    public bool DeviceNeedsUpdate(Guid deviceId)
+    {
+        lock (_outdatedDevices)
+        {
+            return DeviceNeedsUpdate(deviceId, VisiblePeers, _outdatedDevices);
+        }
+    }
+
+    public static bool DeviceNeedsUpdate(Guid deviceId, IEnumerable<Peer> mdnsPeers, IReadOnlySet<Guid> outdatedDeviceIds) =>
+        outdatedDeviceIds.Contains(deviceId) || mdnsPeers.Any(peer => peer.Id == deviceId && peer.NeedsUpdate);
+
     public bool IsDeviceOnline(Guid deviceId)
     {
         lock (_onlineDevices) return _onlineDevices.Contains(deviceId);
@@ -380,6 +399,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     private async Task SendFileCoreAsync(string path, Guid deviceId)
     {
+        if (DeviceNeedsUpdate(deviceId)) throw new PeerNeedsUpdateException();
         if (!await ReconnectDeviceAsync(deviceId, false))
             throw new InvalidOperationException("The device is not currently reachable.");
         var device = PairedDevices.First(item => item.Id == deviceId);
@@ -555,10 +575,11 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _lastBroadcastClipId = clip.Id;
         try
         {
-            await _sender.BroadcastAsync(
+            var result = await _sender.BroadcastAsync(
                 clip,
                 ComposeSendTargets(VisiblePeers, PairedDevices),
                 cancellationToken);
+            if (result.NeedsUpdateCount > 0) LastError = WireProtocol.UpdateOtherDeviceMessage;
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {

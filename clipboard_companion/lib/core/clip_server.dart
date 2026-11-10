@@ -59,6 +59,18 @@ Future<dynamic> _readJsonCapped(Request request) async =>
 
 Response _payloadTooLarge() => Response(413, body: 'Payload Too Large');
 
+/// 426 for an envelope whose `v` is not [wireProtocolVersion].
+Response _upgradeRequired() => Response(
+  426,
+  body: jsonEncode(upgradeRequiredBody),
+  headers: {'Content-Type': 'application/json'},
+);
+
+const upgradeRequiredBody = {
+  'status': 'upgradeRequired',
+  'minVersion': wireProtocolVersion,
+};
+
 class ClipServer {
   final DeviceIdentity identity;
   final PairingCoordinator pairingCoordinator;
@@ -77,8 +89,11 @@ class ClipServer {
     this.fileReceiver,
   });
 
-  static String identityBody(String deviceId, String deviceName) =>
-      jsonEncode({'deviceId': deviceId, 'deviceName': deviceName, 'v': 1});
+  static String identityBody(String deviceId, String deviceName) => jsonEncode({
+    'deviceId': deviceId,
+    'deviceName': deviceName,
+    'v': wireProtocolVersion,
+  });
 
   static String startErrorMessage(SocketException error) {
     final lower = error.message.toLowerCase();
@@ -208,6 +223,7 @@ class ClipServer {
       final body = await _readJsonCapped(request);
 
       final envelope = ClipEnvelope.fromJson(body);
+      if (envelope.v != wireProtocolVersion) return _upgradeRequired();
 
       final key = await pairedStore.getKey(envelope.sourceDeviceId);
       if (key == null) {
@@ -218,7 +234,12 @@ class ClipServer {
         return Response(401, body: 'Paused');
       }
 
-      final opened = await CryptoEnvelopeUtils.open(envelope, key);
+      final opened = await CryptoEnvelopeUtils.open(
+        envelope,
+        purpose: EnvelopePurpose.clip,
+        recipientDeviceId: identity.id,
+        pairKey: key,
+      );
       final payload = acceptReceivedClip(opened);
       if (payload == null) {
         return Response(400, body: 'Invalid image payload');

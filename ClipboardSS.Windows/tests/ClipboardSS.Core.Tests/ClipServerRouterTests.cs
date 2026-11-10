@@ -26,7 +26,7 @@ public sealed class ClipServerRouterTests
 
         Assert.Equal(200, response.StatusCode);
         Assert.Equal(
-            "{\"deviceId\":\"8fb5790c-4533-47bb-90af-827291247fe1\",\"deviceName\":\"Windows\",\"v\":1}",
+            "{\"deviceId\":\"8fb5790c-4533-47bb-90af-827291247fe1\",\"deviceName\":\"Windows\",\"v\":2}",
             System.Text.Encoding.UTF8.GetString(response.Body));
     }
 
@@ -38,7 +38,7 @@ public sealed class ClipServerRouterTests
         var sourceId = Guid.NewGuid();
         var payload = TextPayload("hello");
         var key = Enumerable.Repeat((byte)7, 32).ToArray();
-        var envelope = EnvelopeCrypto.Seal(payload, sourceId, key);
+        var envelope = EnvelopeCrypto.Seal(payload, EnvelopePurpose.Clip, sourceId, Identity.Id, key);
         var request = Request(
             "POST",
             "/v1/clip",
@@ -68,12 +68,14 @@ public sealed class ClipServerRouterTests
         var key = Enumerable.Repeat((byte)7, 32).ToArray();
         backend.Keys[sourceId] = key;
         var payload = path == "/v1/clip"
-            ? EnvelopeCrypto.Seal(TextPayload("hello"), sourceId, key)
+            ? EnvelopeCrypto.Seal(TextPayload("hello"), EnvelopePurpose.Clip, sourceId, Identity.Id, key)
             : EnvelopeCrypto.SealJson(
                 new FileOfferPayload(
                     "transfer", "test.txt", 4, "text/plain", "hash", 4, 1,
                     DateTimeOffset.FromUnixTimeSeconds(1_700_000_000), "Mac"),
+                EnvelopePurpose.FileOffer,
                 sourceId,
+                Identity.Id,
                 key);
 
         var response = await router.RouteAsync(

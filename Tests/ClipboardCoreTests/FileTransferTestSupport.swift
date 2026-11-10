@@ -26,8 +26,20 @@ func makePairedStore(peerId: UUID, key: SymmetricKey) async throws -> PairedDevi
     return store
 }
 
-func sealedEnvelope<T: Encodable>(_ payload: T, sourceDeviceId: UUID, key: SymmetricKey) throws -> ClipEnvelope {
-    try ClipEnvelope.seal(payload: payload, sourceDeviceId: sourceDeviceId, pairKey: key)
+func sealedEnvelope<T: Encodable>(
+    _ payload: T,
+    purpose: EnvelopePurpose,
+    sourceDeviceId: UUID,
+    recipientDeviceId: UUID,
+    key: SymmetricKey
+) throws -> ClipEnvelope {
+    try ClipEnvelope.seal(
+        payload: payload,
+        purpose: purpose,
+        sourceDeviceId: sourceDeviceId,
+        recipientDeviceId: recipientDeviceId,
+        pairKey: key
+    )
 }
 
 /// Records outgoing requests and returns configurable responses keyed by path.

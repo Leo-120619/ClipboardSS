@@ -61,6 +61,9 @@ class _Session {
 /// a `.part` temp file at `index * chunkSize` offsets; sessions GC after an idle timeout.
 class FileReceiver {
   final PairedDeviceStore pairedStore;
+
+  /// This device's id: the recipient every inbound envelope must be sealed for.
+  final String localDeviceId;
   final Directory transfersDirectory;
   final Directory Function() destinationProvider;
   final DateTime Function() now;
@@ -72,19 +75,27 @@ class FileReceiver {
 
   FileReceiver({
     required this.pairedStore,
+    required String localDeviceId,
     required this.transfersDirectory,
     required this.destinationProvider,
     DateTime Function()? now,
     this.idleTimeout = FileTransferConstants.idleTimeout,
-  }) : now = now ?? DateTime.now;
+  }) : localDeviceId = canonicalDeviceId(localDeviceId),
+       now = now ?? DateTime.now;
 
   Stream<FileTransferReceiveEvent> get events => _events.stream;
 
   Future<void> dispose() async => _events.close();
 
+  FileTransferResponse _upgradeRequired() => FileTransferResponse(426, {
+    'status': 'upgradeRequired',
+    'minVersion': wireProtocolVersion,
+  });
+
   // MARK: - Offer
 
   Future<FileTransferResponse> handleOffer(ClipEnvelope envelope) async {
+    if (envelope.v != wireProtocolVersion) return _upgradeRequired();
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key == null) return FileTransferResponse(401, {'status': 'unpaired'});
     if (!pairedStore.isConnected(envelope.sourceDeviceId)) {
@@ -94,7 +105,12 @@ class FileReceiver {
     FileOfferPayload offer;
     try {
       offer = FileOfferPayload.fromJson(
-        await CryptoEnvelopeUtils.openJson(envelope, key),
+        await CryptoEnvelopeUtils.openJson(
+          envelope,
+          purpose: EnvelopePurpose.fileOffer,
+          recipientDeviceId: localDeviceId,
+          pairKey: key,
+        ),
       );
     } catch (_) {
       return FileTransferResponse(401, {'status': 'unpaired'});
@@ -216,13 +232,19 @@ class FileReceiver {
   // MARK: - Finish
 
   Future<FileTransferResponse> handleFinish(ClipEnvelope envelope) async {
+    if (envelope.v != wireProtocolVersion) return _upgradeRequired();
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key == null) return FileTransferResponse(401, {'status': 'unpaired'});
 
     FileFinishPayload finish;
     try {
       finish = FileFinishPayload.fromJson(
-        await CryptoEnvelopeUtils.openJson(envelope, key),
+        await CryptoEnvelopeUtils.openJson(
+          envelope,
+          purpose: EnvelopePurpose.fileFinish,
+          recipientDeviceId: localDeviceId,
+          pairKey: key,
+        ),
       );
     } catch (_) {
       return FileTransferResponse(401, {'status': 'unpaired'});
@@ -284,11 +306,17 @@ class FileReceiver {
   // MARK: - Cancel
 
   Future<FileTransferResponse> handleCancel(ClipEnvelope envelope) async {
+    if (envelope.v != wireProtocolVersion) return _upgradeRequired();
     final key = await pairedStore.getKey(envelope.sourceDeviceId);
     if (key != null) {
       try {
         final cancel = FileCancelPayload.fromJson(
-          await CryptoEnvelopeUtils.openJson(envelope, key),
+          await CryptoEnvelopeUtils.openJson(
+            envelope,
+            purpose: EnvelopePurpose.fileCancel,
+            recipientDeviceId: localDeviceId,
+            pairKey: key,
+          ),
         );
         _cancelled.add(cancel.transferId);
         final session = _sessions[cancel.transferId];

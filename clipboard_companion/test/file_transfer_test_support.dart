@@ -11,6 +11,9 @@ import 'package:cryptography/cryptography.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+/// Device id of the receiving side in file-transfer tests (envelope recipient).
+const receiverId = 'cccccccc-0000-0000-0000-000000000000';
+
 /// Mutable clock for idle-GC tests.
 class MutableClock {
   DateTime current;
@@ -43,6 +46,7 @@ Future<PreparedTransfer> prepareTransfer({
   required int chunkSize,
   required String peerId,
   required SecretKey key,
+  String recipientId = receiverId,
   String fileName = 'file.bin',
   String? overrideHash,
 }) async {
@@ -50,8 +54,16 @@ Future<PreparedTransfer> prepareTransfer({
   final fileKey = await FileTransferCrypto.deriveFileKey(key, transferId);
   final chunks = <List<int>>[];
   for (var offset = 0; offset < data.length; offset += chunkSize) {
-    final end = (offset + chunkSize) < data.length ? offset + chunkSize : data.length;
-    chunks.add(await FileTransferCrypto.sealChunk(data.sublist(offset, end), fileKey, chunks.length));
+    final end = (offset + chunkSize) < data.length
+        ? offset + chunkSize
+        : data.length;
+    chunks.add(
+      await FileTransferCrypto.sealChunk(
+        data.sublist(offset, end),
+        fileKey,
+        chunks.length,
+      ),
+    );
   }
   final payload = FileOfferPayload(
     transferId: transferId,
@@ -64,13 +76,31 @@ Future<PreparedTransfer> prepareTransfer({
     createdAt: DateTime.now(),
     sourceDeviceName: 'Peer',
   );
-  final offer = await CryptoEnvelopeUtils.sealJson(payload.toJson(), peerId, key);
+  final offer = await CryptoEnvelopeUtils.sealJson(
+    payload.toJson(),
+    purpose: EnvelopePurpose.fileOffer,
+    sourceDeviceId: peerId,
+    recipientDeviceId: recipientId,
+    pairKey: key,
+  );
   return PreparedTransfer(offer, chunks, transferId);
 }
 
-Future<ClipEnvelope> sealControl(Map<String, dynamic> json, String peerId, SecretKey key) =>
-    CryptoEnvelopeUtils.sealJson(json, peerId, key);
+Future<ClipEnvelope> sealControl(
+  Map<String, dynamic> json,
+  String peerId,
+  SecretKey key, {
+  required EnvelopePurpose purpose,
+  String recipientId = receiverId,
+}) => CryptoEnvelopeUtils.sealJson(
+  json,
+  purpose: purpose,
+  sourceDeviceId: peerId,
+  recipientDeviceId: recipientId,
+  pairKey: key,
+);
 
-String statusOf(FileTransferResponse response) => response.body['status'] as String? ?? '';
+String statusOf(FileTransferResponse response) =>
+    response.body['status'] as String? ?? '';
 
 String jsonBody(FileTransferResponse response) => jsonEncode(response.body);

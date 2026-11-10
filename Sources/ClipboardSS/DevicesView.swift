@@ -112,7 +112,12 @@ struct DeviceRow: View {
             VStack(alignment: .leading) {
                 Text(peer.name)
                     .font(.headline)
-                if isPaired {
+                if peer.needsUpdate {
+                    Text("Needs update")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .help(ProtocolMismatch.updateOtherDeviceMessage)
+                } else if isPaired {
                     Text("Paired")
                         .font(.caption)
                         .foregroundStyle(.green)
@@ -157,6 +162,10 @@ struct PairedDeviceRow: View {
         AppModel.isDeviceConnectionActive(enabled: device.connected, online: isOnline)
     }
 
+    private var needsUpdate: Bool {
+        model.deviceNeedsUpdate(device.id)
+    }
+
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
@@ -174,6 +183,12 @@ struct PairedDeviceRow: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if needsUpdate {
+                        Text("· Needs update")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.orange)
+                            .help(ProtocolMismatch.updateOtherDeviceMessage)
+                    }
                 }
             }
             Spacer()
@@ -183,7 +198,7 @@ struct PairedDeviceRow: View {
             Button("Send File…") {
                 presentOpenPanel()
             }
-            .disabled(!isOnline || model.resolvePeer(for: device.id) == nil)
+            .disabled(!isOnline || needsUpdate || model.resolvePeer(for: device.id) == nil)
             Button("Unpair") {
                 model.unpairDevice(device.id)
             }

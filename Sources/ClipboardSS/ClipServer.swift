@@ -77,7 +77,7 @@ public final class ClipServer: @unchecked Sendable {
             var txt = NWTXTRecord()
             txt["deviceId"] = identity.id.uuidString
             txt["deviceName"] = Self.bonjourSafeTXTValue(identity.name)
-            txt["v"] = "1"
+            txt["v"] = "\(ClipEnvelope.currentVersion)"
 
             listener.service = NWListener.Service(
                 name: identity.id.uuidString,
@@ -249,30 +249,32 @@ public final class ClipServer: @unchecked Sendable {
         } else if request.path == "/v1/clip" {
             Task {
                 do {
-                    let decoder = JSONDecoder()
-                    struct EnvelopeRaw: Codable {
-                        let v: Int
-                        let sourceDeviceId: UUID
-                        let nonce: String
-                        let ciphertext: String
+                    let envelope = try JSONDecoder().decode(ClipEnvelope.self, from: request.body)
+                    guard envelope.v == ClipEnvelope.currentVersion else {
+                        logToFile("ClipServer: Clip envelope v\(envelope.v) refused; upgrade required")
+                        self.sendResponse(Self.upgradeRequiredResponse(), on: connection)
+                        return
                     }
-                    let envelopeRaw = try decoder.decode(EnvelopeRaw.self, from: request.body)
-                    
-                    guard let key = try await self.pairingCoordinator.pairedStore.getKey(for: envelopeRaw.sourceDeviceId) else {
-                        logToFile("ClipServer: Clipboard receive denied, sender not paired: \(envelopeRaw.sourceDeviceId.uuidString)")
+
+                    guard let key = try await self.pairingCoordinator.pairedStore.getKey(for: envelope.sourceDeviceId) else {
+                        logToFile("ClipServer: Clipboard receive denied, sender not paired: \(envelope.sourceDeviceId.uuidString)")
                         let resp = HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
                         self.sendResponse(resp, on: connection)
                         return
                     }
-                    guard await self.pairingCoordinator.pairedStore.isConnected(envelopeRaw.sourceDeviceId) else {
+                    guard await self.pairingCoordinator.pairedStore.isConnected(envelope.sourceDeviceId) else {
                         let resp = HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
                         self.sendResponse(resp, on: connection)
                         return
                     }
-                    
-                    let envelope = ClipEnvelope(sourceDeviceId: envelopeRaw.sourceDeviceId, nonce: envelopeRaw.nonce, ciphertext: envelopeRaw.ciphertext)
-                    let payload = try envelope.open(pairKey: key)
-                    
+
+                    let payload = try envelope.open(
+                        ClipPayload.self,
+                        purpose: .clip,
+                        recipientDeviceId: self.identity.id,
+                        pairKey: key
+                    )
+
                     let result = try await self.receiver.receive(payload)
                     let status = (result == .duplicate) ? "duplicate" : "ok"
                     let resp = HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: Data("{\"status\":\"\(status)\"}".utf8))
@@ -397,6 +399,11 @@ public final class ClipServer: @unchecked Sendable {
         }
     }
 
+    static func upgradeRequiredResponse() -> HTTPResponse {
+        let upgrade = FileTransferResponse.upgradeRequired
+        return HTTPResponse(statusCode: upgrade.statusCode, headers: ["Content-Type": "application/json"], body: upgrade.body)
+    }
+
     static func decodeEnvelope(_ body: Data) -> ClipEnvelope? {
         try? JSONDecoder().decode(ClipEnvelope.self, from: body)
     }
@@ -416,7 +423,7 @@ public final class ClipServer: @unchecked Sendable {
     }
 
     static func identityResponseBody(id: UUID, name: String) -> Data {
-        let dict: [String: Any] = ["deviceId": id.uuidString, "deviceName": name, "v": 1]
+        let dict: [String: Any] = ["deviceId": id.uuidString, "deviceName": name, "v": ClipEnvelope.currentVersion]
         return (try? JSONSerialization.data(withJSONObject: dict)) ?? Data()
     }
 

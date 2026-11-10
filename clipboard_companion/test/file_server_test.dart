@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:clipboard_companion/core/clip_server.dart';
@@ -36,6 +37,7 @@ void main() {
     if (withReceiver) {
       receiver = FileReceiver(
         pairedStore: store,
+        localDeviceId: identity.id,
         transfersDirectory: makeTempDir('transfers'),
         destinationProvider: () => makeTempDir('dest'),
       );
@@ -134,4 +136,30 @@ void main() {
     );
     expect(response.statusCode, 404);
   });
+
+  for (final path in [
+    '/v1/clip',
+    '/v1/file/offer',
+    '/v1/file/finish',
+    '/v1/file/cancel',
+  ]) {
+    test('v1EnvelopeGetsUpgradeRequired on $path', () async {
+      final handler = (await makeServer(withReceiver: true)).buildHandler();
+      // A real v1 envelope from a paired peer: it must not be reported as unauthorized.
+      final response = await handler(
+        Request(
+          'POST',
+          uri(path),
+          body:
+              '{"v":1,"sourceDeviceId":"$peerId",'
+              '"nonce":"AAAAAAAAAAAAAAAB","ciphertext":"AAAAAAAAAAAAAAAAAAAAAA=="}',
+        ),
+      );
+      expect(response.statusCode, 426);
+      expect(jsonDecode(await response.readAsString()), {
+        'status': 'upgradeRequired',
+        'minVersion': 2,
+      });
+    });
+  }
 }

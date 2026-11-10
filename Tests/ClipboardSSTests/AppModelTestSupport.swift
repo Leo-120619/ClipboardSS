@@ -45,6 +45,7 @@ func makeTestAppModel(
     let downloadsDir = store.storageDirectory.appendingPathComponent("Downloads", isDirectory: true)
     let fileReceiver = FileReceiver(
         pairedStore: pairedStore,
+        localDeviceId: identity.id,
         transfersDirectory: store.storageDirectory.appendingPathComponent("Transfers", isDirectory: true),
         destinationProvider: { downloadsDir }
     )

@@ -20,6 +20,12 @@ public struct FileTransferResponse: Sendable, Equatable {
     static func status(_ status: Int) -> FileTransferResponse {
         FileTransferResponse(statusCode: status, body: Data("{}".utf8))
     }
+
+    /// 426 for an envelope whose `v` is not `ClipEnvelope.currentVersion`.
+    public static let upgradeRequired = FileTransferResponse.json(
+        426,
+        ["status": "upgradeRequired", "minVersion": ClipEnvelope.currentVersion]
+    )
 }
 
 /// UI-facing events emitted as a transfer progresses on the receiving side.
@@ -47,6 +53,8 @@ public actor FileReceiver {
     }
 
     private let pairedStore: PairedDeviceStore
+    /// This device's id: the recipient every inbound envelope must be sealed for.
+    private let localDeviceId: UUID
     private let transfersDirectory: URL
     private let destinationProvider: @Sendable () -> URL
     private let now: @Sendable () -> Date
@@ -58,6 +66,7 @@ public actor FileReceiver {
 
     public init(
         pairedStore: PairedDeviceStore,
+        localDeviceId: UUID,
         transfersDirectory: URL,
         destinationProvider: @escaping @Sendable () -> URL,
         now: @escaping @Sendable () -> Date = { Date() },
@@ -65,6 +74,7 @@ public actor FileReceiver {
         onEvent: (@Sendable (FileTransferReceiveEvent) -> Void)? = nil
     ) {
         self.pairedStore = pairedStore
+        self.localDeviceId = localDeviceId
         self.transfersDirectory = transfersDirectory
         self.destinationProvider = destinationProvider
         self.now = now
@@ -75,6 +85,7 @@ public actor FileReceiver {
     // MARK: - Offer
 
     public func handleOffer(envelope: ClipEnvelope) async -> FileTransferResponse {
+        guard envelope.v == ClipEnvelope.currentVersion else { return .upgradeRequired }
         guard let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId) else {
             return .json(401, ["status": "unpaired"])
         }
@@ -82,7 +93,7 @@ public actor FileReceiver {
         guard await pairedStore.isConnected(envelope.sourceDeviceId) else {
             return .json(401, ["status": "paused"])
         }
-        guard let offer = try? envelope.open(FileOfferPayload.self, pairKey: key) else {
+        guard let offer = try? envelope.open(FileOfferPayload.self, purpose: .fileOffer, recipientDeviceId: localDeviceId, pairKey: key) else {
             return .json(401, ["status": "unpaired"])
         }
         guard isValidTransferId(offer.transferId) else {
@@ -171,8 +182,9 @@ public actor FileReceiver {
     // MARK: - Finish
 
     public func handleFinish(envelope: ClipEnvelope) async -> FileTransferResponse {
+        guard envelope.v == ClipEnvelope.currentVersion else { return .upgradeRequired }
         guard let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId),
-              let finish = try? envelope.open(FileFinishPayload.self, pairKey: key) else {
+              let finish = try? envelope.open(FileFinishPayload.self, purpose: .fileFinish, recipientDeviceId: localDeviceId, pairKey: key) else {
             return .json(401, ["status": "unpaired"])
         }
         guard let session = sessions[finish.transferId] else {
@@ -207,8 +219,9 @@ public actor FileReceiver {
     // MARK: - Cancel
 
     public func handleCancel(envelope: ClipEnvelope) async -> FileTransferResponse {
+        guard envelope.v == ClipEnvelope.currentVersion else { return .upgradeRequired }
         if let key = try? await pairedStore.getKey(for: envelope.sourceDeviceId),
-           let cancel = try? envelope.open(FileCancelPayload.self, pairKey: key) {
+           let cancel = try? envelope.open(FileCancelPayload.self, purpose: .fileCancel, recipientDeviceId: localDeviceId, pairKey: key) {
             cancelledTransferIds.insert(cancel.transferId)
             if let session = sessions[cancel.transferId] {
                 destroy(cancel.transferId, session: session)

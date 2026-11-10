@@ -107,6 +107,31 @@ struct FileSenderTests {
         #expect(transport.requests.map(\.path) == ["/v1/file/offer"])
     }
 
+    @Test("refuses to send to a peer that advertises an older protocol")
+    func refusesOutdatedPeer() async throws {
+        let transport = RecordingTransport()
+        let outdated = Peer(id: peer.id, name: "Peer", host: "10.0.0.1", port: 51888, protocolVersion: 1)
+        let sender = try await makeSender(peerId: outdated.id, key: SymmetricKey(size: .bits256), transport: transport)
+        await #expect(throws: FileSendError.peerNeedsUpdate) {
+            try await sender.sendFile(at: try makeFile(bytes: 16), to: outdated)
+        }
+        #expect(transport.requests.isEmpty)
+    }
+
+    @Test("a 426 answer surfaces as peerNeedsUpdate with an update-the-other-device message")
+    func upgradeRequiredSurfacesAsNeedsUpdate() async throws {
+        let transport = RecordingTransport()
+        transport.statusForPath["/v1/file/offer"] = 426
+        let sender = try await makeSender(peerId: peer.id, key: SymmetricKey(size: .bits256), transport: transport)
+        do {
+            try await sender.sendFile(at: try makeFile(bytes: 16), to: peer)
+            Issue.record("expected peerNeedsUpdate")
+        } catch let error as FileSendError {
+            #expect(error == .peerNeedsUpdate)
+            #expect(error.localizedDescription == ProtocolMismatch.updateOtherDeviceMessage)
+        }
+    }
+
     @Test("sending to an unpaired peer throws notPaired")
     func unpairedThrows() async throws {
         let transport = RecordingTransport()
@@ -122,24 +147,27 @@ struct FileSenderTests {
 
     @Test("loopback e2e: 10 MiB file arrives hash-verified through the real codec")
     func loopbackEndToEnd() async throws {
-        let peerId = UUID()
+        let senderId = UUID()
+        let receiverId = UUID()
         let key = SymmetricKey(size: .bits256)
-        let store = try await makePairedStore(peerId: peerId, key: key)
+        // Each side's store knows the other side under the shared key.
+        let senderStore = try await makePairedStore(peerId: receiverId, key: key)
+        let receiverStore = try await makePairedStore(peerId: senderId, key: key)
         let destinationDir = try temporaryDirectory()
         let receiver = FileReceiver(
-            pairedStore: store,
+            pairedStore: receiverStore,
+            localDeviceId: receiverId,
             transfersDirectory: try temporaryDirectory().appendingPathComponent("Transfers"),
             destinationProvider: { destinationDir }
         )
         let transport = LoopbackTransport(receiver: receiver)
 
-        // Sender's identity must be the paired peer id so the receiver can find the key.
-        let sender = FileSender(identity: DeviceIdentity(id: peerId, name: "Peer"), pairedStore: store, transport: transport)
+        let sender = FileSender(identity: DeviceIdentity(id: senderId, name: "Mac"), pairedStore: senderStore, transport: transport)
         let sourceURL = try temporaryDirectory().appendingPathComponent("big.bin")
         let data = Data((0..<(10 * 1024 * 1024 + 123)).map { _ in UInt8.random(in: 0...255) })
         try data.write(to: sourceURL)
 
-        let peer = Peer(id: peerId, name: "Peer", host: "127.0.0.1", port: 51888)
+        let peer = Peer(id: receiverId, name: "Peer", host: "127.0.0.1", port: 51888)
         try await sender.sendFile(at: sourceURL, to: peer)
 
         let dest = destinationDir.appendingPathComponent("big.bin")

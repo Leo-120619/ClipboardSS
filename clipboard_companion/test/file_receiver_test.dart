@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:clipboard_companion/core/crypto_utils.dart';
 import 'package:clipboard_companion/core/file_receiver.dart';
 import 'package:clipboard_companion/core/file_transfer_models.dart';
 import 'package:cryptography/cryptography.dart';
@@ -15,6 +16,7 @@ void main() {
     final clock = MutableClock(DateTime(2026, 1, 1, 12));
     final receiver = FileReceiver(
       pairedStore: store,
+      localDeviceId: receiverId,
       transfersDirectory: makeTempDir('transfers'),
       destinationProvider: () => destDir,
       now: clock.now,
@@ -44,6 +46,7 @@ void main() {
       FileFinishPayload(t.transferId).toJson(),
       peerId,
       key,
+      purpose: EnvelopePurpose.fileFinish,
     );
     expect((await receiver.handleFinish(finish)).statusCode, 200);
 
@@ -69,6 +72,7 @@ void main() {
       FileFinishPayload(t.transferId).toJson(),
       peerId,
       key,
+      purpose: EnvelopePurpose.fileFinish,
     );
     expect((await receiver.handleFinish(finish)).statusCode, 200);
     expect(await File('${destDir.path}/file.bin').readAsBytes(), data);
@@ -126,6 +130,7 @@ void main() {
           ).toJson(),
           peerId,
           key,
+          purpose: EnvelopePurpose.fileOffer,
         );
     final invalidId = await receiver.handleOffer(
       await offer('../../evil', 1, 1, 1),
@@ -153,6 +158,7 @@ void main() {
       FileFinishPayload(t.transferId).toJson(),
       peerId,
       key,
+      purpose: EnvelopePurpose.fileFinish,
     );
     final response = await receiver.handleFinish(finish);
     expect(response.statusCode, 409);
@@ -197,6 +203,7 @@ void main() {
       FileFinishPayload(t.transferId).toJson(),
       peerId,
       key,
+      purpose: EnvelopePurpose.fileFinish,
     );
     final response = await receiver.handleFinish(finish);
     expect(response.statusCode, 422);
@@ -218,6 +225,7 @@ void main() {
       FileCancelPayload(t.transferId).toJson(),
       peerId,
       key,
+      purpose: EnvelopePurpose.fileCancel,
     );
     expect((await receiver.handleCancel(cancel)).statusCode, 200);
     expect(
@@ -295,6 +303,7 @@ void main() {
       FileFinishPayload(t.transferId).toJson(),
       peerId,
       key,
+      purpose: EnvelopePurpose.fileFinish,
     );
     expect((await receiver.handleFinish(finish)).statusCode, 200);
     expect(await File('${destDir.path}/file (1).bin').readAsBytes(), [
@@ -303,5 +312,40 @@ void main() {
       3,
       4,
     ]);
+  });
+
+  test(
+    'a captured offer envelope is not accepted as finish or cancel',
+    () async {
+      final (receiver, _, _) = await makeReceiver();
+      final t = await prepareTransfer(
+        data: List<int>.generate(8, (i) => i),
+        chunkSize: 4,
+        peerId: peerId,
+        key: key,
+      );
+      expect((await receiver.handleOffer(t.offer)).statusCode, 200);
+
+      expect((await receiver.handleFinish(t.offer)).statusCode, 401);
+      await receiver.handleCancel(t.offer);
+
+      // The session survived: chunks are still accepted.
+      expect(
+        (await receiver.handleChunk(t.transferId, 0, t.chunks[0])).statusCode,
+        200,
+      );
+    },
+  );
+
+  test('an offer sealed for another recipient is rejected', () async {
+    final (receiver, _, _) = await makeReceiver();
+    final t = await prepareTransfer(
+      data: [1, 2, 3],
+      chunkSize: 4,
+      peerId: peerId,
+      key: key,
+      recipientId: '99999999-0000-0000-0000-000000000000',
+    );
+    expect((await receiver.handleOffer(t.offer)).statusCode, 401);
   });
 }

@@ -13,6 +13,7 @@ public sealed class FileSender(DeviceIdentity identity, PairedDeviceStore paired
         CancellationToken cancellationToken = default, string? transferId = null)
     {
         var pairKey = pairedStore.GetKey(peer.Id) ?? throw new InvalidOperationException("The target device is not paired.");
+        if (peer.NeedsUpdate) throw new PeerNeedsUpdateException();
         transferId = (transferId ?? Guid.NewGuid().ToString("D")).ToLowerInvariant();
         var info = new FileInfo(path);
         await using var hashStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
@@ -23,7 +24,7 @@ public sealed class FileSender(DeviceIdentity identity, PairedDeviceStore paired
             FileTransferConstants.ChunkSize, chunkCount, DateTimeOffset.UtcNow, identity.Name);
         try
         {
-            await SendControlAsync("/v1/file/offer", offer, peer, pairKey, cancellationToken);
+            await SendControlAsync("/v1/file/offer", EnvelopePurpose.FileOffer, offer, peer, pairKey, cancellationToken);
             var key = FileTransferCrypto.DeriveFileKey(pairKey, transferId);
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
                 FileTransferConstants.ChunkSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
@@ -41,20 +42,21 @@ public sealed class FileSender(DeviceIdentity identity, PairedDeviceStore paired
                 sent += count;
                 progress?.Report(new(transferId, info.Name, sent, info.Length, FileTransferDirection.Sending, FileTransferStatus.Active));
             }
-            await SendControlAsync("/v1/file/finish", new FileFinishPayload(transferId), peer, pairKey, cancellationToken);
+            await SendControlAsync("/v1/file/finish", EnvelopePurpose.FileFinish, new FileFinishPayload(transferId), peer, pairKey, cancellationToken);
             progress?.Report(new(transferId, info.Name, info.Length, info.Length, FileTransferDirection.Sending, FileTransferStatus.Completed));
         }
         catch
         {
-            try { await SendControlAsync("/v1/file/cancel", new FileCancelPayload(transferId), peer, pairKey, CancellationToken.None); }
+            try { await SendControlAsync("/v1/file/cancel", EnvelopePurpose.FileCancel, new FileCancelPayload(transferId), peer, pairKey, CancellationToken.None); }
             catch { }
             throw;
         }
     }
 
-    private async Task SendControlAsync<T>(string path, T payload, Peer peer, byte[] key, CancellationToken token)
+    private async Task SendControlAsync<T>(
+        string path, EnvelopePurpose purpose, T payload, Peer peer, byte[] key, CancellationToken token)
     {
-        var envelope = EnvelopeCrypto.SealJson(payload, identity.Id, key);
+        var envelope = EnvelopeCrypto.SealJson(payload, purpose, identity.Id, peer.Id, key);
         await SendRequestAsync(new HttpRequest("POST", path,
             new Dictionary<string, string> { ["Content-Type"] = "application/json" },
             JsonSerializer.SerializeToUtf8Bytes(envelope, WireJson.Options)), peer, token);
@@ -64,6 +66,7 @@ public sealed class FileSender(DeviceIdentity identity, PairedDeviceStore paired
     {
         var bytes = await transport.SendAsync(HttpCodec.EncodeRequest(request, $"{peer.Host}:{peer.Port}"), peer, token);
         var response = HttpCodec.ParseResponse(bytes);
+        if (response.StatusCode == 426) throw new PeerNeedsUpdateException();
         if (response.StatusCode != 200) throw new HttpRequestException($"Peer returned HTTP {response.StatusCode}.");
     }
 

@@ -34,7 +34,7 @@ struct ClipServerTests {
         let obj = try JSONSerialization.jsonObject(with: json) as! [String: Any]
         #expect(obj["deviceId"] as? String == "8FB5790C-4533-47BB-90AF-827291247FE1")
         #expect(obj["deviceName"] as? String == "Mac")
-        #expect(obj["v"] as? Int == 1)
+        #expect(obj["v"] as? Int == 2)
     }
 
     @Test("remoteHost extracts ipv4 without zone")
@@ -76,6 +76,28 @@ struct ClipServerTests {
         let response = try HTTPCodec.parseResponse(outcome.received)
         #expect(response.statusCode == 431)
     }
+
+    @Test("v1 envelopes get 426 upgradeRequired on every envelope endpoint",
+          arguments: ["/v1/clip", "/v1/file/offer", "/v1/file/finish", "/v1/file/cancel"])
+    @MainActor
+    func v1EnvelopeGetsUpgradeRequired(path: String) async throws {
+        let harness = try ClipServerHarness(requestDeadline: 5)
+        defer { harness.server.stop() }
+        let port = try await harness.start()
+
+        let body = Data(#"{"v":1,"sourceDeviceId":"11111111-1111-1111-1111-111111111111","nonce":"AAAAAAAAAAAAAAAB","ciphertext":"AAAAAAAAAAAAAAAAAAAAAA=="}"#.utf8)
+        let request = HTTPRequest(method: "POST", path: path, headers: ["Content-Type": "application/json"], body: body)
+        let outcome = await ClipServerHarness.exchange(
+            port: port,
+            payload: HTTPCodec.encodeRequest(request, host: "127.0.0.1:\(port.rawValue)"),
+            timeout: 3
+        )
+        let response = try HTTPCodec.parseResponse(outcome.received)
+        #expect(response.statusCode == 426)
+        let obj = try #require(try JSONSerialization.jsonObject(with: response.body) as? [String: Any])
+        #expect(obj["status"] as? String == "upgradeRequired")
+        #expect(obj["minVersion"] as? Int == 2)
+    }
 }
 
 /// Runs a real ClipServer on an ephemeral loopback port without advertising Bonjour.
@@ -92,10 +114,17 @@ private final class ClipServerHarness: @unchecked Sendable {
             keyStorage: HarnessPairKeyStorage()
         )
         let coordinator = PairingCoordinator(identity: identity, pairedStore: pairedStore, transport: HarnessPeerTransport())
+        let fileReceiver = FileReceiver(
+            pairedStore: pairedStore,
+            localDeviceId: identity.id,
+            transfersDirectory: directory.appendingPathComponent("Transfers"),
+            destinationProvider: { directory }
+        )
         server = try ClipServer(
             identity: identity,
             receiver: ClipReceiver(store: store, pasteboard: HarnessPasteboard()),
             pairingCoordinator: coordinator,
+            fileReceiver: fileReceiver,
             port: .any,
             advertisesService: false,
             requestDeadline: requestDeadline

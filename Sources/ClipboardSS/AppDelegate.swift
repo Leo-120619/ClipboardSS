@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let transferEventSink = FileTransferEventSink()
             let fileReceiver = FileReceiver(
                 pairedStore: pairedStore,
+                localDeviceId: identity.id,
                 transfersDirectory: store.storageDirectory.appendingPathComponent("Transfers", isDirectory: true),
                 destinationProvider: { ReceiveSettings.resolvedDirectory() },
                 onEvent: { [transferEventSink] event in transferEventSink.emit(event) }

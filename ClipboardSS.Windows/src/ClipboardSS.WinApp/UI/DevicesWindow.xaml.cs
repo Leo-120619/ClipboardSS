@@ -114,7 +114,8 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
                 device.Name,
                 device.Host,
                 _model.IsDeviceConnectionActive(device.Id),
-                _model.IsDeviceOnline(device.Id)))
+                _model.IsDeviceOnline(device.Id),
+                _model.DeviceNeedsUpdate(device.Id)))
             .ToArray();
         TransferList.ItemsSource = _model.Transfers.ToArray();
     }
@@ -129,10 +130,10 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
     }
 }
 
-internal sealed record PairedDeviceRow(Guid Id, string Name, string? Host, bool Connected, bool Online)
+internal sealed record PairedDeviceRow(Guid Id, string Name, string? Host, bool Connected, bool Online, bool NeedsUpdate)
 {
     public string ConnectActionLabel => Connected ? "Disconnect" : "Connect";
-    public string StatusText => Online ? "Online" : "Offline";
-    public Brush StatusBrush => Online ? Brushes.LimeGreen : Brushes.Gray;
-    public bool CanSend => Connected;
+    public string StatusText => NeedsUpdate ? $"{(Online ? "Online" : "Offline")} · Needs update" : Online ? "Online" : "Offline";
+    public Brush StatusBrush => NeedsUpdate ? Brushes.Orange : Online ? Brushes.LimeGreen : Brushes.Gray;
+    public bool CanSend => Connected && !NeedsUpdate;
 }
