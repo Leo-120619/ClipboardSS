@@ -179,6 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if model.showCoachMarks {
                 windowController.show()
             }
+
+            Self.showCorruptStateNotice(for: [store.quarantinedFileURL, pairedStore.quarantinedFileURL])
         } catch {
             NSAlert(error: error).runModal()
             NSApplication.shared.terminate(nil)
@@ -279,6 +281,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    /// One-time notice for state files that were unreadable at launch and moved aside.
+    private static func showCorruptStateNotice(for quarantined: [URL?]) {
+        let names = quarantined.compactMap { $0?.lastPathComponent }
+        guard !names.isEmpty else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Some saved ClipboardSS data could not be read"
+        alert.informativeText = "ClipboardSS started with empty data instead. The unreadable files were kept as:\n\n"
+            + names.joined(separator: "\n")
+        alert.runModal()
     }
 
     /// Loads the persistent device identity UUID, regenerating (and persisting) a

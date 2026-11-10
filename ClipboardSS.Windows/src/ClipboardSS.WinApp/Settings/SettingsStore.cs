@@ -1,5 +1,6 @@
 using System.Text.Json;
 using ClipboardSS.Core.Json;
+using ClipboardSS.Core.Storage;
 
 namespace ClipboardSS.App.Settings;
 
@@ -7,17 +8,22 @@ public sealed class SettingsStore
 {
     private readonly object _gate = new();
     private readonly string _path;
+    private readonly Func<DateTimeOffset> _now;
 
-    public SettingsStore(string storageDirectory)
+    public SettingsStore(string storageDirectory, Func<DateTimeOffset>? now = null)
     {
         StorageDirectory = Path.GetFullPath(storageDirectory);
         Directory.CreateDirectory(StorageDirectory);
         _path = Path.Combine(StorageDirectory, "settings.json");
+        _now = now ?? (() => DateTimeOffset.UtcNow);
         Current = Load();
     }
 
     public string StorageDirectory { get; }
     public AppSettings Current { get; private set; }
+
+    /// <summary>Where an unreadable settings.json was moved at launch, so the UI can tell the user once.</summary>
+    public string? QuarantinedFilePath { get; private set; }
 
     public static string ResolveStorageDirectory()
     {
@@ -41,15 +47,25 @@ public sealed class SettingsStore
 
     private AppSettings Load()
     {
-        if (!File.Exists(_path))
+        if (File.Exists(_path))
         {
-            var settings = new AppSettings();
-            Write(settings);
-            return settings;
+            AppSettings? stored;
+            try
+            {
+                stored = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(_path), WireJson.Options);
+            }
+            catch (JsonException)
+            {
+                stored = null;
+            }
+
+            if (stored is not null) return stored;
+            QuarantinedFilePath = CorruptStateFile.Quarantine(_path, _now());
         }
 
-        return JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(_path), WireJson.Options)
-            ?? throw new InvalidDataException("settings.json is empty or invalid.");
+        var settings = new AppSettings();
+        Write(settings);
+        return settings;
     }
 
     private void Write(AppSettings settings)

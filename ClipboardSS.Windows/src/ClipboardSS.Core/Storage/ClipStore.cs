@@ -28,13 +28,25 @@ public sealed class ClipStore
         _imageDirectory = Path.Combine(StorageDirectory, "Images");
         Directory.CreateDirectory(StorageDirectory);
         Directory.CreateDirectory(_imageDirectory);
-        _items = File.Exists(_metadataPath)
-            ? JsonSerializer.Deserialize<List<ClipItem>>(File.ReadAllBytes(_metadataPath), WireJson.Options)
-                ?? []
-            : [];
+        _items = [];
+        if (File.Exists(_metadataPath))
+        {
+            try
+            {
+                _items = JsonSerializer.Deserialize<List<ClipItem>>(File.ReadAllBytes(_metadataPath), WireJson.Options)
+                    ?? [];
+            }
+            catch (JsonException)
+            {
+                QuarantinedFilePath = CorruptStateFile.Quarantine(_metadataPath, _now());
+            }
+        }
     }
 
     public string StorageDirectory { get; }
+
+    /// <summary>Where an unreadable clips.json was moved at launch, so the UI can tell the user once.</summary>
+    public string? QuarantinedFilePath { get; }
 
     public IReadOnlyList<ClipItem> Items
     {
