@@ -6,6 +6,10 @@ public enum PairingError: Error {
     case invalidConfirmationProof
     case missingSharedSecret
     case notHosting
+    /// Another initiator is already pending against the hosted code.
+    case initiatorConflict
+    /// The target already has this device paired; it must be removed there before re-pairing.
+    case alreadyPaired
 }
 
 public struct PairingSession: Sendable {
@@ -71,7 +75,8 @@ public struct PairingSession: Sendable {
         initiatorId: UUID,
         targetId: UUID
     ) -> Bool {
-        let expectedProof = generateConfirmationProof(pairKey: pairKey, initiatorId: initiatorId, targetId: targetId)
-        return proof == expectedProof
+        let message = Data(confirmationMessage(initiatorId: initiatorId, targetId: targetId).utf8)
+        // Constant-time comparison of the HMAC.
+        return HMAC<SHA256>.isValidAuthenticationCode(proof, authenticating: message, using: pairKey)
     }
 }

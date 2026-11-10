@@ -9,13 +9,27 @@ using ClipboardSS.Core.Sync;
 
 namespace ClipboardSS.App.Pairing;
 
+/// <summary>A <c>/v1/pair/start</c> that must be refused (HTTP 403): no active code, or another initiator is pending.</summary>
+public sealed class PairingRejectedException(string message) : InvalidOperationException(message);
+
+/// <summary>The target answered 409: it already has this device paired, so it must be removed there first.</summary>
+public sealed class PairingAlreadyPairedException()
+    : InvalidOperationException("Remove the existing pairing on the other device first");
+
 public sealed class PairingCoordinator(
     DeviceIdentity identity,
     PairedDeviceStore pairedStore,
-    IPeerTransport transport)
+    IPeerTransport transport,
+    Func<DateTimeOffset>? clock = null)
 {
+    private readonly Func<DateTimeOffset> _now = clock ?? (() => DateTimeOffset.UtcNow);
     private readonly object _gate = new();
-    private readonly Dictionary<Guid, PendingTarget> _pendingTargets = [];
+
+    // Hosting state, guarded by _gate. All pairing rules on the target side are enforced in
+    // HandlePairStartAsync / HandlePairConfirmAsync below: one pending initiator per code,
+    // confirm only while the code is active, any confirm ends the code, and no silent
+    // re-pair of a known deviceId.
+    private PendingInitiator? _pending;
     private string? _hostCode;
     private DateTimeOffset? _hostCodeExpiry;
 
@@ -28,8 +42,9 @@ public sealed class PairingCoordinator(
     {
         lock (_gate)
         {
+            _pending = null;
             _hostCode = RandomNumberGenerator.GetInt32(1_000_000).ToString("D6");
-            _hostCodeExpiry = DateTimeOffset.UtcNow + (ttl ?? TimeSpan.FromSeconds(180));
+            _hostCodeExpiry = _now() + (ttl ?? TimeSpan.FromSeconds(180));
             return _hostCode;
         }
     }
@@ -38,9 +53,7 @@ public sealed class PairingCoordinator(
     {
         lock (_gate)
         {
-            _hostCode = null;
-            _hostCodeExpiry = null;
-            _pendingTargets.Clear();
+            ClearHosting();
         }
     }
 
@@ -50,7 +63,13 @@ public sealed class PairingCoordinator(
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var code = ActiveHostCode() ?? throw new InvalidOperationException("This device is not hosting a pairing code.");
+        string code;
+        lock (_gate)
+        {
+            code = ActiveHostCode() ?? throw new PairingRejectedException("This device is not hosting a pairing code.");
+            EnsureNoOtherPendingInitiator(request.DeviceId);
+        }
+
         var remotePublicKey = Convert.FromBase64String(request.EphemeralPublicKey);
         var session = new PairingSession();
         var result = session.CompletePairing(
@@ -61,10 +80,10 @@ public sealed class PairingCoordinator(
             code);
         lock (_gate)
         {
-            _pendingTargets[request.DeviceId] = new PendingTarget(
-                result.PairKey,
-                request.DeviceName,
-                remoteHost);
+            // Hosting state may have changed while the key exchange ran outside the lock.
+            if (ActiveHostCode() != code) throw new PairingRejectedException("The pairing code is no longer active.");
+            EnsureNoOtherPendingInitiator(request.DeviceId);
+            _pending = new PendingInitiator(request.DeviceId, result.PairKey, request.DeviceName, remoteHost);
         }
 
         return Task.FromResult(new PairStartResponse(
@@ -73,34 +92,49 @@ public sealed class PairingCoordinator(
             Convert.ToBase64String(session.EphemeralPublicKey)));
     }
 
-    public Task<bool> HandlePairConfirmAsync(
+    public Task<PairConfirmOutcome> HandlePairConfirmAsync(
         PairConfirmRequest request,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        PendingTarget? pending;
+        // Every confirm ends the hosted code, whatever its outcome.
+        PendingInitiator? pending;
         lock (_gate)
         {
-            _pendingTargets.TryGetValue(request.DeviceId, out pending);
+            pending = ActiveHostCode() is null ? null : _pending;
+            ClearHosting();
         }
 
-        if (pending is null) return Task.FromResult(false);
-        var proof = Convert.FromBase64String(request.Proof);
+        if (pending is null || pending.Id != request.DeviceId) return Task.FromResult(PairConfirmOutcome.Rejected);
+        byte[] proof;
+        try
+        {
+            proof = Convert.FromBase64String(request.Proof);
+        }
+        catch (FormatException)
+        {
+            return Task.FromResult(PairConfirmOutcome.Rejected);
+        }
+
         if (!PairingSession.VerifyConfirmationProof(
                 proof,
                 pending.PairKey,
                 request.DeviceId,
                 Identity.Id))
         {
-            return Task.FromResult(false);
+            return Task.FromResult(PairConfirmOutcome.Rejected);
+        }
+
+        if (PairedStore.Devices.Any(device => device.Id == request.DeviceId))
+        {
+            return Task.FromResult(PairConfirmOutcome.AlreadyPaired);
         }
 
         PairedStore.AddDevice(
             new PairedDevice(request.DeviceId, pending.Name, pending.Host),
             pending.PairKey);
-        StopHosting();
         PairedDevicesChanged?.Invoke(this, EventArgs.Empty);
-        return Task.FromResult(true);
+        return Task.FromResult(PairConfirmOutcome.Paired);
     }
 
     public async Task StartPairingAsync(
@@ -137,11 +171,18 @@ public sealed class PairingCoordinator(
                 result.PairKey,
                 Identity.Id,
                 response.DeviceId);
-            _ = await SendJsonAsync<JsonElement>(
-                peer,
-                "/v1/pair/confirm",
-                new PairConfirmRequest(Identity.Id, Convert.ToBase64String(proof)),
-                cancellationToken);
+            try
+            {
+                _ = await SendJsonAsync<JsonElement>(
+                    peer,
+                    "/v1/pair/confirm",
+                    new PairConfirmRequest(Identity.Id, Convert.ToBase64String(proof)),
+                    cancellationToken);
+            }
+            catch (HttpRequestException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                throw new PairingAlreadyPairedException();
+            }
             PairedStore.AddDevice(
                 new PairedDevice(response.DeviceId, response.DeviceName, peer.Host),
                 result.PairKey);
@@ -153,16 +194,27 @@ public sealed class PairingCoordinator(
         }
     }
 
+    /// <summary>The hosted code while it is unexpired; an expired code is cleared with any pending initiator. Call under _gate.</summary>
     private string? ActiveHostCode()
     {
-        lock (_gate)
+        if (_hostCode is not null && _hostCodeExpiry > _now()) return _hostCode;
+        ClearHosting();
+        return null;
+    }
+
+    private void EnsureNoOtherPendingInitiator(Guid initiatorId)
+    {
+        if (_pending is not null && _pending.Id != initiatorId)
         {
-            if (_hostCode is not null && _hostCodeExpiry > DateTimeOffset.UtcNow) return _hostCode;
-            _hostCode = null;
-            _hostCodeExpiry = null;
-            _pendingTargets.Clear();
-            return null;
+            throw new PairingRejectedException("Another device is already pairing with this code.");
         }
+    }
+
+    private void ClearHosting()
+    {
+        _pending = null;
+        _hostCode = null;
+        _hostCodeExpiry = null;
     }
 
     private async Task<TResponse> SendJsonAsync<TResponse>(
@@ -193,5 +245,5 @@ public sealed class PairingCoordinator(
             ?? throw new JsonException($"Pairing endpoint {path} returned an empty body.");
     }
 
-    private sealed record PendingTarget(byte[] PairKey, string Name, string Host);
+    private sealed record PendingInitiator(Guid Id, byte[] PairKey, string Name, string Host);
 }

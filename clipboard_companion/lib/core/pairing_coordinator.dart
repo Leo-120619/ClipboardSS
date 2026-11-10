@@ -1,28 +1,51 @@
 import 'dart:convert';
 import 'dart:math';
+import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
 import 'models.dart';
 import 'paired_device_store.dart';
 import 'crypto_utils.dart';
+
+/// Result of a `/v1/pair/confirm` request on the hosting (target) side.
+enum PairConfirmOutcome { paired, rejected, alreadyPaired }
+
+/// Thrown by [PairingCoordinator.handlePairStart] when the start must be refused
+/// with 403: no active code, or another initiator is already pending.
+class PairingRejectedException implements Exception {
+  final String reason;
+  PairingRejectedException(this.reason);
+  @override
+  String toString() => 'PairingRejectedException: $reason';
+}
+
+/// Thrown by [PairingCoordinator.startPairing] when the target answers 409:
+/// it already has this device paired and the user must remove it there first.
+class PairingAlreadyPairedException implements Exception {
+  @override
+  String toString() => 'PairingAlreadyPairedException';
+}
 
 class PairingCoordinator {
   final DeviceIdentity identity;
   final PairedDeviceStore pairedStore;
   final http.Client _client;
   final Duration requestTimeout;
+  final DateTime Function() _now;
 
   PairingCoordinator({
     required this.identity,
     required this.pairedStore,
     http.Client? client,
     this.requestTimeout = const Duration(seconds: 10),
-  }) : _client = client ?? http.Client();
+    DateTime Function()? clock,
+  }) : _client = client ?? http.Client(),
+       _now = clock ?? DateTime.now;
 
-  final Map<String, PairingSession> _pendingTargetSessions = {};
-  final Map<String, PairingResult> _targetTempResults = {};
-  final Map<String, String> _targetDeviceNames = {};
-  final Map<String, String> _targetHosts = {};
-
+  // Hosting state. All pairing rules on the target side are enforced in
+  // [handlePairStart] / [handlePairConfirmRequest] below: one pending
+  // initiator per code, confirm only while the code is active, any confirm
+  // ends the code, and no silent re-pair of a known deviceId.
+  _PendingInitiator? _pending;
   String? _hostCode;
   DateTime? _hostCodeExpiry;
 
@@ -30,24 +53,38 @@ class PairingCoordinator {
 
   String startHosting({Duration ttl = const Duration(seconds: 180)}) {
     final code = Random.secure().nextInt(1000000).toString().padLeft(6, '0');
+    _pending = null;
     _hostCode = code;
-    _hostCodeExpiry = DateTime.now().add(ttl);
+    _hostCodeExpiry = _now().add(ttl);
     return code;
   }
 
   void stopHosting() {
+    _pending = null;
     _hostCode = null;
     _hostCodeExpiry = null;
   }
 
+  /// The hosted code while it is unexpired; an expired code is cleared
+  /// together with any pending initiator.
   String? _activeHostCode() {
     final code = _hostCode;
     final expiry = _hostCodeExpiry;
-    if (code == null || expiry == null || expiry.isBefore(DateTime.now())) {
+    if (code == null || expiry == null || !expiry.isAfter(_now())) {
       stopHosting();
       return null;
     }
     return code;
+  }
+
+  void _ensureCanStart(String code, String initiatorId) {
+    if (_activeHostCode() != code) {
+      throw PairingRejectedException('not hosting');
+    }
+    final pending = _pending;
+    if (pending != null && pending.id != initiatorId) {
+      throw PairingRejectedException('another initiator is pending');
+    }
   }
 
   // Called when this device is the target of a pairing request
@@ -59,18 +96,13 @@ class PairingCoordinator {
   ) async {
     final code = _activeHostCode();
     if (code == null) {
-      throw Exception('Not hosting');
+      throw PairingRejectedException('not hosting');
     }
-
     final canonicalInitiatorId = canonicalDeviceId(initiatorId);
+    _ensureCanStart(code, canonicalInitiatorId);
+
     final session = PairingSession();
     await session.init();
-    _pendingTargetSessions[canonicalInitiatorId] = session;
-    _targetDeviceNames[canonicalInitiatorId] = initiatorName;
-    if (remoteHost.isNotEmpty) {
-      _targetHosts[canonicalInitiatorId] = remoteHost;
-    }
-
     final result = await session.completePairing(
       remotePublicKeyBytes: base64Decode(initiatorPubKeyBase64),
       initiatorId: canonicalInitiatorId,
@@ -79,43 +111,62 @@ class PairingCoordinator {
       code: code,
     );
 
-    _targetTempResults[canonicalInitiatorId] = result;
+    // Hosting state may have changed while the key exchange was awaited.
+    _ensureCanStart(code, canonicalInitiatorId);
+    _pending = _PendingInitiator(
+      id: canonicalInitiatorId,
+      name: initiatorName,
+      host: remoteHost.isEmpty ? null : remoteHost,
+      pairKey: result.pairKey,
+    );
     return base64Encode(session.ephemeralPublicKey);
   }
 
   // Called when this device is the target and the initiator confirms the proof
-  Future<bool> handlePairConfirmRequest(
+  Future<PairConfirmOutcome> handlePairConfirmRequest(
     String initiatorId,
     String proofBase64,
   ) async {
-    final canonicalInitiatorId = canonicalDeviceId(initiatorId);
-    final result = _targetTempResults[canonicalInitiatorId];
-    if (result == null) return false;
+    // Every confirm ends the hosted code, whatever its outcome. Taking the
+    // pending initiator before any await keeps concurrent confirms from racing.
+    final codeIsActive = _activeHostCode() != null;
+    final pending = _pending;
+    stopHosting();
 
-    final proof = base64Decode(proofBase64);
+    final canonicalInitiatorId = canonicalDeviceId(initiatorId);
+    if (!codeIsActive ||
+        pending == null ||
+        pending.id != canonicalInitiatorId) {
+      return PairConfirmOutcome.rejected;
+    }
+
+    final List<int> proof;
+    try {
+      proof = base64Decode(proofBase64);
+    } on FormatException {
+      return PairConfirmOutcome.rejected;
+    }
     final isValid = await PairingSession.verifyConfirmationProof(
       proof,
-      result.pairKey,
+      pending.pairKey,
       canonicalInitiatorId,
       identity.id,
     );
+    if (!isValid) return PairConfirmOutcome.rejected;
 
-    if (isValid) {
-      await pairedStore.addDevice(
-        PairedDevice(
-          id: canonicalInitiatorId,
-          name: _targetDeviceNames[canonicalInitiatorId] ?? 'Device',
-          host: _targetHosts[canonicalInitiatorId],
-        ),
-        result.pairKey,
-      );
-      stopHosting();
-      _targetTempResults.remove(canonicalInitiatorId);
-      _pendingTargetSessions.remove(canonicalInitiatorId);
-      _targetDeviceNames.remove(canonicalInitiatorId);
-      _targetHosts.remove(canonicalInitiatorId);
+    if (pairedStore.devices.any((d) => d.id == canonicalInitiatorId)) {
+      return PairConfirmOutcome.alreadyPaired;
     }
-    return isValid;
+
+    await pairedStore.addDevice(
+      PairedDevice(
+        id: canonicalInitiatorId,
+        name: pending.name,
+        host: pending.host,
+      ),
+      pending.pairKey,
+    );
+    return PairConfirmOutcome.paired;
   }
 
   // Called when this device initiates a pairing request
@@ -179,8 +230,25 @@ class PairingCoordinator {
         result.pairKey,
       );
       return result.confirmCode;
+    } else if (confirmResponse.statusCode == 409) {
+      throw PairingAlreadyPairedException();
     } else {
       throw Exception('Pair confirm failed: ${confirmResponse.statusCode}');
     }
   }
+}
+
+/// The single initiator that has completed `/v1/pair/start` against the hosted code.
+class _PendingInitiator {
+  final String id;
+  final String name;
+  final String? host;
+  final SecretKey pairKey;
+
+  _PendingInitiator({
+    required this.id,
+    required this.name,
+    required this.host,
+    required this.pairKey,
+  });
 }

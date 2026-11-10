@@ -490,7 +490,8 @@ class AppState extends ChangeNotifier {
 
     try {
       final mdnsCandidates = peerBrowser.peers;
-      if (await _tryPairing(mdnsCandidates, normalizedCode)) {
+      if (await _tryPairing(mdnsCandidates, normalizedCode) ||
+          lastError == alreadyPairedMessage) {
         return;
       }
 
@@ -498,7 +499,8 @@ class AppState extends ChangeNotifier {
         mdnsCandidates,
         await SubnetSweeper.sweep(),
       );
-      if (await _tryPairing(sweptCandidates, normalizedCode)) {
+      if (await _tryPairing(sweptCandidates, normalizedCode) ||
+          lastError == alreadyPairedMessage) {
         return;
       }
 
@@ -510,6 +512,9 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  static const alreadyPairedMessage =
+      'Remove the existing pairing on the other device first';
+
   Future<bool> _tryPairing(List<Peer> candidates, String code) async {
     for (final peer in candidates) {
       try {
@@ -518,6 +523,10 @@ class AppState extends ChangeNotifier {
         notifyListeners();
         unawaited(refreshDeviceLiveness());
         return true;
+      } on PairingAlreadyPairedException {
+        // The target accepted the code but already knows this device; its code is now spent.
+        lastError = alreadyPairedMessage;
+        return false;
       } catch (_) {
         // Wrong code, not in hosting mode, or unreachable: try the next candidate.
       }

@@ -125,6 +125,9 @@ class ClipServer {
         jsonEncode(respData),
         headers: {'Content-Type': 'application/json'},
       );
+    } on PairingRejectedException catch (e) {
+      developer.log('Pair start rejected: ${e.reason}', name: 'ClipServer');
+      return Response.forbidden('Rejected');
     } catch (e) {
       developer.log('Pair start error: $e', name: 'ClipServer');
       return Response.internalServerError(body: e.toString());
@@ -139,14 +142,21 @@ class ClipServer {
       final initiatorId = body['deviceId'] as String;
       final proof = body['proof'] as String;
 
-      final success = await pairingCoordinator.handlePairConfirmRequest(
+      final outcome = await pairingCoordinator.handlePairConfirmRequest(
         initiatorId,
         proof,
       );
-      if (success) {
-        return Response.ok('OK');
-      } else {
-        return Response(401, body: 'Invalid proof');
+      switch (outcome) {
+        case PairConfirmOutcome.paired:
+          return Response.ok('OK');
+        case PairConfirmOutcome.alreadyPaired:
+          return Response(
+            409,
+            body: jsonEncode({'status': 'alreadyPaired'}),
+            headers: {'Content-Type': 'application/json'},
+          );
+        case PairConfirmOutcome.rejected:
+          return Response(401, body: 'Invalid proof');
       }
     } catch (e) {
       developer.log('Pair confirm error: $e', name: 'ClipServer');

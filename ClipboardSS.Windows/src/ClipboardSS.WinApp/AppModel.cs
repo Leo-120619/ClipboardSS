@@ -206,10 +206,19 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
         LastError = null;
         var mdnsPeers = VisiblePeers;
-        if (await TryPairingAsync(mdnsPeers, code, cancellationToken)) return true;
-        var sweptPeers = await _sweeper.SweepAsync(cancellationToken);
-        if (await TryPairingAsync(ComposeJoinCandidates(mdnsPeers, sweptPeers), code, cancellationToken))
-            return true;
+        try
+        {
+            if (await TryPairingAsync(mdnsPeers, code, cancellationToken)) return true;
+            var sweptPeers = await _sweeper.SweepAsync(cancellationToken);
+            if (await TryPairingAsync(ComposeJoinCandidates(mdnsPeers, sweptPeers), code, cancellationToken))
+                return true;
+        }
+        catch (PairingAlreadyPairedException exception)
+        {
+            // The target accepted the code but already knows this device; its code is now spent.
+            LastError = exception.Message;
+            return false;
+        }
         LastError = "No device accepted that code. Make sure the other device is showing a code on the same Wi-Fi.";
         return false;
     }
@@ -447,7 +456,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         CancellationToken cancellationToken) =>
         PairingCoordinator.HandlePairStartAsync(request, remoteHost, cancellationToken);
 
-    public Task<bool> HandlePairConfirmAsync(
+    public Task<PairConfirmOutcome> HandlePairConfirmAsync(
         PairConfirmRequest request,
         CancellationToken cancellationToken) =>
         PairingCoordinator.HandlePairConfirmAsync(request, cancellationToken);
@@ -574,7 +583,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
                 StateChanged?.Invoke(this, EventArgs.Empty);
                 return true;
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (exception is not PairingAlreadyPairedException &&
+                                              !cancellationToken.IsCancellationRequested)
             {
             }
         }

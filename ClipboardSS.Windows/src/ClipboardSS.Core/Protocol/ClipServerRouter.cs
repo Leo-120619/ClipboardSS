@@ -11,6 +11,14 @@ public sealed record PairStartRequest(Guid DeviceId, string DeviceName, string E
 public sealed record PairStartResponse(Guid DeviceId, string DeviceName, string EphemeralPublicKey);
 public sealed record PairConfirmRequest(Guid DeviceId, string Proof);
 
+/// <summary>Result of a <c>/v1/pair/confirm</c> request on the hosting (target) side.</summary>
+public enum PairConfirmOutcome
+{
+    Paired,
+    Rejected,
+    AlreadyPaired,
+}
+
 public interface IClipServerBackend
 {
     byte[]? GetPairKey(Guid deviceId);
@@ -28,7 +36,7 @@ public interface IClipServerBackend
         PairStartRequest request,
         string remoteHost,
         CancellationToken cancellationToken);
-    Task<bool> HandlePairConfirmAsync(
+    Task<PairConfirmOutcome> HandlePairConfirmAsync(
         PairConfirmRequest request,
         CancellationToken cancellationToken);
 }
@@ -130,9 +138,12 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
             {
                 var confirmRequest = JsonSerializer.Deserialize<PairConfirmRequest>(request.Body, WireJson.Options)
                     ?? throw new JsonException("Missing confirm request.");
-                return await backend.HandlePairConfirmAsync(confirmRequest, cancellationToken)
-                    ? JsonResponse(200, "{\"status\":\"ok\"}"u8.ToArray())
-                    : TextResponse(401, "Unauthorized");
+                return await backend.HandlePairConfirmAsync(confirmRequest, cancellationToken) switch
+                {
+                    PairConfirmOutcome.Paired => JsonResponse(200, "{\"status\":\"ok\"}"u8.ToArray()),
+                    PairConfirmOutcome.AlreadyPaired => JsonResponse(409, "{\"status\":\"alreadyPaired\"}"u8.ToArray()),
+                    _ => TextResponse(401, "Unauthorized"),
+                };
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {

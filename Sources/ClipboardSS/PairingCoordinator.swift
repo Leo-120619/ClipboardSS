@@ -2,45 +2,71 @@ import Foundation
 import CryptoKit
 import ClipboardCore
 
+/// Result of a `/v1/pair/confirm` request on the hosting (target) side.
+public enum PairConfirmOutcome: Equatable, Sendable {
+    case paired
+    case rejected
+    case alreadyPaired
+}
+
 @MainActor
 public final class PairingCoordinator: ObservableObject {
     public let identity: DeviceIdentity
     public let pairedStore: PairedDeviceStore
     private let transport: PeerTransport
     
-    private var pendingTargetSessions: [UUID: PairingSession] = [:]
-    private var targetTempKeys: [UUID: SymmetricKey] = [:]
-    private var targetDeviceNames: [UUID: String] = [:]
-    private var targetHosts: [UUID: String] = [:]
-    
+    /// The single initiator that has completed `/v1/pair/start` against the hosted code.
+    private struct PendingInitiator {
+        let id: UUID
+        let name: String
+        let host: String
+        let pairKey: SymmetricKey
+    }
+
+    // Hosting state. All pairing rules on the target side are enforced in
+    // `handlePairStartRequest` / `handlePairConfirmRequest` below:
+    // one pending initiator per code, confirm only while the code is active,
+    // any confirm ends the code, and no silent re-pair of a known deviceId.
+    private var pending: PendingInitiator?
+
     @Published public var hostCode: String?
     @Published public var isPairing: Bool = false
     private var hostCodeExpiry: Date?
+    private let now: () -> Date
 
     /// Invoked on the main actor whenever a device is successfully added to the
     /// paired store, so observers can refresh their view of paired devices.
     public var onPairedDevicesChanged: (() -> Void)?
     
-    public init(identity: DeviceIdentity, pairedStore: PairedDeviceStore, transport: PeerTransport) {
+    public init(
+        identity: DeviceIdentity,
+        pairedStore: PairedDeviceStore,
+        transport: PeerTransport,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.identity = identity
         self.pairedStore = pairedStore
         self.transport = transport
+        self.now = now
     }
 
     public func startHosting(ttl: TimeInterval = 180) -> String {
         let code = String(format: "%06d", Int.random(in: 0...999_999))
+        pending = nil
         hostCode = code
-        hostCodeExpiry = Date().addingTimeInterval(ttl)
+        hostCodeExpiry = now().addingTimeInterval(ttl)
         return code
     }
 
     public func stopHosting() {
+        pending = nil
         hostCode = nil
         hostCodeExpiry = nil
     }
 
+    /// The hosted code while it is unexpired; an expired code is cleared together with any pending initiator.
     private func activeHostCode() -> String? {
-        guard let code = hostCode, let expiry = hostCodeExpiry, expiry > Date() else {
+        guard let code = hostCode, let expiry = hostCodeExpiry, expiry > now() else {
             stopHosting()
             return nil
         }
@@ -58,16 +84,16 @@ public final class PairingCoordinator: ObservableObject {
             logToFile("PairingCoordinator: Rejecting pair start because this device is not hosting")
             throw PairingError.notHosting
         }
+        if let pending, pending.id != initiatorId {
+            logToFile("PairingCoordinator: Rejecting pair start because another initiator is pending")
+            throw PairingError.initiatorConflict
+        }
         guard let initiatorPubKey = Data(base64Encoded: initiatorPubKeyBase64) else {
             logToFile("PairingCoordinator: Invalid public key base64")
             throw PairingError.invalidPublicKey
         }
 
         let session = PairingSession()
-        pendingTargetSessions[initiatorId] = session
-        targetDeviceNames[initiatorId] = initiatorName
-        targetHosts[initiatorId] = remoteHost
-
         let (pairKey, _) = try session.completePairing(
             remotePublicKey: initiatorPubKey,
             initiatorId: initiatorId,
@@ -76,35 +102,40 @@ public final class PairingCoordinator: ObservableObject {
             code: code
         )
 
-        targetTempKeys[initiatorId] = pairKey
+        pending = PendingInitiator(id: initiatorId, name: initiatorName, host: remoteHost, pairKey: pairKey)
         logToFile("PairingCoordinator: Ephemeral key complete for hosted code")
         return session.ephemeralPublicKey
     }
     
-    public func handlePairConfirmRequest(initiatorId: UUID, proofBase64: String) async throws -> Bool {
+    public func handlePairConfirmRequest(initiatorId: UUID, proofBase64: String) async throws -> PairConfirmOutcome {
         logToFile("PairingCoordinator: handlePairConfirmRequest from \(initiatorId.uuidString)")
-        guard let proof = Data(base64Encoded: proofBase64),
-              let pairKey = targetTempKeys[initiatorId] else {
-            logToFile("PairingCoordinator: Missing proof or key for initiator \(initiatorId.uuidString)")
-            return false
+        // Every confirm ends the hosted code, whatever its outcome. Taking the pending
+        // initiator before any suspension point also keeps concurrent confirms from racing.
+        let codeIsActive = activeHostCode() != nil
+        let pending = self.pending
+        stopHosting()
+
+        guard codeIsActive,
+              let pending, pending.id == initiatorId,
+              let proof = Data(base64Encoded: proofBase64),
+              PairingSession.verifyConfirmationProof(proof: proof, pairKey: pending.pairKey, initiatorId: initiatorId, targetId: identity.id)
+        else {
+            logToFile("PairingCoordinator: Rejecting pair confirm; the code is now invalid")
+            return .rejected
         }
-        
-        let isValid = PairingSession.verifyConfirmationProof(proof: proof, pairKey: pairKey, initiatorId: initiatorId, targetId: identity.id)
-        logToFile("PairingCoordinator: Verification proof isValid = \(isValid)")
-        if isValid {
-            try await pairedStore.addDevice(
-                PairedDevice(id: initiatorId, name: targetDeviceNames[initiatorId] ?? "Device", host: targetHosts[initiatorId]),
-                key: pairKey
-            )
-            stopHosting()
-            self.targetTempKeys[initiatorId] = nil
-            self.pendingTargetSessions[initiatorId] = nil
-            self.targetDeviceNames[initiatorId] = nil
-            self.targetHosts[initiatorId] = nil
-            logToFile("PairingCoordinator: Device paired successfully and saved!")
-            onPairedDevicesChanged?()
+
+        if await pairedStore.devices.contains(where: { $0.id == initiatorId }) {
+            logToFile("PairingCoordinator: Rejecting pair confirm for an already paired device")
+            return .alreadyPaired
         }
-        return isValid
+
+        try await pairedStore.addDevice(
+            PairedDevice(id: initiatorId, name: pending.name, host: pending.host),
+            key: pending.pairKey
+        )
+        logToFile("PairingCoordinator: Device paired successfully and saved!")
+        onPairedDevicesChanged?()
+        return .paired
     }
     
     public func startPairing(with peer: Peer, code: String) async throws {
@@ -156,14 +187,14 @@ public final class PairingCoordinator: ObservableObject {
             throw PairingError.invalidPublicKey
         }
         
-        let (pairKey, code) = try session.completePairing(
+        let (pairKey, _) = try session.completePairing(
             remotePublicKey: targetPubKey,
             initiatorId: identity.id,
             targetId: targetResp.deviceId,
             isInitiator: true,
             code: code
         )
-        logToFile("PairingCoordinator: Completed ephemeral key exchange, pairing code=\(code)")
+        logToFile("PairingCoordinator: Completed ephemeral key exchange")
         
         let proof = PairingSession.generateConfirmationProof(pairKey: pairKey, initiatorId: identity.id, targetId: targetResp.deviceId)
         
@@ -197,6 +228,9 @@ public final class PairingCoordinator: ObservableObject {
                 key: pairKey
             )
             onPairedDevicesChanged?()
+        } else if confirmResponse.statusCode == 409 {
+            logToFile("PairingCoordinator: Target already has this device paired")
+            throw PairingError.alreadyPaired
         } else {
             logToFile("PairingCoordinator: Confirm returned status \(confirmResponse.statusCode), user denied pairing?")
             throw URLError(.userAuthenticationRequired)

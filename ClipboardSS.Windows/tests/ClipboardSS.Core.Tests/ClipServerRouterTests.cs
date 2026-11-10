@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using ClipboardSS.Core.Crypto;
 using ClipboardSS.Core.Json;
@@ -97,13 +98,21 @@ public sealed class ClipServerRouterTests
         Assert.Equal(200, response.StatusCode);
         Assert.Equal("192.168.0.9", backend.RemoteHost);
 
-        backend.ConfirmResult = false;
+        backend.ConfirmResult = PairConfirmOutcome.Rejected;
         var confirm = new PairConfirmRequest(start.DeviceId, Convert.ToBase64String(new byte[32]));
         response = await router.RouteAsync(
             Request("POST", "/v1/pair/confirm", JsonSerializer.SerializeToUtf8Bytes(confirm, WireJson.Options)),
             "192.168.0.9",
             TestContext.Current.CancellationToken);
         Assert.Equal(401, response.StatusCode);
+
+        backend.ConfirmResult = PairConfirmOutcome.AlreadyPaired;
+        response = await router.RouteAsync(
+            Request("POST", "/v1/pair/confirm", JsonSerializer.SerializeToUtf8Bytes(confirm, WireJson.Options)),
+            "192.168.0.9",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(409, response.StatusCode);
+        Assert.Equal("{\"status\":\"alreadyPaired\"}", Encoding.UTF8.GetString(response.Body));
 
         backend.RejectPairStart = true;
         response = await router.RouteAsync(
@@ -139,7 +148,7 @@ public sealed class ClipServerRouterTests
         public Dictionary<Guid, byte[]> Keys { get; } = [];
         public ReceiveStatus ReceiveStatus { get; set; } = ReceiveStatus.Added;
         public string? RemoteHost { get; private set; }
-        public bool ConfirmResult { get; set; } = true;
+        public PairConfirmOutcome ConfirmResult { get; set; } = PairConfirmOutcome.Paired;
         public bool RejectPairStart { get; set; }
         public bool Connected { get; set; } = true;
         public byte[]? GetPairKey(Guid deviceId) => Keys.GetValueOrDefault(deviceId);
@@ -159,7 +168,7 @@ public sealed class ClipServerRouterTests
                 Convert.ToBase64String(new byte[32])));
         }
 
-        public Task<bool> HandlePairConfirmAsync(
+        public Task<PairConfirmOutcome> HandlePairConfirmAsync(
             PairConfirmRequest request,
             CancellationToken cancellationToken) => Task.FromResult(ConfirmResult);
     }

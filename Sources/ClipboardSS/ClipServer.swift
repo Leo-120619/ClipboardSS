@@ -327,11 +327,16 @@ public final class ClipServer: @unchecked Sendable {
                     }
                     let req = try decoder.decode(PairConfirmReq.self, from: request.body)
                     
-                    let success = try await self.pairingCoordinator.handlePairConfirmRequest(initiatorId: req.deviceId, proofBase64: req.proof)
-                    if success {
+                    let outcome = try await self.pairingCoordinator.handlePairConfirmRequest(initiatorId: req.deviceId, proofBase64: req.proof)
+                    switch outcome {
+                    case .paired:
                         let resp = HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: Data("{\"status\":\"ok\"}".utf8))
                         self.sendResponse(resp, on: connection)
-                    } else {
+                    case .alreadyPaired:
+                        logToFile("ClipServer: /v1/pair/confirm rejected (device already paired)")
+                        let resp = HTTPResponse(statusCode: 409, headers: ["Content-Type": "application/json"], body: Data("{\"status\":\"alreadyPaired\"}".utf8))
+                        self.sendResponse(resp, on: connection)
+                    case .rejected:
                         logToFile("ClipServer: /v1/pair/confirm failed (verification returned false)")
                         let resp = HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
                         self.sendResponse(resp, on: connection)

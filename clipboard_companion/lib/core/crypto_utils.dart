@@ -80,11 +80,13 @@ class PairingSession {
       initiatorId,
       targetId,
     );
+    // Constant-time: inspect every byte regardless of where a mismatch occurs.
     if (proof.length != expectedProof.length) return false;
+    var diff = 0;
     for (int i = 0; i < proof.length; i++) {
-      if (proof[i] != expectedProof[i]) return false;
+      diff |= proof[i] ^ expectedProof[i];
     }
-    return true;
+    return diff == 0;
   }
 }
 

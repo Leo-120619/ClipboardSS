@@ -314,16 +314,24 @@ final class AppModel: ObservableObject {
             defer { joinInProgress = false }
 
             let mdnsCandidates = peerBrowser.peers
-            if await tryPairing(with: mdnsCandidates, code: code) {
+            switch await tryPairing(with: mdnsCandidates, code: code) {
+            case .paired: return
+            case .alreadyPaired:
+                lastError = Self.alreadyPairedMessage
                 return
+            case .notAccepted: break
             }
 
             let sweptCandidates = Self.composeJoinCandidates(
                 mdnsPeers: mdnsCandidates,
                 sweptPeers: await SubnetSweeper.sweep()
             )
-            if await tryPairing(with: sweptCandidates, code: code) {
+            switch await tryPairing(with: sweptCandidates, code: code) {
+            case .paired: return
+            case .alreadyPaired:
+                lastError = Self.alreadyPairedMessage
                 return
+            case .notAccepted: break
             }
 
             lastError = "No device accepted that code. Make sure the other device is showing a code on the same Wi-Fi."
@@ -619,18 +627,25 @@ final class AppModel: ObservableObject {
         return "application/octet-stream"
     }
 
-    private func tryPairing(with candidates: [Peer], code: String) async -> Bool {
+    static let alreadyPairedMessage = "Remove the existing pairing on the other device first"
+
+    private enum JoinOutcome { case paired, alreadyPaired, notAccepted }
+
+    private func tryPairing(with candidates: [Peer], code: String) async -> JoinOutcome {
         for peer in candidates {
             do {
                 try await pairingCoordinator.startPairing(with: peer, code: code)
                 await refreshPairedDevices()
                 await refreshDeviceLiveness()
-                return true
+                return .paired
+            } catch PairingError.alreadyPaired {
+                // The target accepted the code but already knows this device; its code is now spent.
+                return .alreadyPaired
             } catch {
                 continue
             }
         }
-        return false
+        return .notAccepted
     }
 
     func cleanupExpiredClips() throws {
