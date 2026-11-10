@@ -95,4 +95,48 @@ void main() {
       expect(keyStorage.values['pair_key_abc'], base64Encode(legacyBytes));
     },
   );
+
+  test(
+    'failed secure write keeps the prefs key and a later getKey retries',
+    () async {
+      final legacyBytes = List<int>.filled(32, 6);
+      SharedPreferences.setMockInitialValues({
+        'pair_key_abc': base64Encode(legacyBytes),
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final keyStorage = FakePairKeyStorage()..throwOnWrite = true;
+      final store = PairedDeviceStore(prefs, keyStorage: keyStorage);
+
+      await expectLater(store.migrateLegacyKeys(), throwsStateError);
+      expect(prefs.getString('pair_key_abc'), base64Encode(legacyBytes));
+
+      // Sync keeps working from the prefs copy while the keystore is down.
+      expect(await (await store.getKey('abc'))?.extractBytes(), legacyBytes);
+      expect(prefs.getString('pair_key_abc'), base64Encode(legacyBytes));
+      expect(keyStorage.values, isEmpty);
+
+      keyStorage.throwOnWrite = false;
+      expect(await (await store.getKey('abc'))?.extractBytes(), legacyBytes);
+      expect(prefs.getString('pair_key_abc'), isNull);
+      expect(keyStorage.values['pair_key_abc'], base64Encode(legacyBytes));
+    },
+  );
+
+  test('migration never overwrites a newer secure key', () async {
+    final staleBytes = List<int>.filled(32, 1);
+    final newerBytes = List<int>.filled(32, 2);
+    SharedPreferences.setMockInitialValues({
+      'pair_key_abc': base64Encode(staleBytes),
+    });
+    final prefs = await SharedPreferences.getInstance();
+    final keyStorage = FakePairKeyStorage()
+      ..values['pair_key_abc'] = base64Encode(newerBytes);
+    final store = PairedDeviceStore(prefs, keyStorage: keyStorage);
+
+    await store.migrateLegacyKeys();
+
+    expect(prefs.getString('pair_key_abc'), isNull);
+    expect(keyStorage.values['pair_key_abc'], base64Encode(newerBytes));
+    expect(await (await store.getKey('abc'))?.extractBytes(), newerBytes);
+  });
 }

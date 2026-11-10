@@ -12,7 +12,8 @@ abstract class PairKeyStorage {
   Future<void> delete(String name);
 }
 
-/// Platform keystore (Android Keystore, iOS Keychain, Windows DPAPI).
+/// Platform secure storage via flutter_secure_storage: Android Keystore, iOS
+/// Keychain, and on Windows AES-GCM files whose key is in Credential Manager.
 class SecurePairKeyStorage implements PairKeyStorage {
   final FlutterSecureStorage _storage;
 
@@ -96,13 +97,21 @@ class PairedDeviceStore {
 
   Future<SecretKey?> getKey(String deviceId) async {
     final name = '$_keysPrefix${canonicalDeviceId(deviceId)}';
-    final str = await _keys.read(name) ?? await _migrateLegacyKey(name);
-    if (str == null) return null;
-    return SecretKey(base64Decode(str));
+    final secure = await _keys.read(name);
+    if (secure != null) return SecretKey(base64Decode(secure));
+    final legacy = _prefs.getString(name);
+    if (legacy == null) return null;
+    try {
+      await _migrateLegacyKey(name);
+    } catch (_) {
+      // Keystore unavailable: keep syncing from the prefs copy, retry next time.
+    }
+    return SecretKey(base64Decode(legacy));
   }
 
   /// One-time move of pre-secure-storage `pair_key_<id>` prefs entries into
-  /// [PairKeyStorage]. Each prefs entry is removed only after its write succeeds.
+  /// [PairKeyStorage]. Each prefs entry is removed only after its write
+  /// succeeds; a write failure is rethrown and leaves the entry in place.
   Future<void> migrateLegacyKeys() async {
     final legacy = _prefs.getKeys().where((k) => k.startsWith(_keysPrefix));
     for (final name in legacy.toList()) {
@@ -110,12 +119,13 @@ class PairedDeviceStore {
     }
   }
 
-  Future<String?> _migrateLegacyKey(String name) async {
+  /// Moves one prefs key into secure storage. A key already in secure storage
+  /// is newer (written by [addDevice]) and wins; the prefs copy is dropped.
+  Future<void> _migrateLegacyKey(String name) async {
     final value = _prefs.getString(name);
-    if (value == null) return null;
-    await _keys.write(name, value);
+    if (value == null) return;
+    if (await _keys.read(name) == null) await _keys.write(name, value);
     await _prefs.remove(name);
-    return value;
   }
 
   Future<void> setConnected(String id, bool connected) async {
