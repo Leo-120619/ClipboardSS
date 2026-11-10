@@ -15,6 +15,8 @@ public func sanitizedImageExtension(_ fileExtension: String) -> String {
 public final class ClipStore {
     public let storageDirectory: URL
     public private(set) var items: [ClipItem]
+    /// Where an unreadable `clips.json` was moved at launch, so the UI can tell the user once.
+    public let quarantinedFileURL: URL?
 
     private let now: () -> Date
     private let fileManager: FileManager
@@ -38,12 +40,18 @@ public final class ClipStore {
         try fileManager.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
 
+        var items: [ClipItem] = []
+        var quarantinedFileURL: URL?
         if fileManager.fileExists(atPath: metadataURL.path) {
             let data = try Data(contentsOf: metadataURL)
-            self.items = try JSONDecoder.clipStore.decode([ClipItem].self, from: data)
-        } else {
-            self.items = []
+            do {
+                items = try JSONDecoder.clipStore.decode([ClipItem].self, from: data)
+            } catch is DecodingError {
+                quarantinedFileURL = try CorruptStateFile.quarantine(metadataURL, now: now(), fileManager: fileManager)
+            }
         }
+        self.items = items
+        self.quarantinedFileURL = quarantinedFileURL
     }
 
     @discardableResult

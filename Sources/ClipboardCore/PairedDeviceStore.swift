@@ -36,18 +36,31 @@ public actor PairedDeviceStore {
     private let fileManager: FileManager
     
     public private(set) var devices: [PairedDevice]
+    /// Where an unreadable `paired-devices.json` was moved at launch, so the UI can tell the user once.
+    public nonisolated let quarantinedFileURL: URL?
 
-    public init(storageURL: URL, keyStorage: PairKeyStorage, fileManager: FileManager = .default) throws {
+    public init(
+        storageURL: URL,
+        keyStorage: PairKeyStorage,
+        fileManager: FileManager = .default,
+        now: () -> Date = Date.init
+    ) throws {
         self.storageURL = storageURL
         self.keyStorage = keyStorage
         self.fileManager = fileManager
-        
+
+        var devices: [PairedDevice] = []
+        var quarantinedFileURL: URL?
         if fileManager.fileExists(atPath: storageURL.path) {
             let data = try Data(contentsOf: storageURL)
-            self.devices = try JSONDecoder().decode([PairedDevice].self, from: data)
-        } else {
-            self.devices = []
+            do {
+                devices = try JSONDecoder().decode([PairedDevice].self, from: data)
+            } catch is DecodingError {
+                quarantinedFileURL = try CorruptStateFile.quarantine(storageURL, now: now(), fileManager: fileManager)
+            }
         }
+        self.devices = devices
+        self.quarantinedFileURL = quarantinedFileURL
     }
     
     public func addDevice(_ device: PairedDevice, key: SymmetricKey) throws {

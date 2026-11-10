@@ -293,6 +293,12 @@ class AppState extends ChangeNotifier {
 
     // 2. Setup stores
     pairedStore = PairedDeviceStore(prefs);
+    await pairedStore.quarantineIfCorrupt();
+    if (pairedStore.quarantinedKey != null) {
+      // One-time notice: the unreadable list was moved aside, so this shows once.
+      lastError =
+          'Saved paired devices could not be read and were reset. Pair your devices again.';
+    }
     _loadClips();
     if (Platform.isAndroid || Platform.isIOS) {
       _shareChannel.setMethodCallHandler(_handleShareMethod);

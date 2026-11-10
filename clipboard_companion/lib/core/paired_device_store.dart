@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cryptography/cryptography.dart';
+import 'corrupt_state.dart';
 import 'models.dart';
 
 class PairedDeviceStore {
@@ -8,14 +9,38 @@ class PairedDeviceStore {
 
   PairedDeviceStore(this._prefs);
 
+  /// Where an unreadable device list was moved at startup, so the UI can tell the user once.
+  String? get quarantinedKey => _quarantinedKey;
+  String? _quarantinedKey;
+
+  /// Call once at startup: moves an undecodable device list aside (an unreadable list
+  /// already reads as empty) and records where it went.
+  Future<void> quarantineIfCorrupt({
+    DateTime Function() now = DateTime.now,
+  }) async {
+    if (_decodeDevices() != null) return;
+    _quarantinedKey = await quarantineCorruptPref(_prefs, _devicesKey, now());
+  }
+
   static const String _devicesKey = 'paired_devices';
   static const String _keysPrefix = 'pair_key_';
 
-  List<PairedDevice> get devices {
+  List<PairedDevice> get devices => _decodeDevices() ?? [];
+
+  /// Returns null when the stored list exists but cannot be decoded.
+  List<PairedDevice>? _decodeDevices() {
     final str = _prefs.getString(_devicesKey);
     if (str == null) return [];
-    final list = jsonDecode(str) as List;
-    return list.map((e) => PairedDevice.fromJson(e)).toList();
+    try {
+      final list = jsonDecode(str) as List;
+      return list
+          .map((e) => PairedDevice.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } on FormatException {
+      return null;
+    } on TypeError {
+      return null;
+    }
   }
 
   Future<void> addDevice(PairedDevice device, SecretKey key) async {

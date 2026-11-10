@@ -5,7 +5,18 @@ import ClipboardCore
 struct PhotoEditorView: View {
     let image: NSImage
     @ObservedObject var model: AppModel
+    /// The image at full pixel resolution; all editor geometry is in these pixels.
+    private let sourcePixels: CGImage?
+    /// Source pixels per image point (2 for a Retina capture); brush sizes are in points.
+    private let pixelsPerPoint: CGFloat
     @Environment(\.dismiss) private var dismiss
+
+    init(image: NSImage, model: AppModel) {
+        self.image = image
+        self.model = model
+        self.sourcePixels = Self.pixelImage(of: image)
+        self.pixelsPerPoint = Self.pixelsPerPoint(of: image, source: sourcePixels)
+    }
 
     // MARK: - Editor Tooling
     enum EditorTool: String, CaseIterable, Identifiable {
@@ -267,49 +278,41 @@ struct PhotoEditorView: View {
     private var mainCanvasArea: some View {
         GeometryReader { proxy in
             let viewSize = proxy.size
-            
-            if let transforms = activeTool == .crop ? getFullTransforms(imageSize: image.size, viewSize: viewSize) : getTransforms(imageSize: image.size, viewSize: viewSize) {
-                
-                let W = image.size.width
-                let H = image.size.height
-                
-                // Bounding box of rotated/flipped image
-                let t1 = CGAffineTransform.identity
-                    .translatedBy(x: W / 2, y: H / 2)
-                    .scaledBy(x: currentState.isFlippedHorizontal ? -1 : 1, y: currentState.isFlippedVertical ? -1 : 1)
-                    .rotated(by: currentState.rotation)
-                    .rotated(by: currentState.straightening)
-                let transformedBounds = CGRect(origin: .zero, size: image.size)
-                    .applying(t1.translatedBy(x: -W / 2, y: -H / 2))
-                let transformedSize = transformedBounds.size
-                
+
+            if let source = sourcePixels, viewSize.width > 0, viewSize.height > 0 {
+                let pixelSize = CGSize(width: source.width, height: source.height)
+                // The crop tool shows the whole oriented image so the crop box can be moved over it;
+                // every other tool shows exactly what will be saved.
+                let shownState = activeTool == .crop ? Self.uncropped(currentState) : currentState
+                let shownSize = Self.editorCropSize(state: shownState, imagePixelSize: pixelSize)
+                let display = Self.displayTransform(state: shownState, imagePixelSize: pixelSize, viewSize: viewSize)
+                let shownRect = CGRect(origin: .zero, size: shownSize)
+                    .applying(Self.fitTransform(contentSize: shownSize, viewSize: viewSize))
+                let lineScale = hypot(display.a, display.b)
+
                 ZStack {
-                    // Image rendered with transform effects
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .scaleEffect(x: currentState.isFlippedHorizontal ? -1 : 1, y: currentState.isFlippedVertical ? -1 : 1)
-                        .rotationEffect(.radians(currentState.rotation))
-                        .rotationEffect(.radians(currentState.straightening))
-                        // Apply crop clipping if not in active crop edit mode
-                        .scaleEffect(
-                            activeTool == .crop ? 1.0 : 1.0, // base scaling
-                            anchor: .center
-                        )
-                    
+                    // Drawn through the same transform the saved image uses.
+                    Canvas { context, _ in
+                        context.clip(to: Path(shownRect))
+                        context.concatenate(display)
+                        context.draw(Image(decorative: source, scale: 1), in: CGRect(origin: .zero, size: pixelSize))
+                    }
+
                     // Transparent Overlay for drawing or cropping
                     if activeTool == .annotate {
                         // Drawing overlay
                         Canvas { context, size in
+                            context.clip(to: Path(shownRect))
+
                             // Renders historical paths
                             for path in currentState.paths {
                                 var pathSwiftUI = Path()
                                 guard let first = path.points.first else { continue }
-                                pathSwiftUI.move(to: first.applying(transforms.forward))
+                                pathSwiftUI.move(to: first.applying(display))
                                 for point in path.points.dropFirst() {
-                                    pathSwiftUI.addLine(to: point.applying(transforms.forward))
+                                    pathSwiftUI.addLine(to: point.applying(display))
                                 }
-                                
+
                                 var localContext = context
                                 if path.isEraser {
                                     localContext.blendMode = .clear
@@ -319,18 +322,18 @@ struct PhotoEditorView: View {
                                 localContext.stroke(
                                     pathSwiftUI,
                                     with: .color(path.color.opacity(path.opacity)),
-                                    style: StrokeStyle(lineWidth: path.lineWidth * getScaleFactor(viewSize: viewSize), lineCap: .round, lineJoin: .round)
+                                    style: StrokeStyle(lineWidth: path.lineWidth * lineScale, lineCap: .round, lineJoin: .round)
                                 )
                             }
-                            
+
                             // Render current drawing path live
                             if !currentPoints.isEmpty {
                                 var pathSwiftUI = Path()
-                                pathSwiftUI.move(to: currentPoints.first!.applying(transforms.forward))
+                                pathSwiftUI.move(to: currentPoints.first!.applying(display))
                                 for point in currentPoints.dropFirst() {
-                                    pathSwiftUI.addLine(to: point.applying(transforms.forward))
+                                    pathSwiftUI.addLine(to: point.applying(display))
                                 }
-                                
+
                                 var localContext = context
                                 if brushType == .eraser {
                                     localContext.blendMode = .clear
@@ -340,7 +343,7 @@ struct PhotoEditorView: View {
                                 localContext.stroke(
                                     pathSwiftUI,
                                     with: .color(brushColor.opacity(brushOpacity)),
-                                    style: StrokeStyle(lineWidth: brushSize * getScaleFactor(viewSize: viewSize), lineCap: .round, lineJoin: .round)
+                                    style: StrokeStyle(lineWidth: Self.strokeWidth(brushSize: brushSize, pixelsPerPoint: pixelsPerPoint) * lineScale, lineCap: .round, lineJoin: .round)
                                 )
                             }
                         }
@@ -348,10 +351,9 @@ struct PhotoEditorView: View {
                         .gesture(
                             DragGesture(minimumDistance: 0)
                                 .onChanged { value in
-                                    let ptView = value.location
-                                    let ptImg = ptView.applying(transforms.backward)
+                                    let ptImg = value.location.applying(display.inverted())
                                     // Constraint: only draw inside the original image bounds
-                                    if CGRect(origin: .zero, size: image.size).contains(ptImg) {
+                                    if CGRect(origin: .zero, size: pixelSize).contains(ptImg) {
                                         currentPoints.append(ptImg)
                                     }
                                 }
@@ -361,7 +363,7 @@ struct PhotoEditorView: View {
                                         let newPath = DrawingPath(
                                             points: currentPoints,
                                             color: brushType == .eraser ? .clear : brushColor,
-                                            lineWidth: brushSize,
+                                            lineWidth: Self.strokeWidth(brushSize: brushSize, pixelsPerPoint: pixelsPerPoint),
                                             opacity: brushType == .eraser ? 1.0 : brushOpacity,
                                             isEraser: brushType == .eraser
                                         )
@@ -371,20 +373,15 @@ struct PhotoEditorView: View {
                                 }
                         )
                     } else if activeTool == .crop {
-                        // Crop box resizing overlay
-                        let displayWidth = transformedSize.width * getFullScale(transformedSize: transformedSize, viewSize: viewSize)
-                        let displayHeight = transformedSize.height * getFullScale(transformedSize: transformedSize, viewSize: viewSize)
-                        let offsetX = (viewSize.width - displayWidth) / 2
-                        let offsetY = (viewSize.height - displayHeight) / 2
-                        
+                        // Crop box resizing overlay; shownRect is the whole oriented image here.
                         let cropBox = CGRect(
-                            x: offsetX + currentState.cropRectNormalized.origin.x * displayWidth,
-                            y: offsetY + currentState.cropRectNormalized.origin.y * displayHeight,
-                            width: currentState.cropRectNormalized.width * displayWidth,
-                            height: currentState.cropRectNormalized.height * displayHeight
+                            x: shownRect.minX + currentState.cropRectNormalized.origin.x * shownRect.width,
+                            y: shownRect.minY + currentState.cropRectNormalized.origin.y * shownRect.height,
+                            width: currentState.cropRectNormalized.width * shownRect.width,
+                            height: currentState.cropRectNormalized.height * shownRect.height
                         )
-                        
-                        cropOverlay(cropBox: cropBox, container: CGRect(x: offsetX, y: offsetY, width: displayWidth, height: displayHeight))
+
+                        cropOverlay(cropBox: cropBox, container: shownRect)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -395,19 +392,6 @@ struct PhotoEditorView: View {
             }
         }
         .padding(40)
-    }
-
-    private func getScaleFactor(viewSize: CGSize) -> CGFloat {
-        // Find the scale factor to scale drawing lines proportionally with view zoom
-        let W = image.size.width
-        let H = image.size.height
-        let cropW = currentState.cropRectNormalized.width * W
-        let cropH = currentState.cropRectNormalized.height * H
-        return min(viewSize.width / cropW, viewSize.height / cropH)
-    }
-
-    private func getFullScale(transformedSize: CGSize, viewSize: CGSize) -> CGFloat {
-        min(viewSize.width / transformedSize.width, viewSize.height / transformedSize.height)
     }
 
     // MARK: - Crop Overlay View
@@ -776,35 +760,13 @@ struct PhotoEditorView: View {
     }
 
     private func applyAspectRatio(_ preset: AspectRatioPreset) {
-        guard let ratio = preset.ratio() else { return }
+        guard let ratio = preset.ratio(), let source = sourcePixels else { return }
         recordState()
-        
-        let current = currentState.cropRectNormalized
-        let currentW = current.width
-        let currentH = current.height
-        let currentRatio = currentW / currentH
-        
-        if currentRatio > ratio {
-            // wide -> shrink width
-            let newW = currentH * ratio
-            let delta = currentW - newW
-            currentState.cropRectNormalized = CGRect(
-                x: min(1 - newW, max(0, current.origin.x + delta / 2)),
-                y: current.origin.y,
-                width: newW,
-                height: currentH
-            )
-        } else {
-            // tall -> shrink height
-            let newH = currentW / ratio
-            let delta = currentH - newH
-            currentState.cropRectNormalized = CGRect(
-                x: current.origin.x,
-                y: min(1 - newH, max(0, current.origin.y + delta / 2)),
-                width: currentW,
-                height: newH
-            )
-        }
+        currentState.cropRectNormalized = Self.aspectCrop(
+            ratio: ratio,
+            state: currentState,
+            imagePixelSize: CGSize(width: source.width, height: source.height)
+        )
     }
 
     // MARK: - Rotate Panel
@@ -960,188 +922,7 @@ struct PhotoEditorView: View {
     }
 
     private func renderFinal() -> NSImage? {
-        let originalSize = image.size
-        
-        // Calculate transformed sizes
-        let W = originalSize.width
-        let H = originalSize.height
-        
-        var t1 = CGAffineTransform.identity
-        t1 = t1.translatedBy(x: W / 2, y: H / 2)
-        t1 = t1.scaledBy(x: currentState.isFlippedHorizontal ? -1 : 1, y: currentState.isFlippedVertical ? -1 : 1)
-        t1 = t1.rotated(by: currentState.rotation)
-        t1 = t1.rotated(by: currentState.straightening)
-        
-        let transformedBounds = CGRect(origin: .zero, size: originalSize)
-            .applying(t1.translatedBy(x: -W / 2, y: -H / 2))
-        let transformedSize = transformedBounds.size
-        
-        let cropRect = CGRect(
-            x: currentState.cropRectNormalized.origin.x * transformedSize.width,
-            y: currentState.cropRectNormalized.origin.y * transformedSize.height,
-            width: currentState.cropRectNormalized.width * transformedSize.width,
-            height: currentState.cropRectNormalized.height * transformedSize.height
-        )
-        
-        let targetSize = cropRect.size
-        guard targetSize.width > 0, targetSize.height > 0 else { return nil }
-        
-        // Use standard CGBitmapContext for raw pixel manipulation.
-        // This avoids all coordinate system tracking and double-flipping bugs associated with AppKit NSImage.lockFocus() coordinate magic.
-        let width = Int(targetSize.width)
-        let height = Int(targetSize.height)
-        
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-        guard let context = CGContext(
-            data: nil,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-        
-        // Clear background
-        context.setFillColor(CGColor.clear)
-        context.fill(CGRect(origin: .zero, size: targetSize))
-        
-        // Flip graphics context to Y-down to align with drawing/SwiftUI space
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: 1, y: -1)
-        
-        // Construct finalTransform in Y-down space
-        var finalT1 = CGAffineTransform.identity
-        finalT1 = finalT1.translatedBy(x: W / 2, y: H / 2)
-        finalT1 = finalT1.scaledBy(x: currentState.isFlippedHorizontal ? -1 : 1, y: currentState.isFlippedVertical ? -1 : 1)
-        finalT1 = finalT1.rotated(by: currentState.rotation)
-        finalT1 = finalT1.rotated(by: currentState.straightening)
-        
-        let finalTransformedBounds = CGRect(origin: .zero, size: originalSize)
-            .applying(finalT1.translatedBy(x: -W / 2, y: -H / 2))
-        
-        let shiftToZero = CGAffineTransform(translationX: -finalTransformedBounds.minX, y: -finalTransformedBounds.minY)
-        finalT1 = finalT1.translatedBy(x: -W / 2, y: -H / 2).concatenating(shiftToZero)
-        
-        let finalT2 = CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY)
-        let finalTransform = finalT1.concatenating(finalT2)
-        
-        // 1. Draw transformed image in Y-down context
-        context.saveGState()
-        context.concatenate(finalTransform)
-        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            Self.drawUpright(cgImage, in: CGRect(origin: .zero, size: originalSize), context: context)
-        }
-        context.restoreGState()
-        
-        // 2. Draw vector paths in a separate transparency layer to support erasers
-        context.beginTransparencyLayer(auxiliaryInfo: nil)
-        
-        for path in currentState.paths {
-            context.saveGState()
-            if path.isEraser {
-                context.setBlendMode(.clear)
-            } else {
-                context.setBlendMode(.normal)
-            }
-            
-            context.concatenate(finalTransform)
-            
-            context.setStrokeColor(NSColor(path.color).cgColor)
-            context.setAlpha(path.opacity)
-            context.setLineWidth(path.lineWidth)
-            context.setLineCap(.round)
-            context.setLineJoin(.round)
-            
-            if let first = path.points.first {
-                context.beginPath()
-                context.move(to: first)
-                for pt in path.points.dropFirst() {
-                    context.addLine(to: pt)
-                }
-                context.strokePath()
-            }
-            context.restoreGState()
-        }
-        
-        context.endTransparencyLayer()
-        
-        guard let finalCgImage = context.makeImage() else { return nil }
-        return NSImage(cgImage: finalCgImage, size: targetSize)
-    }
-
-    // MARK: - Transform Resolvers
-    private func getTransforms(imageSize: CGSize, viewSize: CGSize) -> (forward: CGAffineTransform, backward: CGAffineTransform)? {
-        let W = imageSize.width
-        let H = imageSize.height
-        guard W > 0, H > 0, viewSize.width > 0, viewSize.height > 0 else { return nil }
-        
-        var t1 = CGAffineTransform.identity
-        t1 = t1.translatedBy(x: W / 2, y: H / 2)
-        t1 = t1.scaledBy(x: currentState.isFlippedHorizontal ? -1 : 1, y: currentState.isFlippedVertical ? -1 : 1)
-        t1 = t1.rotated(by: currentState.rotation)
-        t1 = t1.rotated(by: currentState.straightening)
-        
-        let transformedBounds = CGRect(origin: .zero, size: imageSize)
-            .applying(t1.translatedBy(x: -W / 2, y: -H / 2))
-        let transformedSize = transformedBounds.size
-        
-        let shiftToZero = CGAffineTransform(translationX: -transformedBounds.minX, y: -transformedBounds.minY)
-        t1 = t1.translatedBy(x: -W / 2, y: -H / 2).concatenating(shiftToZero)
-        
-        let cropRect = CGRect(
-            x: currentState.cropRectNormalized.origin.x * transformedSize.width,
-            y: currentState.cropRectNormalized.origin.y * transformedSize.height,
-            width: currentState.cropRectNormalized.width * transformedSize.width,
-            height: currentState.cropRectNormalized.height * transformedSize.height
-        )
-        
-        let t2 = CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY)
-        
-        let scale = min(viewSize.width / cropRect.width, viewSize.height / cropRect.height)
-        let displayWidth = cropRect.width * scale
-        let displayHeight = cropRect.height * scale
-        let offsetX = (viewSize.width - displayWidth) / 2
-        let offsetY = (viewSize.height - displayHeight) / 2
-        
-        let t3 = CGAffineTransform(translationX: offsetX, y: offsetY).scaledBy(x: scale, y: scale)
-        
-        let forward = t1.concatenating(t2).concatenating(t3)
-        let backward = forward.inverted()
-        
-        return (forward, backward)
-    }
-
-    private func getFullTransforms(imageSize: CGSize, viewSize: CGSize) -> (forward: CGAffineTransform, backward: CGAffineTransform)? {
-        let W = imageSize.width
-        let H = imageSize.height
-        guard W > 0, H > 0, viewSize.width > 0, viewSize.height > 0 else { return nil }
-        
-        var t1 = CGAffineTransform.identity
-        t1 = t1.translatedBy(x: W / 2, y: H / 2)
-        t1 = t1.scaledBy(x: currentState.isFlippedHorizontal ? -1 : 1, y: currentState.isFlippedVertical ? -1 : 1)
-        t1 = t1.rotated(by: currentState.rotation)
-        t1 = t1.rotated(by: currentState.straightening)
-        
-        let transformedBounds = CGRect(origin: .zero, size: imageSize)
-            .applying(t1.translatedBy(x: -W / 2, y: -H / 2))
-        let transformedSize = transformedBounds.size
-        
-        let shiftToZero = CGAffineTransform(translationX: -transformedBounds.minX, y: -transformedBounds.minY)
-        t1 = t1.translatedBy(x: -W / 2, y: -H / 2).concatenating(shiftToZero)
-        
-        let scale = min(viewSize.width / transformedSize.width, viewSize.height / transformedSize.height)
-        let displayWidth = transformedSize.width * scale
-        let displayHeight = transformedSize.height * scale
-        let offsetX = (viewSize.width - displayWidth) / 2
-        let offsetY = (viewSize.height - displayHeight) / 2
-        
-        let t3 = CGAffineTransform(translationX: offsetX, y: offsetY).scaledBy(x: scale, y: scale)
-        
-        let forward = t1.concatenating(t3)
-        let backward = forward.inverted()
-        
-        return (forward, backward)
+        Self.renderedImage(from: image, state: currentState)
     }
 }
 
@@ -1165,5 +946,180 @@ extension PhotoEditorView {
         context.scaleBy(x: 1, y: -1)
         context.draw(image, in: CGRect(origin: .zero, size: rect.size))
         context.restoreGState()
+    }
+}
+
+
+// MARK: - Editor Geometry & Rendering
+// All geometry is in source-image pixels, y-down with the origin at the top left, so the
+// preview, annotation mapping, crop overlay and saved image share one definition.
+extension PhotoEditorView {
+    /// Maps source pixels to output pixels: flip, then rotation (the order SwiftUI applies
+    /// `scaleEffect` then `rotationEffect`), then the crop's top left moves to the origin.
+    nonisolated static func editorTransform(state: EditingState, imagePixelSize: CGSize) -> CGAffineTransform {
+        let oriented = orientation(state: state, imagePixelSize: imagePixelSize)
+        let bounds = CGRect(origin: .zero, size: imagePixelSize).applying(oriented)
+        let crop = cropRect(state: state, orientedSize: bounds.size)
+        return oriented.concatenating(
+            CGAffineTransform(translationX: -bounds.minX - crop.minX, y: -bounds.minY - crop.minY)
+        )
+    }
+
+    /// Size of the cropped output in pixels (unrounded).
+    nonisolated static func editorCropSize(state: EditingState, imagePixelSize: CGSize) -> CGSize {
+        let bounds = CGRect(origin: .zero, size: imagePixelSize)
+            .applying(orientation(state: state, imagePixelSize: imagePixelSize))
+        return cropRect(state: state, orientedSize: bounds.size).size
+    }
+
+    /// `editorTransform` followed by fitting the output into `viewSize`, centred.
+    nonisolated static func displayTransform(state: EditingState, imagePixelSize: CGSize, viewSize: CGSize) -> CGAffineTransform {
+        let contentSize = editorCropSize(state: state, imagePixelSize: imagePixelSize)
+        return editorTransform(state: state, imagePixelSize: imagePixelSize)
+            .concatenating(fitTransform(contentSize: contentSize, viewSize: viewSize))
+    }
+
+    nonisolated static func fitTransform(contentSize: CGSize, viewSize: CGSize) -> CGAffineTransform {
+        guard contentSize.width > 0, contentSize.height > 0 else { return .identity }
+        let scale = min(viewSize.width / contentSize.width, viewSize.height / contentSize.height)
+        return CGAffineTransform(scaleX: scale, y: scale).concatenating(CGAffineTransform(
+            translationX: (viewSize.width - contentSize.width * scale) / 2,
+            y: (viewSize.height - contentSize.height * scale) / 2
+        ))
+    }
+
+    nonisolated static func uncropped(_ state: EditingState) -> EditingState {
+        var full = state
+        full.cropRectNormalized = CGRect(x: 0, y: 0, width: 1, height: 1)
+        return full
+    }
+
+    /// The normalized crop narrowed to `ratio` (width / height) measured in output pixels, centred on the current crop.
+    nonisolated static func aspectCrop(ratio: CGFloat, state: EditingState, imagePixelSize: CGSize) -> CGRect {
+        let oriented = CGRect(origin: .zero, size: imagePixelSize)
+            .applying(orientation(state: state, imagePixelSize: imagePixelSize)).size
+        let current = state.cropRectNormalized
+        let width = current.width * oriented.width
+        let height = current.height * oriented.height
+        guard width > 0, height > 0, ratio > 0 else { return current }
+
+        if width / height > ratio {
+            // wide -> shrink width
+            let newW = height * ratio / oriented.width
+            return CGRect(x: min(1 - newW, max(0, current.midX - newW / 2)), y: current.minY, width: newW, height: current.height)
+        } else {
+            // tall -> shrink height
+            let newH = width / ratio / oriented.height
+            return CGRect(x: current.minX, y: min(1 - newH, max(0, current.midY - newH / 2)), width: current.width, height: newH)
+        }
+    }
+
+    /// Renders the edited image at the source's pixel resolution, keeping its points-per-pixel.
+    nonisolated static func renderedImage(from image: NSImage, state: EditingState) -> NSImage? {
+        guard let source = pixelImage(of: image), let output = render(source, state: state) else { return nil }
+        let pixelsPerPoint = pixelsPerPoint(of: image, source: source)
+        return NSImage(
+            cgImage: output,
+            size: CGSize(width: CGFloat(output.width) / pixelsPerPoint, height: CGFloat(output.height) / pixelsPerPoint)
+        )
+    }
+
+    nonisolated static func pixelsPerPoint(of image: NSImage, source: CGImage?) -> CGFloat {
+        guard let source, image.size.width > 0 else { return 1 }
+        return CGFloat(source.width) / image.size.width
+    }
+
+    /// A brush size in image points as a stroke width in source pixels, so a brush is the same
+    /// thickness relative to the image on 1x and 2x captures.
+    nonisolated static func strokeWidth(brushSize: CGFloat, pixelsPerPoint: CGFloat) -> CGFloat {
+        brushSize * pixelsPerPoint
+    }
+
+    /// The largest bitmap representation, so Retina images are edited at full resolution.
+    nonisolated static func pixelImage(of image: NSImage) -> CGImage? {
+        let bitmaps = image.representations.compactMap { $0 as? NSBitmapImageRep }
+        if let largest = bitmaps.max(by: { $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh }),
+           let cgImage = largest.cgImage {
+            return cgImage
+        }
+        return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    }
+
+    nonisolated static func render(_ source: CGImage, state: EditingState) -> CGImage? {
+        let pixelSize = CGSize(width: source.width, height: source.height)
+        let cropSize = editorCropSize(state: state, imagePixelSize: pixelSize)
+        // Round: a 90° rotation leaves values like 1.9999999999999998.
+        let width = Int(cropSize.width.rounded())
+        let height = Int(cropSize.height.rounded())
+        guard width > 0, height > 0 else { return nil }
+
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: nil,
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: 0,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return nil }
+
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+
+        // Flip graphics context to Y-down to align with drawing/SwiftUI space
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+
+        let transform = editorTransform(state: state, imagePixelSize: pixelSize)
+
+        // 1. Draw transformed image in Y-down context
+        context.saveGState()
+        context.concatenate(transform)
+        drawUpright(source, in: CGRect(origin: .zero, size: pixelSize), context: context)
+        context.restoreGState()
+
+        // 2. Draw vector paths in a separate transparency layer to support erasers
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        for path in state.paths {
+            guard let first = path.points.first else { continue }
+            context.saveGState()
+            context.setBlendMode(path.isEraser ? .clear : .normal)
+            context.concatenate(transform)
+            context.setStrokeColor(NSColor(path.color).cgColor)
+            context.setAlpha(path.opacity)
+            context.setLineWidth(path.lineWidth)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            context.beginPath()
+            context.move(to: first)
+            for point in path.points.dropFirst() {
+                context.addLine(to: point)
+            }
+            context.strokePath()
+            context.restoreGState()
+        }
+        context.endTransparencyLayer()
+
+        return context.makeImage()
+    }
+
+    /// Centre the image, flip, then rotate (rotation plus straightening).
+    private nonisolated static func orientation(state: EditingState, imagePixelSize: CGSize) -> CGAffineTransform {
+        CGAffineTransform(translationX: -imagePixelSize.width / 2, y: -imagePixelSize.height / 2)
+            .concatenating(CGAffineTransform(
+                scaleX: state.isFlippedHorizontal ? -1 : 1,
+                y: state.isFlippedVertical ? -1 : 1
+            ))
+            .concatenating(CGAffineTransform(rotationAngle: state.rotation + state.straightening))
+    }
+
+    private nonisolated static func cropRect(state: EditingState, orientedSize: CGSize) -> CGRect {
+        let crop = state.cropRectNormalized
+        return CGRect(
+            x: crop.minX * orientedSize.width,
+            y: crop.minY * orientedSize.height,
+            width: crop.width * orientedSize.width,
+            height: crop.height * orientedSize.height
+        )
     }
 }

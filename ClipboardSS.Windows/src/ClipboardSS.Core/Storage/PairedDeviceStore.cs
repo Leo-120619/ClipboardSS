@@ -11,15 +11,32 @@ public sealed class PairedDeviceStore
     private readonly IPairKeyStorage _keyStorage;
     private List<PairedDevice> _devices;
 
-    public PairedDeviceStore(string storagePath, IPairKeyStorage keyStorage)
+    public PairedDeviceStore(
+        string storagePath,
+        IPairKeyStorage keyStorage,
+        Func<DateTimeOffset>? now = null)
     {
         _storagePath = Path.GetFullPath(storagePath);
         _keyStorage = keyStorage;
-        _devices = File.Exists(_storagePath)
-            ? JsonSerializer.Deserialize<List<PairedDevice>>(File.ReadAllBytes(_storagePath), WireJson.Options)
-                ?? []
-            : [];
+        _devices = [];
+        if (File.Exists(_storagePath))
+        {
+            try
+            {
+                _devices = JsonSerializer.Deserialize<List<PairedDevice>>(File.ReadAllBytes(_storagePath), WireJson.Options)
+                    ?? [];
+            }
+            catch (JsonException)
+            {
+                QuarantinedFilePath = CorruptStateFile.Quarantine(
+                    _storagePath,
+                    (now ?? (() => DateTimeOffset.UtcNow))());
+            }
+        }
     }
+
+    /// <summary>Where an unreadable paired-devices.json was moved at launch, so the UI can tell the user once.</summary>
+    public string? QuarantinedFilePath { get; }
 
     public IReadOnlyList<PairedDevice> Devices
     {
