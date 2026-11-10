@@ -64,6 +64,32 @@ class SubnetSweeper {
     }
   }
 
+  /// POSTs a ping envelope [body] to `/v1/ping` on [host]. Returns
+  /// `(statusCode, body)`, or null when the host did not answer in time.
+  static Future<(int, String)?> postPing(
+    String host,
+    String body, {
+    http.Client? client,
+    Duration timeout = const Duration(milliseconds: 500),
+  }) async {
+    final effectiveClient = client ?? http.Client();
+    final shouldClose = client == null;
+    try {
+      final response = await effectiveClient
+          .post(
+            Uri(scheme: 'http', host: host, port: fixedPort, path: '/v1/ping'),
+            headers: {'Content-Type': 'application/json'},
+            body: body,
+          )
+          .timeout(timeout);
+      return (response.statusCode, response.body);
+    } catch (_) {
+      return null;
+    } finally {
+      if (shouldClose) effectiveClient.close();
+    }
+  }
+
   static Future<List<Peer>> sweep({
     int timeoutMs = 500,
     int concurrency = 32,

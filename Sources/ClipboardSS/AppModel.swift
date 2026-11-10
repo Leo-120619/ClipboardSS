@@ -3,6 +3,22 @@ import ClipboardCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Outcome of pinging paired devices: who answered a valid pong, and where.
+struct LivenessReport: Equatable, Sendable {
+    /// Devices that answered a valid pong, keyed to the host that answered.
+    var verifiedHosts: [UUID: String] = [:]
+    /// Devices that answered 426 and no valid pong.
+    var upgradeRequired: Set<UUID> = []
+
+    var onlineIds: Set<UUID> { Set(verifiedHosts.keys) }
+
+    mutating func merge(_ other: LivenessReport) {
+        verifiedHosts.merge(other.verifiedHosts) { current, _ in current }
+        upgradeRequired.formUnion(other.upgradeRequired)
+        upgradeRequired.subtract(verifiedHosts.keys)
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var clips: [ClipItem]
@@ -29,7 +45,8 @@ final class AppModel: ObservableObject {
     /// Live reachability per paired device. In-memory only: it is rebuilt from scratch
     /// on every refresh, so unpaired devices drop out on their own.
     @Published private(set) var onlineDeviceIds: Set<UUID> = []
-    /// Paired devices whose `/v1/id` probe advertised an older wire protocol.
+    /// Paired devices that answered a ping with 426 (or, found only by the reconnect sweep,
+    /// advertised an older `v` on `/v1/id`). A valid pong clears the flag.
     @Published private(set) var outdatedDeviceIds: Set<UUID> = []
     @Published private(set) var transfers: [FileTransferState] = []
     @Published var pendingSend: PendingSend?
@@ -152,16 +169,49 @@ final class AppModel: ObservableObject {
         onlineDeviceIds = []
     }
 
-    /// Rebuilds `onlineDeviceIds`. Probes run concurrently with a short timeout and are
-    /// skipped for devices mDNS already reports, so a refresh stays cheap.
+    /// Rebuilds `onlineDeviceIds` from authenticated pings. Devices are pinged
+    /// concurrently with a short timeout, trying the mDNS address before the stored one.
     func refreshDeviceLiveness() async {
-        let online = await Self.computeOnlineDeviceIds(
+        let report = await Self.computeLiveness(
             devices: pairedDevices,
             mdnsPeers: peerBrowser.peers,
-            probe: { await SubnetSweeper.probe(host: $0, timeoutMs: 500) }
+            ping: pingDevice
         )
-        guard online != onlineDeviceIds else { return }
-        onlineDeviceIds = online
+        await applyLiveness(report)
+    }
+
+    /// Pings one paired device at one host over `POST /v1/ping` (500 ms timeout).
+    private var pingDevice: @Sendable (PairedDevice, String) async -> PingOutcome {
+        let pairedStore = pairingCoordinator.pairedStore
+        let localDeviceId = pairingCoordinator.identity.id
+        return { device, host in
+            guard let key = try? await pairedStore.getKey(for: device.id) else { return .unverified }
+            return await LivenessPing.ping(host: host, deviceId: device.id, localDeviceId: localDeviceId, pairKey: key) {
+                try await SubnetSweeper.exchange($0, host: host, timeoutMs: 500)
+            }
+        }
+    }
+
+    /// The only place a paired device becomes online, has its stored host changed, or has
+    /// its outdated flag changed, and only from ping results: `/v1/id` and mDNS nominate
+    /// hosts but never prove identity. `scope` limits the online rebuild to those devices;
+    /// nil rebuilds the whole set (so unpaired devices drop out).
+    private func applyLiveness(_ report: LivenessReport, scope: Set<UUID>? = nil) async {
+        let updates = Self.hostUpdates(devices: pairedDevices, report: report)
+        for (id, host) in updates {
+            do {
+                try await pairingCoordinator.pairedStore.updateHost(id, host: host)
+            } catch {
+                lastError = error.localizedDescription
+            }
+        }
+        if !updates.isEmpty { await refreshPairedDevices() }
+
+        let outdated = outdatedDeviceIds.subtracting(report.onlineIds).union(report.upgradeRequired)
+        if outdated != outdatedDeviceIds { outdatedDeviceIds = outdated }
+
+        let online = scope.map { onlineDeviceIds.subtracting($0).union(report.onlineIds) } ?? report.onlineIds
+        if online != onlineDeviceIds { onlineDeviceIds = online }
     }
 
     func isDeviceOnline(_ id: UUID) -> Bool {
@@ -212,14 +262,6 @@ final class AppModel: ObservableObject {
         return Self.isDeviceConnectionActive(enabled: device.connected, online: isDeviceOnline(id))
     }
 
-    nonisolated static func matchingReconnectPeer(
-        deviceId: UUID,
-        mdnsPeers: [Peer],
-        sweptPeers: [Peer]
-    ) -> Peer? {
-        (mdnsPeers + sweptPeers).first { $0.id == deviceId }
-    }
-
     nonisolated static func resolveVerifiedPeer(
         device: PairedDevice,
         online: Bool,
@@ -227,13 +269,13 @@ final class AppModel: ObservableObject {
         outdatedDeviceIds: Set<UUID> = []
     ) -> Peer? {
         guard isDeviceConnectionActive(enabled: device.connected, online: online) else { return nil }
-        if let peer = mdnsPeers.first(where: { $0.id == device.id }) { return peer }
+        // Never the mDNS-claimed address: only a pong moves the stored host.
         guard let host = device.host, !host.isEmpty else { return nil }
         return storedHostPeer(device, host: host, outdatedDeviceIds: outdatedDeviceIds)
     }
 
-    /// A peer at the device's stored host, carrying the protocol version the last
-    /// `/v1/id` probe saw (older when it is in `outdatedDeviceIds`).
+    /// A peer at the device's stored host (the last host that answered a valid pong),
+    /// carrying an older protocol version when it is in `outdatedDeviceIds`.
     nonisolated static func storedHostPeer(_ device: PairedDevice, host: String, outdatedDeviceIds: Set<UUID>) -> Peer {
         Peer(
             id: device.id,
@@ -244,56 +286,38 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Pings the device at its mDNS and stored addresses; failing that, sweeps the subnet
+    /// for hosts claiming its id on `/v1/id` and pings those. Only a valid pong makes it
+    /// online or moves its stored host.
     @discardableResult
     func reconnectDevice(_ id: UUID, reportError: Bool = true) async -> Bool {
         guard let device = pairedDevices.first(where: { $0.id == id }), device.connected else {
             return false
         }
 
-        var candidateHosts = peerBrowser.peers
-            .filter { $0.id == id }
-            .map(\.host)
-        if let host = device.host, !host.isEmpty, !candidateHosts.contains(host) {
-            candidateHosts.append(host)
-        }
-
-        var match: Peer?
-        for host in candidateHosts {
-            if let peer = await SubnetSweeper.probe(host: host, timeoutMs: 500), peer.id == id {
-                match = peer
-                break
+        let ping = pingDevice
+        let tried = Self.candidateHosts(for: device, mdnsPeers: peerBrowser.peers)
+        var report = await Self.verify(device, hosts: tried, ping: ping)
+        if report.verifiedHosts[id] == nil {
+            let claimed = await SubnetSweeper.sweep().filter { $0.id == id }
+            report.merge(await Self.verify(device, hosts: claimed.map(\.host).filter { !tried.contains($0) }, ping: ping))
+            // A v1 peer cannot answer a ping; its advertised version is the only signal.
+            if report.verifiedHosts[id] == nil, claimed.contains(where: \.needsUpdate) {
+                report.upgradeRequired.insert(id)
             }
         }
-        if match == nil {
-            match = Self.matchingReconnectPeer(
-                deviceId: id,
-                mdnsPeers: [],
-                sweptPeers: await SubnetSweeper.sweep()
-            )
-        }
 
-        guard let match else {
-            onlineDeviceIds.remove(id)
-            if reportError { lastError = "That device is not reachable right now." }
+        await applyLiveness(report, scope: [id])
+        guard report.verifiedHosts[id] != nil else {
+            if reportError {
+                lastError = deviceNeedsUpdate(id)
+                    ? ProtocolMismatch.updateOtherDeviceMessage
+                    : "That device is not reachable right now."
+            }
             return false
         }
-
-        if match.needsUpdate {
-            outdatedDeviceIds.insert(id)
-        } else {
-            outdatedDeviceIds.remove(id)
-        }
-
-        do {
-            try await pairingCoordinator.pairedStore.updateHost(id, host: match.host)
-            await refreshPairedDevices()
-            onlineDeviceIds.insert(id)
-            lastError = nil
-            return true
-        } catch {
-            if reportError { lastError = error.localizedDescription }
-            return false
-        }
+        lastError = nil
+        return true
     }
 
     func requestDevices() {
@@ -374,50 +398,84 @@ final class AppModel: ObservableObject {
         outdatedDeviceIds: Set<UUID> = []
     ) -> [Peer] {
         var byId: [UUID: Peer] = [:]
-        for device in pairedDevices where device.connected {
-            if let host = device.host {
-                byId[device.id] = storedHostPeer(device, host: host, outdatedDeviceIds: outdatedDeviceIds)
-            }
-        }
-        let connectedIds = Set(pairedDevices.filter(\.connected).map(\.id))
-        for peer in mdnsPeers where !pairedDevices.contains(where: { $0.id == peer.id }) || connectedIds.contains(peer.id) {
+        // Unpaired mDNS peers only count as visible; ClipSender has no key for them.
+        let pairedIds = Set(pairedDevices.map(\.id))
+        for peer in mdnsPeers where !pairedIds.contains(peer.id) {
             byId[peer.id] = peer
+        }
+        // Paired devices go to their stored (ping-verified) host, never an mDNS-claimed one;
+        // an older mDNS `v` still keeps them from being sent to.
+        let mdnsOutdated = Set(mdnsPeers.filter(\.needsUpdate).map(\.id))
+        for device in pairedDevices where device.connected {
+            if let host = device.host, !host.isEmpty {
+                byId[device.id] = storedHostPeer(device, host: host, outdatedDeviceIds: outdatedDeviceIds.union(mdnsOutdated))
+            }
         }
         return Array(byId.values)
     }
 
-    /// Resolves which paired devices are reachable right now. mDNS and the stored
-    /// address provide candidates, but `probe` must confirm the expected device id.
-    /// Independent of `PairedDevice.connected`, which is a local pause switch rather
-    /// than a statement about reachability.
-    nonisolated static func computeOnlineDeviceIds(
+    /// Hosts to ping for a device: its current mDNS address(es), then the stored one.
+    nonisolated static func candidateHosts(for device: PairedDevice, mdnsPeers: [Peer]) -> [String] {
+        var hosts = mdnsPeers.filter { $0.id == device.id }.map(\.host)
+        if let host = device.host, !host.isEmpty, !hosts.contains(host) {
+            hosts.append(host)
+        }
+        return hosts
+    }
+
+    /// Pings `hosts` in order and stops at the first valid pong.
+    nonisolated static func verify(
+        _ device: PairedDevice,
+        hosts: [String],
+        ping: @Sendable (PairedDevice, String) async -> PingOutcome
+    ) async -> LivenessReport {
+        var report = LivenessReport()
+        for host in hosts {
+            switch await ping(device, host) {
+            case .alive:
+                report.verifiedHosts[device.id] = host
+                report.upgradeRequired.remove(device.id)
+                return report
+            case .upgradeRequired:
+                report.upgradeRequired.insert(device.id)
+            case .unverified:
+                continue
+            }
+        }
+        return report
+    }
+
+    /// Resolves which paired devices are reachable right now, and where. mDNS and the
+    /// stored address only nominate hosts; a device is online only at a host that answered
+    /// a valid pong (see `LivenessPing`). Independent of `PairedDevice.connected`, which
+    /// is a local pause switch rather than a statement about reachability.
+    nonisolated static func computeLiveness(
         devices: [PairedDevice],
         mdnsPeers: [Peer],
-        probe: @escaping @Sendable (String) async -> Peer?
-    ) async -> Set<UUID> {
-        return await withTaskGroup(of: UUID?.self) { group in
+        ping: @escaping @Sendable (PairedDevice, String) async -> PingOutcome
+    ) async -> LivenessReport {
+        await withTaskGroup(of: LivenessReport.self) { group in
             for device in devices {
-                var hosts = mdnsPeers.filter { $0.id == device.id }.map(\.host)
-                if let host = device.host, !host.isEmpty, !hosts.contains(host) {
-                    hosts.append(host)
-                }
+                let hosts = candidateHosts(for: device, mdnsPeers: mdnsPeers)
                 guard !hosts.isEmpty else { continue }
-                group.addTask {
-                    for host in hosts {
-                        if let peer = await probe(host), peer.id == device.id {
-                            return device.id
-                        }
-                    }
-                    return nil
-                }
+                group.addTask { await verify(device, hosts: hosts, ping: ping) }
             }
-
-            var online: Set<UUID> = []
-            for await id in group {
-                if let id { online.insert(id) }
-            }
-            return online
+            var report = LivenessReport()
+            for await partial in group { report.merge(partial) }
+            return report
         }
+    }
+
+    /// Stored-host changes a report calls for: devices whose pong came from a host other
+    /// than the one stored.
+    nonisolated static func hostUpdates(devices: [PairedDevice], report: LivenessReport) -> [UUID: String] {
+        var updates: [UUID: String] = [:]
+        for device in devices {
+            if let host = report.verifiedHosts[device.id], host != device.host {
+                updates[device.id] = host
+            }
+        }
+        return updates
     }
 
     nonisolated static func composeJoinCandidates(mdnsPeers: [Peer], sweptPeers: [Peer]) -> [Peer] {
@@ -466,7 +524,9 @@ final class AppModel: ObservableObject {
     func sendFile(url: URL, to deviceId: UUID) {
         Task {
             guard await reconnectDevice(deviceId, reportError: false) else {
-                lastError = "That device is not reachable right now."
+                lastError = deviceNeedsUpdate(deviceId)
+                    ? ProtocolMismatch.updateOtherDeviceMessage
+                    : "That device is not reachable right now."
                 return
             }
             startFileSend(url: url, to: deviceId)

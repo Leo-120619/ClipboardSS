@@ -3,19 +3,55 @@ import 'package:clipboard_companion/core/models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('send targets union: live peer wins, stored host used otherwise', () {
-    final mdns = [Peer(id: 'a', name: 'Mac', host: '192.168.0.4', port: 51888)];
-    final paired = [
-      PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9'),
-      PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20'),
-      PairedDevice(id: 'c', name: 'Legacy'),
-    ];
+  test(
+    'send targets route paired devices to their verified host, never an mDNS-claimed one',
+    () {
+      final mdns = [
+        Peer(id: 'a', name: 'Mac', host: '192.168.0.4', port: 51888),
+        Peer(id: 'x', name: 'Stranger', host: '192.168.0.50', port: 51888),
+      ];
+      final paired = [
+        PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9'),
+        PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20'),
+        PairedDevice(id: 'c', name: 'Legacy'),
+      ];
 
-    final targets = composeSendTargets(mdns, paired);
+      final targets = composeSendTargets(mdns, paired);
 
-    expect(targets.length, 2);
-    expect(targets.firstWhere((p) => p.id == 'a').host, '192.168.0.4');
-    expect(targets.firstWhere((p) => p.id == 'b').host, '192.168.0.20');
+      expect(targets.length, 3);
+      expect(targets.firstWhere((p) => p.id == 'a').host, '10.0.0.9');
+      expect(targets.firstWhere((p) => p.id == 'b').host, '192.168.0.20');
+    },
+  );
+
+  test('a paired device advertising an older v over mDNS is not sent to', () {
+    final targets = composeSendTargets(
+      [
+        Peer(
+          id: 'a',
+          name: 'Old',
+          host: '192.168.0.4',
+          port: 51888,
+          protocolVersion: 1,
+        ),
+      ],
+      [PairedDevice(id: 'a', name: 'Old', host: '10.0.0.9')],
+    );
+
+    expect(targets.single.needsUpdate, isTrue);
+    expect(targets.single.host, '10.0.0.9');
+  });
+
+  test('a file target ignores an mDNS-claimed address', () {
+    final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
+    expect(
+      resolveVerifiedPeer(
+        device: device,
+        online: true,
+        mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.66', port: 51888)],
+      )?.host,
+      '10.0.0.9',
+    );
   });
 
   test('stored-host targets recorded as outdated carry the older version', () {

@@ -38,6 +38,23 @@ void main() {
     },
   );
 
+  test('ping and pong envelopes match the pinned vectors', () async {
+    for (final (purpose, expected) in [
+      (EnvelopePurpose.ping, '127e1dfb0b3bc52649f874034b63d5fa53c0a4886a60a1'),
+      (EnvelopePurpose.pong, '127e1dfb0b3bc535d219b680a4ddb08aac15ee49a426c4'),
+    ]) {
+      final envelope = await CryptoEnvelopeUtils.sealBytes(
+        pinnedPlaintext,
+        purpose: purpose,
+        sourceDeviceId: source,
+        recipientDeviceId: recipient,
+        pairKey: pairKey,
+        nonce: pinnedNonce,
+      );
+      expect(_hex(base64Decode(envelope.ciphertext)), expected);
+    }
+  });
+
   test('envelopeV2MatchesPinnedVector', () async {
     final envelope = await CryptoEnvelopeUtils.sealBytes(
       pinnedPlaintext,

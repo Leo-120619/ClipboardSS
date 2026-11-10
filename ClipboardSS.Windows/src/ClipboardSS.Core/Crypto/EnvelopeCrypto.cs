@@ -29,6 +29,8 @@ public enum EnvelopePurpose
     FileOffer,
     FileFinish,
     FileCancel,
+    Ping,
+    Pong,
 }
 
 public static class EnvelopePurposeExtensions
@@ -40,6 +42,8 @@ public static class EnvelopePurposeExtensions
         EnvelopePurpose.FileOffer => "file-offer",
         EnvelopePurpose.FileFinish => "file-finish",
         EnvelopePurpose.FileCancel => "file-cancel",
+        EnvelopePurpose.Ping => "ping",
+        EnvelopePurpose.Pong => "pong",
         _ => throw new ArgumentOutOfRangeException(nameof(purpose), purpose, null),
     };
 }

@@ -8,11 +8,18 @@
   - `deviceName`: Human-readable string.
   - `v`: "2" (protocol version). Browsers still list peers advertising an older `v`, marked
     "needs update", and never send to them.
+- Browsers drop a peer when it says goodbye (TTL 0) or its record TTL runs out unrefreshed.
 
 ## HTTP Transport
 Transport is plain HTTP (unencrypted at the transport layer). Confidentiality and authenticity are provided by the application-level encryption (ChaCha20-Poly1305).
 
 All clip servers listen on TCP port `51888`. Devices may discover peers through mDNS or by probing local subnet hosts with `GET /v1/id`.
+
+Neither mDNS nor `/v1/id` is authenticated: anyone on the LAN can advertise or answer with a
+paired device's public id. They only **nominate candidate hosts** (and find unpaired devices to
+pair with). A paired device is marked online, and its stored host is changed, only after a
+valid pong to an authenticated ping (see [Liveness Ping](#liveness-ping)). Clips and files for a
+paired device always go to its stored host, never to an address mDNS or `/v1/id` claimed.
 
 ## Identity Probe
 
@@ -119,6 +126,8 @@ aad = UTF-8("ClipboardSS/2|" + purpose + "|" + lowercase(sourceDeviceId) + "|" +
   | `file-offer`  | `POST /v1/file/offer`  |
   | `file-finish` | `POST /v1/file/finish` |
   | `file-cancel` | `POST /v1/file/cancel` |
+  | `ping`        | `POST /v1/ping` (request)  |
+  | `pong`        | `POST /v1/ping` (response) |
 
   An envelope sealed for one endpoint fails the tag on any other (e.g. a captured offer can
   no longer cancel or finish a transfer).
@@ -177,6 +186,50 @@ Swift, Dart, and .NET MUST reproduce this byte-for-byte.
 - `aad` = `ClipboardSS/2|clip|11111111-1111-1111-1111-111111111111|22222222-2222-2222-2222-222222222222`
 - plaintext = UTF-8 `{"a":1}`
 - → `ciphertext || tag` (hex) = `127e1dfb0b3bc54f07dfeda46cd545278be6adeef430c1`
+
+## Liveness Ping
+
+- **Caller -> Device**: `POST /v1/ping`, body a v2 envelope with purpose `ping`, sealed to the
+  device being checked. Inner JSON: `{"sentAt":"2026-11-10T12:00:00Z"}`.
+- **Device -> Caller**: `200`, body a v2 envelope with purpose `pong`, source = the device,
+  recipient = the caller. Inner JSON:
+  ```json
+  {
+    "pingNonce": "<base64>", // the ping envelope's nonce, as received
+    "sentAt": "2026-11-10T12:00:00Z"
+  }
+  ```
+
+Responder order: `v` check (`426`), sender paired (`401`), AEAD open (`401` on failure), replay
+guard (`400 {"status":"stale"}` / `409 {"status":"replayed"}`, the same shared guard as every
+other envelope endpoint), then the pong. The responder's local pause switch is **not** checked:
+liveness reports reachability; a paused device still refuses content with `401`.
+
+Caller validation — the ping counts as **alive** only if all hold:
+
+1. status `200`;
+2. the body is a v2 envelope whose `sourceDeviceId` is the device that was pinged;
+3. it opens with purpose `pong`, recipient = the caller's own id, under that device's `pairKey`;
+4. `|now − sentAt| ≤ 300 s` (the same freshness window as the replay guard);
+5. `pingNonce` decodes to the same 12 bytes as the nonce of this ping. A pong is single-use: a
+   captured pong cannot answer a later ping.
+
+Outcomes:
+
+- **alive** → the device is online at the pinged host; if that host differs from the stored one,
+  the stored host is updated; the device is removed from the outdated set (a pong proves v2).
+- `426` → the device is marked outdated ("update the other device"); not online, host unchanged.
+- anything else (timeout, `401`, `400`, `409`, an invalid pong) → no evidence: not online at that
+  host, host unchanged.
+
+Callers try the device's mDNS address(es) first, then its stored host. Reconnecting may also
+sweep the subnet with `GET /v1/id`; hosts claiming the device's id are pinged like any other
+candidate. A v1 peer cannot answer a ping, so a sweep result advertising `v < 2` (with no valid
+pong anywhere) marks the device outdated; a later valid pong clears that.
+
+**Ping/pong test vector** (all three suites assert it): the Envelope v2 vector below with
+`purpose` = `ping` gives `ciphertext || tag` = `127e1dfb0b3bc52649f874034b63d5fa53c0a4886a60a1`,
+and with `purpose` = `pong` gives `127e1dfb0b3bc535d219b680a4ddb08aac15ee49a426c4`.
 
 ## File Transfer Protocol
 

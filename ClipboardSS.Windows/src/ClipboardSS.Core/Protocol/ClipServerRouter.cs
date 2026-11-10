@@ -65,6 +65,21 @@ public sealed class ClipServerRouter(DeviceIdentity identity, IClipServerBackend
             return JsonResponse(200, body);
         }
 
+        if (request.Method == "POST" && request.Path == LivenessPing.Path)
+        {
+            try
+            {
+                var envelope = JsonSerializer.Deserialize<ClipEnvelope>(request.Body, WireJson.Options)
+                    ?? throw new JsonException("Missing envelope.");
+                var (statusCode, body) = LivenessPing.Respond(envelope, identity.Id, backend.GetPairKey, _replayGuard);
+                return JsonResponse(statusCode, body);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return TextResponse(400, "Bad Request");
+            }
+        }
+
         if (request.Path == "/v1/clip")
         {
             try

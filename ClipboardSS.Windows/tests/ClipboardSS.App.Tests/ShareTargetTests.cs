@@ -47,7 +47,7 @@ public sealed class ShareTargetTests
         var paused = Guid.NewGuid();
         var targets = AppModel.ComposeSendTargets(
             [new Peer(connected, "Phone", "10.0.0.2", 51888), new Peer(paused, "Tablet", "10.0.0.3", 51888)],
-            [new PairedDevice(connected, "Phone"), new PairedDevice(paused, "Tablet", Connected: false)]);
+            [new PairedDevice(connected, "Phone", "10.0.0.2"), new PairedDevice(paused, "Tablet", "10.0.0.3", Connected: false)]);
 
         Assert.Single(targets);
         Assert.Equal(connected, targets[0].Id);

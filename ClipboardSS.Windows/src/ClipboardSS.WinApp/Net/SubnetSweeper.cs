@@ -6,6 +6,7 @@ using System.Text.Json;
 using ClipboardSS.Core.Json;
 using ClipboardSS.Core.Models;
 using ClipboardSS.Core.Protocol;
+using ClipboardSS.Core.Sync;
 
 namespace ClipboardSS.App.Net;
 
@@ -34,9 +35,30 @@ public sealed class SubnetSweeper(TimeSpan? timeout = null, int concurrency = 32
         return peers.Values.OrderBy(peer => peer.Name, StringComparer.CurrentCultureIgnoreCase).ToArray();
     }
 
-    /// <summary>Probes one known host for its ClipboardSS identity.</summary>
-    public Task<Peer?> ProbeHostAsync(string host, CancellationToken cancellationToken = default) =>
-        ProbeAsync(host, cancellationToken);
+    /// <summary>Pings <paramref name="deviceId"/> at <paramref name="host"/> over <c>POST /v1/ping</c>.</summary>
+    public async Task<PingOutcome> PingHostAsync(
+        string host,
+        Guid deviceId,
+        Guid localDeviceId,
+        byte[] pairKey,
+        CancellationToken cancellationToken = default)
+    {
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(_timeout);
+        var transport = new TcpPeerTransport(_timeout);
+        var target = new Peer(deviceId, host, host, 51888);
+        try
+        {
+            return await LivenessPing.PingAsync(
+                host, deviceId, localDeviceId, pairKey,
+                (bytes, token) => transport.SendAsync(bytes, target, token),
+                cancellationToken: timeoutSource.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return PingOutcome.Unverified;
+        }
+    }
 
     internal static IReadOnlyList<string> HostAddresses(string ownIpv4)
     {

@@ -58,11 +58,15 @@ struct AppModelPasteTests {
         #expect(requests == [.keepClipboardOpenAfterPaste])
     }
 
-    @Test("send targets union mDNS peers with paired hosts, de-duped by id")
+    @Test("send targets route paired devices to their verified host, never an mDNS-claimed one")
     func sendTargetUnion() {
         let id1 = UUID()
         let id2 = UUID()
-        let mdns = [Peer(id: id1, name: "Phone", host: "192.168.0.9", port: 51888)]
+        let unpaired = UUID()
+        let mdns = [
+            Peer(id: id1, name: "Phone", host: "192.168.0.9", port: 51888),
+            Peer(id: unpaired, name: "Stranger", host: "192.168.0.50", port: 51888),
+        ]
         let paired = [
             PairedDevice(id: id1, name: "Phone", host: "192.168.0.99"),
             PairedDevice(id: id2, name: "Tablet", host: "192.168.0.20"),
@@ -70,9 +74,21 @@ struct AppModelPasteTests {
 
         let targets = AppModel.composeSendTargets(mdnsPeers: mdns, pairedDevices: paired)
 
-        #expect(targets.count == 2)
-        #expect(targets.first { $0.id == id1 }?.host == "192.168.0.9")
+        #expect(targets.count == 3)
+        #expect(targets.first { $0.id == id1 }?.host == "192.168.0.99")
         #expect(targets.first { $0.id == id2 }?.host == "192.168.0.20")
+    }
+
+    @Test("a paired device advertising an older v over mDNS is still not sent to")
+    func mdnsOutdatedPairedTargetNeedsUpdate() {
+        let id = UUID()
+        let mdns = [Peer(id: id, name: "Old", host: "192.168.0.9", port: 51888, protocolVersion: 1)]
+        let targets = AppModel.composeSendTargets(
+            mdnsPeers: mdns,
+            pairedDevices: [PairedDevice(id: id, name: "Old", host: "192.168.0.99")]
+        )
+        #expect(targets.first { $0.id == id }?.needsUpdate == true)
+        #expect(targets.first { $0.id == id }?.host == "192.168.0.99")
     }
 
     @Test("a stored-host target recorded as outdated carries the older protocol version")

@@ -105,7 +105,9 @@ enum EnvelopePurpose {
   clip('clip'),
   fileOffer('file-offer'),
   fileFinish('file-finish'),
-  fileCancel('file-cancel');
+  fileCancel('file-cancel'),
+  ping('ping'),
+  pong('pong');
 
   const EnvelopePurpose(this.wire);
 

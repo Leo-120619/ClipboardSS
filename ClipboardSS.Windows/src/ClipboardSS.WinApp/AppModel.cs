@@ -31,7 +31,10 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private readonly MdnsService _mdns;
     private readonly SubnetSweeper _sweeper;
     private readonly HashSet<Guid> _onlineDevices = [];
-    /// <summary>Paired devices whose <c>/v1/id</c> probe advertised an older wire protocol.</summary>
+    /// <summary>
+    /// Paired devices that answered a ping with 426 (or, found only by the reconnect sweep, advertised
+    /// an older <c>v</c> on <c>/v1/id</c>). A valid pong clears the flag.
+    /// </summary>
     private readonly HashSet<Guid> _outdatedDevices = [];
     private readonly System.Threading.Timer _livenessTimer;
     private readonly SemaphoreSlim _livenessRefreshLock = new(1, 1);
@@ -257,12 +260,6 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     public static bool IsDeviceConnectionActive(bool enabled, bool online) => enabled && online;
 
-    public static Peer? MatchingReconnectPeer(
-        Guid deviceId,
-        IEnumerable<Peer> mdnsPeers,
-        IEnumerable<Peer> sweptPeers) =>
-        mdnsPeers.Concat(sweptPeers).FirstOrDefault(peer => peer.Id == deviceId);
-
     public static Peer? ResolveVerifiedPeer(
         PairedDevice device,
         bool online,
@@ -270,16 +267,15 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         IReadOnlySet<Guid>? outdatedDeviceIds = null)
     {
         if (!IsDeviceConnectionActive(device.Connected, online)) return null;
-        var live = mdnsPeers.FirstOrDefault(peer => peer.Id == device.Id);
-        if (live is not null) return live;
+        // Never the mDNS-claimed address: only a pong moves the stored host.
         return string.IsNullOrWhiteSpace(device.Host)
             ? null
             : StoredHostPeer(device, device.Host!, outdatedDeviceIds);
     }
 
     /// <summary>
-    /// A peer at the device's stored host, carrying the protocol version the last <c>/v1/id</c>
-    /// probe saw (older when it is in <paramref name="outdatedDeviceIds"/>).
+    /// A peer at the device's stored host (the last host that answered a valid pong), carrying an
+    /// older protocol version when it is in <paramref name="outdatedDeviceIds"/>.
     /// </summary>
     public static Peer StoredHostPeer(PairedDevice device, string host, IReadOnlySet<Guid>? outdatedDeviceIds) =>
         new(device.Id, device.Name, host, 51888,
@@ -290,6 +286,11 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         lock (_outdatedDevices) return [.. _outdatedDevices];
     }
 
+    /// <summary>
+    /// Pings the device at its mDNS and stored addresses; failing that, sweeps the subnet for hosts
+    /// claiming its id on <c>/v1/id</c> and pings those. Only a valid pong makes it online or moves
+    /// its stored host.
+    /// </summary>
     public async Task<bool> ReconnectDeviceAsync(
         Guid deviceId,
         bool reportError = true,
@@ -298,49 +299,78 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         var device = PairedDevices.FirstOrDefault(candidate => candidate.Id == deviceId);
         if (device is null || !device.Connected) return false;
 
-        var candidateHosts = VisiblePeers
-            .Where(peer => peer.Id == deviceId)
-            .Select(peer => peer.Host)
-            .ToList();
-        if (!string.IsNullOrWhiteSpace(device.Host) && !candidateHosts.Contains(device.Host))
-            candidateHosts.Add(device.Host!);
-
-        Peer? match = null;
-        foreach (var host in candidateHosts)
+        var tried = DeviceLiveness.CandidateHosts(device, VisiblePeers);
+        var report = await DeviceLiveness.VerifyAsync(device, tried, PingDeviceAsync, cancellationToken);
+        if (!report.VerifiedHosts.ContainsKey(deviceId))
         {
-            var peer = await _sweeper.ProbeHostAsync(host, cancellationToken);
-            if (peer?.Id != deviceId) continue;
-            match = peer;
-            break;
+            var claimed = (await _sweeper.SweepAsync(cancellationToken)).Where(peer => peer.Id == deviceId).ToArray();
+            report.Merge(await DeviceLiveness.VerifyAsync(
+                device,
+                claimed.Select(peer => peer.Host).Where(host => !tried.Contains(host, StringComparer.OrdinalIgnoreCase)),
+                PingDeviceAsync,
+                cancellationToken));
+            // A v1 peer cannot answer a ping; its advertised version is the only signal.
+            if (!report.VerifiedHosts.ContainsKey(deviceId) && claimed.Any(peer => peer.NeedsUpdate))
+                report.UpgradeRequired.Add(deviceId);
         }
-        match ??= MatchingReconnectPeer(
-            deviceId,
-            [],
-            await _sweeper.SweepAsync(cancellationToken));
 
-        lock (_onlineDevices)
+        ApplyLiveness(report, [device], rebuildAll: false);
+        if (!report.VerifiedHosts.ContainsKey(deviceId))
         {
-            if (match is null) _onlineDevices.Remove(deviceId);
-            else _onlineDevices.Add(deviceId);
-        }
-        if (match is null)
-        {
-            if (reportError) LastError = "That device is not reachable right now.";
+            if (reportError)
+                LastError = DeviceNeedsUpdate(deviceId)
+                    ? WireProtocol.UpdateOtherDeviceMessage
+                    : "That device is not reachable right now.";
             StateChanged?.Invoke(this, EventArgs.Empty);
             return false;
         }
+        LastError = null;
+        return true;
+    }
+
+    /// <summary>Pings one paired device at one host over <c>POST /v1/ping</c>.</summary>
+    private Task<PingOutcome> PingDeviceAsync(PairedDevice device, string host, CancellationToken cancellationToken)
+    {
+        var key = PairingCoordinator.PairedStore.GetKey(device.Id);
+        return key is null
+            ? Task.FromResult(PingOutcome.Unverified)
+            : _sweeper.PingHostAsync(host, device.Id, PairingCoordinator.Identity.Id, key, cancellationToken);
+    }
+
+    /// <summary>
+    /// The only place a paired device becomes online, has its stored host changed, or has its outdated
+    /// flag changed, and only from ping results: <c>/v1/id</c> and mDNS nominate hosts but never prove
+    /// identity. With <paramref name="rebuildAll"/> the online set is rebuilt from the report (so unpaired
+    /// devices drop out); otherwise only <paramref name="devices"/> are updated.
+    /// </summary>
+    private void ApplyLiveness(LivenessReport report, IReadOnlyCollection<PairedDevice> devices, bool rebuildAll)
+    {
+        var hostUpdates = DeviceLiveness.HostUpdates(devices, report);
+        foreach (var (id, host) in hostUpdates) PairingCoordinator.PairedStore.UpdateHost(id, host);
 
         lock (_outdatedDevices)
         {
-            if (match.NeedsUpdate) _outdatedDevices.Add(deviceId);
-            else _outdatedDevices.Remove(deviceId);
+            _outdatedDevices.ExceptWith(report.OnlineIds);
+            _outdatedDevices.UnionWith(report.UpgradeRequired);
         }
-        PairingCoordinator.PairedStore.UpdateHost(deviceId, match.Host);
-        LastError = null;
-        OnPropertyChanged(nameof(PairedDevices));
-        StateChanged?.Invoke(this, EventArgs.Empty);
-        return true;
+
+        var changed = hostUpdates.Count > 0;
+        lock (_onlineDevices)
+        {
+            var next = rebuildAll ? [] : new HashSet<Guid>(_onlineDevices);
+            next.ExceptWith(devices.Select(device => device.Id));
+            next.UnionWith(report.OnlineIds);
+            if (!_onlineDevices.SetEquals(next))
+            {
+                _onlineDevices.Clear();
+                _onlineDevices.UnionWith(next);
+                changed = true;
+            }
+        }
+        if (hostUpdates.Count > 0) OnPropertyChanged(nameof(PairedDevices));
+        if (changed) StateChanged?.Invoke(this, EventArgs.Empty);
     }
+
     /// <summary>True when the device advertises an older wire protocol: listed, but nothing is sent to it.</summary>
     public bool DeviceNeedsUpdate(Guid deviceId)
     {
@@ -363,22 +393,9 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         if (_disposed || IsSyncPaused || !await _livenessRefreshLock.WaitAsync(0, cancellationToken)) return;
         try
         {
-            var online = await DeviceLiveness.ResolveOnlineDeviceIdsAsync(
-                PairedDevices,
-                VisiblePeers,
-                _sweeper.ProbeHostAsync,
-                cancellationToken);
-            var changed = false;
-            lock (_onlineDevices)
-            {
-                if (!_onlineDevices.SetEquals(online))
-                {
-                    _onlineDevices.Clear();
-                    _onlineDevices.UnionWith(online);
-                    changed = true;
-                }
-            }
-            if (changed) StateChanged?.Invoke(this, EventArgs.Empty);
+            var devices = PairedDevices.ToArray();
+            var report = await DeviceLiveness.ResolveAsync(devices, VisiblePeers, PingDeviceAsync, cancellationToken);
+            ApplyLiveness(report, devices, rebuildAll: true);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -503,16 +520,18 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         IReadOnlySet<Guid>? outdatedDeviceIds = null)
     {
         var devices = pairedDevices.ToArray();
+        var peers = mdnsPeers.ToArray();
+        // Paired devices go to their stored (ping-verified) host, never an mDNS-claimed one;
+        // an older mDNS `v` still keeps them from being sent to.
+        var outdated = new HashSet<Guid>(outdatedDeviceIds ?? new HashSet<Guid>());
+        outdated.UnionWith(peers.Where(peer => peer.NeedsUpdate).Select(peer => peer.Id));
         var byId = new Dictionary<Guid, Peer>();
         foreach (var device in devices)
         {
             if (!device.Connected) continue;
             if (!string.IsNullOrWhiteSpace(device.Host))
-                byId[device.Id] = StoredHostPeer(device, device.Host!, outdatedDeviceIds);
+                byId[device.Id] = StoredHostPeer(device, device.Host!, outdated);
         }
-        var connectedIds = devices.Where(device => device.Connected).Select(device => device.Id).ToHashSet();
-        foreach (var peer in mdnsPeers)
-            if (connectedIds.Contains(peer.Id)) byId[peer.Id] = peer;
         return byId.Values.ToArray();
     }
 

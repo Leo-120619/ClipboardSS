@@ -94,6 +94,7 @@ public sealed class EnvelopeV2Tests
     [InlineData("/v1/file/offer")]
     [InlineData("/v1/file/finish")]
     [InlineData("/v1/file/cancel")]
+    [InlineData("/v1/ping")]
     public async Task V1EnvelopeGetsUpgradeRequired(string path)
     {
         var identity = new DeviceIdentity(Guid.Parse("8fb5790c-4533-47bb-90af-827291247fe1"), "Windows");

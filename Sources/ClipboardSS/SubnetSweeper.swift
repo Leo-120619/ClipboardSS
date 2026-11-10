@@ -103,7 +103,7 @@ extension SubnetSweeper {
         let request = HTTPRequest(method: "GET", path: "/v1/id", headers: [:], body: Data())
         let bytes = HTTPCodec.encodeRequest(request, host: "\(host):51888")
         guard
-            let data = try? await sendProbe(bytes, host: host, timeoutMs: timeoutMs),
+            let data = try? await exchange(bytes, host: host, timeoutMs: timeoutMs),
             let response = try? HTTPCodec.parseResponse(data),
             response.statusCode == 200,
             let obj = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
@@ -118,7 +118,8 @@ extension SubnetSweeper {
         return Peer(id: id, name: name, host: host, port: 51888, protocolVersion: version)
     }
 
-    private static func sendProbe(_ data: Data, host: String, timeoutMs: Int) async throws -> Data {
+    /// Sends one encoded HTTP request to `host:51888` and returns the raw response.
+    static func exchange(_ data: Data, host: String, timeoutMs: Int) async throws -> Data {
         guard let port = NWEndpoint.Port(rawValue: 51888) else {
             throw URLError(.badURL)
         }

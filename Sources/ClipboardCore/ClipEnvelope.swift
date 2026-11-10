@@ -35,6 +35,8 @@ public enum EnvelopePurpose: String, Sendable, CaseIterable {
     case fileOffer = "file-offer"
     case fileFinish = "file-finish"
     case fileCancel = "file-cancel"
+    case ping
+    case pong
 }
 
 /// Wire envelope v2: ChaCha20-Poly1305 over the inner JSON with associated data

@@ -250,6 +250,19 @@ public final class ClipServer: @unchecked Sendable {
                 body: Self.identityResponseBody(id: identity.id, name: identity.name)
             )
             self.sendResponse(resp, on: connection)
+        } else if request.method == "POST", request.path == LivenessPing.path {
+            Task {
+                let result = await LivenessPing.respond(
+                    body: request.body,
+                    localDeviceId: self.identity.id,
+                    pairedStore: self.pairingCoordinator.pairedStore,
+                    replayGuard: self.replayGuard
+                )
+                self.sendResponse(
+                    HTTPResponse(statusCode: result.statusCode, headers: ["Content-Type": "application/json"], body: result.body),
+                    on: connection
+                )
+            }
         } else if request.path == "/v1/clip" {
             Task {
                 self.sendResponse(await self.handleClipRequest(body: request.body), on: connection)

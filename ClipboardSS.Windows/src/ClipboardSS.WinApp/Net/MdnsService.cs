@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using ClipboardSS.Core.Models;
 using ClipboardSS.Core.Protocol;
+using ClipboardSS.Core.Sync;
 
 namespace ClipboardSS.App.Net;
 
@@ -10,7 +11,14 @@ public sealed class MdnsService : IDisposable
     private const uint DnsRequestPending = 9506;
     private const ushort DnsTypePtr = 12;
     private readonly DeviceIdentity _identity;
-    private readonly ConcurrentDictionary<Guid, Peer> _peers = [];
+    /// <summary>mDNS record TTL assumed when the browse callback does not carry one (RFC 6762 default for PTR).</summary>
+    private static readonly TimeSpan DefaultTtl = TimeSpan.FromSeconds(4500);
+    private static readonly TimeSpan PruneInterval = TimeSpan.FromSeconds(30);
+    /// <summary>Peers keyed by service instance; removed on goodbye (TTL 0) or when their TTL runs out.</summary>
+    private readonly MdnsPeerTable _peers = new();
+    /// <summary>TTL of the latest PTR record per service instance, applied when its resolve completes.</summary>
+    private readonly ConcurrentDictionary<string, TimeSpan> _serviceTtls = new(StringComparer.OrdinalIgnoreCase);
+    private readonly System.Threading.Timer _pruneTimer;
     private readonly ConcurrentDictionary<IntPtr, ResolveOperation> _resolveOperations = [];
     private readonly BrowseCallback _browseCallback;
     private readonly ResolveCallback _resolveCallback;
@@ -28,12 +36,19 @@ public sealed class MdnsService : IDisposable
         _browseCallback = BrowseCompleted;
         _resolveCallback = ResolveCompleted;
         _registerCallback = RegisterCompleted;
+        _pruneTimer = new System.Threading.Timer(_ => PruneExpired(), null, PruneInterval, PruneInterval);
     }
 
     public event EventHandler? PeersChanged;
-    public IReadOnlyList<Peer> Peers => _peers.Values
+    public IReadOnlyList<Peer> Peers => _peers.Peers
         .OrderBy(peer => peer.Name, StringComparer.CurrentCultureIgnoreCase)
         .ToArray();
+
+    private void PruneExpired()
+    {
+        if (_disposed) return;
+        if (_peers.Prune(DateTimeOffset.UtcNow)) PeersChanged?.Invoke(this, EventArgs.Empty);
+    }
 
     public bool Start()
     {
@@ -54,6 +69,7 @@ public sealed class MdnsService : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _pruneTimer.Dispose();
         if (_browseCancel != IntPtr.Zero) _ = DnsServiceBrowseCancel(_browseCancel);
         if (_registerRequest != IntPtr.Zero) _ = DnsServiceDeRegister(_registerRequest, IntPtr.Zero);
         foreach (var operation in _resolveOperations.Values)
@@ -133,7 +149,17 @@ public sealed class MdnsService : IDisposable
                 if (record.Type == DnsTypePtr && record.Data != IntPtr.Zero)
                 {
                     var serviceName = Marshal.PtrToStringUni(record.Data);
-                    if (!string.IsNullOrWhiteSpace(serviceName)) BeginResolve(serviceName);
+                    if (!string.IsNullOrWhiteSpace(serviceName) && record.Ttl == 0)
+                    {
+                        // mDNS goodbye: the service left the network.
+                        _serviceTtls.TryRemove(serviceName, out _);
+                        if (_peers.Remove(serviceName)) PeersChanged?.Invoke(this, EventArgs.Empty);
+                    }
+                    else if (!string.IsNullOrWhiteSpace(serviceName))
+                    {
+                        _serviceTtls[serviceName] = TimeSpan.FromSeconds(record.Ttl);
+                        BeginResolve(serviceName);
+                    }
                 }
                 current = record.Next;
             }
@@ -162,6 +188,7 @@ public sealed class MdnsService : IDisposable
         try
         {
             if (status != 0 || instancePointer == IntPtr.Zero) return;
+            if (!_resolveOperations.TryGetValue(context, out var resolving)) return;
             var instance = Marshal.PtrToStructure<DnsServiceInstance>(instancePointer);
             var properties = ReadProperties(instance);
             // Older peers are still listed (marked "needs update"), never hidden.
@@ -181,7 +208,8 @@ public sealed class MdnsService : IDisposable
             var name = properties.GetValueOrDefault("deviceName");
             if (string.IsNullOrWhiteSpace(name)) name = id.ToString("D");
             var port = instance.Port == 0 ? (ushort)51888 : instance.Port;
-            _peers[id] = new Peer(id, name, host, port, version);
+            var ttl = _serviceTtls.TryGetValue(resolving.ServiceName, out var recordTtl) ? recordTtl : DefaultTtl;
+            _peers.Upsert(resolving.ServiceName, new Peer(id, name, host, port, version), ttl, DateTimeOffset.UtcNow);
             PeersChanged?.Invoke(this, EventArgs.Empty);
         }
         finally
@@ -231,6 +259,7 @@ public sealed class MdnsService : IDisposable
 
         public ResolveOperation(string serviceName, ResolveCallback callback)
         {
+            ServiceName = serviceName;
             QueryNamePointer = Marshal.StringToHGlobalUni(serviceName);
             CancelPointer = Marshal.AllocHGlobal(IntPtr.Size);
             Marshal.WriteIntPtr(CancelPointer, IntPtr.Zero);
@@ -238,6 +267,7 @@ public sealed class MdnsService : IDisposable
             Handle = GCHandle.Alloc(this);
         }
 
+        public string ServiceName { get; }
         public ResolveCallback Callback { get; }
         public GCHandle Handle { get; }
         public IntPtr QueryNamePointer { get; }

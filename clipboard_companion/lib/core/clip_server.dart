@@ -13,6 +13,7 @@ import 'crypto_utils.dart';
 import 'file_receiver.dart';
 import 'file_transfer_models.dart';
 import 'image_validation.dart';
+import 'liveness_ping.dart';
 import 'replay_guard.dart';
 
 class ClipServerStartException implements Exception {
@@ -126,6 +127,7 @@ class ClipServer {
     });
     router.post('/v1/pair/start', _handlePairStart);
     router.post('/v1/pair/confirm', _handlePairConfirm);
+    router.post(LivenessPing.path, _handlePing);
     router.post('/v1/clip', _handleClip);
     router.post('/v1/file/offer', _handleFileOffer);
     router.post('/v1/file/chunk', _handleFileChunk);
@@ -220,6 +222,27 @@ class ClipServer {
     } catch (e) {
       developer.log('Pair confirm error: $e', name: 'ClipServer');
       return Response(400, body: e.toString());
+    }
+  }
+
+  Future<Response> _handlePing(Request request) async {
+    try {
+      final envelope = ClipEnvelope.fromJson(await _readJsonCapped(request));
+      final (status, body) = await LivenessPing.respond(
+        envelope: envelope,
+        localDeviceId: identity.id,
+        getKey: pairedStore.getKey,
+        replayGuard: replayGuard,
+      );
+      return Response(
+        status,
+        body: jsonEncode(body),
+        headers: {'Content-Type': 'application/json'},
+      );
+    } on BodyTooLargeException {
+      return _payloadTooLarge();
+    } catch (_) {
+      return Response(400, body: jsonEncode({'status': 'error'}));
     }
   }
 

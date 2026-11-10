@@ -78,7 +78,7 @@ struct ClipServerTests {
     }
 
     @Test("v1 envelopes get 426 upgradeRequired on every envelope endpoint",
-          arguments: ["/v1/clip", "/v1/file/offer", "/v1/file/finish", "/v1/file/cancel"])
+          arguments: ["/v1/clip", "/v1/file/offer", "/v1/file/finish", "/v1/file/cancel", "/v1/ping"])
     @MainActor
     func v1EnvelopeGetsUpgradeRequired(path: String) async throws {
         let harness = try ClipServerHarness(requestDeadline: 5)
