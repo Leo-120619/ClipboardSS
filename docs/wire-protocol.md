@@ -192,10 +192,10 @@ Swift, Dart, and .NET MUST reproduce this byte-for-byte.
 - **Caller -> Device**: `POST /v1/ping`, body a v2 envelope with purpose `ping`, sealed to the
   device being checked. Inner JSON: `{"sentAt":"2026-11-10T12:00:00Z"}`.
 - **Device -> Caller**: `200`, body a v2 envelope with purpose `pong`, source = the device,
-  recipient = the caller. Inner JSON:
+  recipient = the caller. Inner JSON, where `pingNonce` is the ping envelope's nonce as received:
   ```json
   {
-    "pingNonce": "<base64>", // the ping envelope's nonce, as received
+    "pingNonce": "<base64>",
     "sentAt": "2026-11-10T12:00:00Z"
   }
   ```
@@ -218,7 +218,13 @@ Outcomes:
 
 - **alive** → the device is online at the pinged host; if that host differs from the stored one,
   the stored host is updated; the device is removed from the outdated set (a pong proves v2).
+  While it keeps ponging, an mDNS advertisement of an older `v` for its id is ignored (it would
+  otherwise let anyone on the LAN block traffic to a live device).
 - `426` → the device is marked outdated ("update the other device"); not online, host unchanged.
+- `400 {"status":"stale"}` → **clock skew**: the device is shown "Clock out of sync" and
+  reconnect / file-send errors read "Clock out of sync with <device>." (the same text as a stale
+  clip). Unauthenticated, so the device is not online and its host is unchanged; a later valid
+  pong clears it.
 - anything else (timeout, `401`, `400`, `409`, an invalid pong) → no evidence: not online at that
   host, host unchanged.
 

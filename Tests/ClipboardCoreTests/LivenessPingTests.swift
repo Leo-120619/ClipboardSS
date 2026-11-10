@@ -88,7 +88,7 @@ struct LivenessPingTests {
         #expect(outcome == .unverified)
     }
 
-    @Test("a 200 that is not a pong, or a 426, is not alive")
+    @Test("a 200 that is not a pong, a 426 or a 400 stale is not alive")
     func nonPongResponses() {
         let body = Data(#"{"deviceId":"x","v":2}"#.utf8)
         #expect(LivenessPing.evaluatePong(statusCode: 200, body: body, pingNonce: "AAAAAAAAAAAAAAAB",
@@ -96,6 +96,10 @@ struct LivenessPingTests {
         #expect(LivenessPing.evaluatePong(statusCode: 426, body: Data(), pingNonce: "AAAAAAAAAAAAAAAB",
                                           deviceId: device, localDeviceId: local, pairKey: key) == .upgradeRequired)
         #expect(LivenessPing.evaluatePong(statusCode: 401, body: Data(), pingNonce: "AAAAAAAAAAAAAAAB",
+                                          deviceId: device, localDeviceId: local, pairKey: key) == .unverified)
+        #expect(LivenessPing.evaluatePong(statusCode: 400, body: Data(#"{"status":"stale"}"#.utf8), pingNonce: "AAAAAAAAAAAAAAAB",
+                                          deviceId: device, localDeviceId: local, pairKey: key) == .clockSkew)
+        #expect(LivenessPing.evaluatePong(statusCode: 400, body: Data("Bad Request".utf8), pingNonce: "AAAAAAAAAAAAAAAB",
                                           deviceId: device, localDeviceId: local, pairKey: key) == .unverified)
     }
 

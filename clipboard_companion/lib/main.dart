@@ -1222,6 +1222,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
           devices: state.pairedStore.devices,
           isOnline: state.isDeviceOnline,
           needsUpdate: state.isDeviceOutdated,
+          clockSkewed: state.isDeviceClockSkewed,
           onSetConnected: state.setDeviceConnected,
           onUnpair: (id) async {
             await state.pairedStore.removeDevice(id);
@@ -1555,6 +1556,7 @@ class _PairedDevicesCard extends StatelessWidget {
   final List<PairedDevice> devices;
   final bool Function(String id) isOnline;
   final bool Function(String id) needsUpdate;
+  final bool Function(String id) clockSkewed;
   final Future<void> Function(String id) onUnpair;
   final Future<void> Function(String id)? onSendFile;
   final Future<void> Function(String id, bool connected) onSetConnected;
@@ -1563,6 +1565,7 @@ class _PairedDevicesCard extends StatelessWidget {
     required this.devices,
     required this.isOnline,
     required this.needsUpdate,
+    required this.clockSkewed,
     required this.onUnpair,
     required this.onSetConnected,
     this.onSendFile,
@@ -1656,6 +1659,22 @@ class _PairedDevicesCard extends StatelessWidget {
                                                   ).withValues(alpha: 0.6),
                                           ),
                                     ),
+                                    if (clockSkewed(device.id)) ...[
+                                      const SizedBox(width: 6),
+                                      Tooltip(
+                                        message: clockOutOfSyncMessage([
+                                          device.name,
+                                        ]),
+                                        child: Text(
+                                          'Clock out of sync',
+                                          style: theme.textTheme.bodySmall
+                                              ?.copyWith(
+                                                fontWeight: FontWeight.w600,
+                                                color: const Color(0xFFB45309),
+                                              ),
+                                        ),
+                                      ),
+                                    ],
                                     if (needsUpdate(device.id)) ...[
                                       const SizedBox(width: 6),
                                       Tooltip(

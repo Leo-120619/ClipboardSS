@@ -9,6 +9,8 @@ struct LivenessReport: Equatable, Sendable {
     var verifiedHosts: [UUID: String] = [:]
     /// Devices that answered 426 and no valid pong.
     var upgradeRequired: Set<UUID> = []
+    /// Devices that answered `400 stale` (clock out of sync) and no valid pong.
+    var clockSkew: Set<UUID> = []
 
     var onlineIds: Set<UUID> { Set(verifiedHosts.keys) }
 
@@ -16,6 +18,8 @@ struct LivenessReport: Equatable, Sendable {
         verifiedHosts.merge(other.verifiedHosts) { current, _ in current }
         upgradeRequired.formUnion(other.upgradeRequired)
         upgradeRequired.subtract(verifiedHosts.keys)
+        clockSkew.formUnion(other.clockSkew)
+        clockSkew.subtract(verifiedHosts.keys)
     }
 }
 
@@ -53,6 +57,9 @@ final class AppModel: ObservableObject {
     /// Paired devices that answered a ping with 426 (or, found only by the reconnect sweep,
     /// advertised an older `v` on `/v1/id`). A valid pong clears the flag.
     @Published private(set) var outdatedDeviceIds: Set<UUID> = []
+    /// Paired devices whose last ping was refused as stale: their clock disagrees with ours.
+    /// Shown as "Clock out of sync"; never makes a device online or moves its host.
+    @Published private(set) var clockSkewDeviceIds: Set<UUID> = []
     @Published private(set) var transfers: [FileTransferState] = []
     @Published var pendingSend: PendingSend? {
         // However the picker closes (button or sheet binding), offer any shares still waiting.
@@ -222,13 +229,17 @@ final class AppModel: ObservableObject {
     /// The only place a paired device becomes online, has its stored host changed, or has
     /// its outdated flag changed, and only from ping results: `/v1/id` and mDNS nominate
     /// hosts but never prove identity. `scope` limits the online rebuild to those devices;
-    /// nil rebuilds the whole set (so unpaired devices drop out).
-    func applyLiveness(_ report: LivenessReport, scope: Set<UUID>? = nil) async {
+    /// nil rebuilds the whole set (so unpaired devices drop out). Returns false when a
+    /// stored-host update failed (its error is left in `lastError`).
+    @discardableResult
+    func applyLiveness(_ report: LivenessReport, scope: Set<UUID>? = nil) async -> Bool {
+        var stored = true
         let updates = Self.hostUpdates(devices: pairedDevices, report: report)
         for (id, host) in updates {
             do {
                 try await pairingCoordinator.pairedStore.updateHost(id, host: host)
             } catch {
+                stored = false
                 lastError = error.localizedDescription
             }
         }
@@ -236,6 +247,9 @@ final class AppModel: ObservableObject {
 
         let outdated = outdatedDeviceIds.subtracting(report.onlineIds).union(report.upgradeRequired)
         if outdated != outdatedDeviceIds { outdatedDeviceIds = outdated }
+
+        let skewed = scope.map { clockSkewDeviceIds.subtracting($0).union(report.clockSkew) } ?? report.clockSkew
+        if skewed != clockSkewDeviceIds { clockSkewDeviceIds = skewed }
 
         let online = scope.map { onlineDeviceIds.subtracting($0).union(report.onlineIds) } ?? report.onlineIds
         if online != onlineDeviceIds { onlineDeviceIds = online }
@@ -245,6 +259,7 @@ final class AppModel: ObservableObject {
             hasCompletedLivenessPass = true
             processPendingShares(reportUnreachable: true)
         }
+        return stored
     }
 
     func isDeviceOnline(_ id: UUID) -> Bool {
@@ -253,11 +268,38 @@ final class AppModel: ObservableObject {
 
     /// True when the device advertises an older wire protocol: it is listed, but nothing is sent to it.
     func deviceNeedsUpdate(_ id: UUID) -> Bool {
-        Self.deviceNeedsUpdate(id, mdnsPeers: peerBrowser.peers, outdatedDeviceIds: outdatedDeviceIds)
+        Self.deviceNeedsUpdate(
+            id,
+            mdnsPeers: peerBrowser.peers,
+            outdatedDeviceIds: outdatedDeviceIds,
+            verifiedOnlineIds: onlineDeviceIds
+        )
     }
 
-    nonisolated static func deviceNeedsUpdate(_ id: UUID, mdnsPeers: [Peer], outdatedDeviceIds: Set<UUID>) -> Bool {
-        outdatedDeviceIds.contains(id) || mdnsPeers.contains { $0.id == id && $0.needsUpdate }
+    /// An unauthenticated mDNS `v < 2` counts only for devices that have not proved v2 with
+    /// a valid pong (`verifiedOnlineIds`), so a LAN impostor cannot block a live device.
+    nonisolated static func deviceNeedsUpdate(
+        _ id: UUID,
+        mdnsPeers: [Peer],
+        outdatedDeviceIds: Set<UUID>,
+        verifiedOnlineIds: Set<UUID> = []
+    ) -> Bool {
+        outdatedDeviceIds.contains(id)
+            || (!verifiedOnlineIds.contains(id) && mdnsPeers.contains { $0.id == id && $0.needsUpdate })
+    }
+
+    /// True when the device's last ping was refused as stale (clocks out of sync).
+    func deviceClockSkewed(_ id: UUID) -> Bool {
+        clockSkewDeviceIds.contains(id)
+    }
+
+    /// Why a device cannot be sent to right now, for reconnect and file-send errors.
+    func unreachableMessage(for id: UUID) -> String {
+        if deviceNeedsUpdate(id) { return ProtocolMismatch.updateOtherDeviceMessage }
+        if deviceClockSkewed(id), let device = pairedDevices.first(where: { $0.id == id }) {
+            return ProtocolMismatch.clockOutOfSyncMessage(deviceNames: [device.name])
+        }
+        return "That device is not reachable right now."
     }
 
     func unpairDevice(_ id: UUID) {
@@ -340,16 +382,13 @@ final class AppModel: ObservableObject {
             }
         }
 
-        await applyLiveness(report, scope: [id])
+        let stored = await applyLiveness(report, scope: [id])
         guard report.verifiedHosts[id] != nil else {
-            if reportError {
-                lastError = deviceNeedsUpdate(id)
-                    ? ProtocolMismatch.updateOtherDeviceMessage
-                    : "That device is not reachable right now."
-            }
+            if reportError { lastError = unreachableMessage(for: id) }
             return false
         }
-        lastError = nil
+        // Keep a failed stored-host update visible.
+        if stored { lastError = nil }
         return true
     }
 
@@ -432,7 +471,8 @@ final class AppModel: ObservableObject {
     nonisolated static func composeSendTargets(
         mdnsPeers: [Peer],
         pairedDevices: [PairedDevice],
-        outdatedDeviceIds: Set<UUID> = []
+        outdatedDeviceIds: Set<UUID> = [],
+        verifiedOnlineIds: Set<UUID> = []
     ) -> [Peer] {
         var byId: [UUID: Peer] = [:]
         // Unpaired mDNS peers only count as visible; ClipSender has no key for them.
@@ -440,9 +480,9 @@ final class AppModel: ObservableObject {
         for peer in mdnsPeers where !pairedIds.contains(peer.id) {
             byId[peer.id] = peer
         }
-        // Paired devices go to their stored (ping-verified) host, never an mDNS-claimed one;
-        // an older mDNS `v` still keeps them from being sent to.
-        let mdnsOutdated = Set(mdnsPeers.filter(\.needsUpdate).map(\.id))
+        // Paired devices go to their stored (ping-verified) host, never an mDNS-claimed one.
+        // An older mDNS `v` keeps them from being sent to, unless a valid pong proved v2.
+        let mdnsOutdated = Set(mdnsPeers.filter(\.needsUpdate).map(\.id)).subtracting(verifiedOnlineIds)
         for device in pairedDevices where device.connected {
             if let host = device.host, !host.isEmpty {
                 byId[device.id] = storedHostPeer(device, host: host, outdatedDeviceIds: outdatedDeviceIds.union(mdnsOutdated))
@@ -472,9 +512,12 @@ final class AppModel: ObservableObject {
             case .alive:
                 report.verifiedHosts[device.id] = host
                 report.upgradeRequired.remove(device.id)
+                report.clockSkew.remove(device.id)
                 return report
             case .upgradeRequired:
                 report.upgradeRequired.insert(device.id)
+            case .clockSkew:
+                report.clockSkew.insert(device.id)
             case .unverified:
                 continue
             }
@@ -529,7 +572,8 @@ final class AppModel: ObservableObject {
         let targets = Self.composeSendTargets(
             mdnsPeers: peerBrowser.peers,
             pairedDevices: pairedDevices,
-            outdatedDeviceIds: outdatedDeviceIds
+            outdatedDeviceIds: outdatedDeviceIds,
+            verifiedOnlineIds: onlineDeviceIds
         )
         do {
             let result = try await clipSender.broadcast(clip: clip, to: targets)
@@ -561,9 +605,7 @@ final class AppModel: ObservableObject {
     func sendFile(url: URL, to deviceId: UUID) {
         Task {
             guard await reconnectDevice(deviceId, reportError: false) else {
-                lastError = deviceNeedsUpdate(deviceId)
-                    ? ProtocolMismatch.updateOtherDeviceMessage
-                    : "That device is not reachable right now."
+                lastError = unreachableMessage(for: deviceId)
                 return
             }
             startFileSend(url: url, to: deviceId)

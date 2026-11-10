@@ -117,6 +117,75 @@ void main() {
       expect(report.upgradeRequired, {'b'});
     });
 
+    test(
+      'a stale-refused ping is clock skew: not online, host unchanged',
+      () async {
+        final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
+        final report = await computeDeviceLiveness(
+          devices: [device],
+          mdnsPeers: [
+            Peer(id: 'a', name: 'Mac', host: '10.0.0.8', port: 51888),
+          ],
+          ping: (_, host) async => host == '10.0.0.8'
+              ? PingOutcome.clockSkew
+              : PingOutcome.unverified,
+        );
+
+        expect(report.clockSkew, {'a'});
+        expect(report.onlineIds, isEmpty);
+        expect(hostUpdates([device], report), isEmpty);
+      },
+    );
+
+    test('a valid pong clears clock skew from another address', () async {
+      final report = await computeDeviceLiveness(
+        devices: [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
+        mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.8', port: 51888)],
+        ping: (_, host) async =>
+            host == '10.0.0.8' ? PingOutcome.clockSkew : PingOutcome.alive,
+      );
+
+      expect(report.onlineIds, {'a'});
+      expect(report.clockSkew, isEmpty);
+    });
+
+    test(
+      'a valid pong overrides an mDNS v1 claim: not needsUpdate, sent to the stored host',
+      () {
+        final impostor = Peer(
+          id: 'a',
+          name: 'Mac',
+          host: '10.0.0.66',
+          port: 51888,
+          protocolVersion: 1,
+        );
+        expect(
+          deviceNeedsUpdate(
+            deviceId: 'a',
+            mdnsPeers: [impostor],
+            outdatedDeviceIds: const {},
+          ),
+          isTrue,
+        );
+        expect(
+          deviceNeedsUpdate(
+            deviceId: 'a',
+            mdnsPeers: [impostor],
+            outdatedDeviceIds: const {},
+            verifiedOnlineIds: {'a'},
+          ),
+          isFalse,
+        );
+        final target = composeSendTargets(
+          [impostor],
+          [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
+          verifiedOnlineIds: {'a'},
+        ).single;
+        expect(target.needsUpdate, isFalse);
+        expect(target.host, '10.0.0.9');
+      },
+    );
+
     test('a stale mDNS address falls back to the stored address', () async {
       final pinged = <String>[];
       final report = await computeDeviceLiveness(
@@ -294,19 +363,30 @@ void main() {
       );
     });
 
-    test('a 426 is upgradeRequired; a non-pong 200 is unverified', () async {
-      expect(
-        await ping((_) async => (426, jsonEncode(upgradeRequiredBody))),
-        PingOutcome.upgradeRequired,
-      );
-      expect(
-        await ping(
-          (_) async => (200, jsonEncode({'deviceId': deviceId, 'v': 2})),
-        ),
-        PingOutcome.unverified,
-      );
-      expect(await ping((_) async => null), PingOutcome.unverified);
-    });
+    test(
+      'a 426 is upgradeRequired, 400 stale is clockSkew, a non-pong 200 is unverified',
+      () async {
+        expect(
+          await ping((_) async => (426, jsonEncode(upgradeRequiredBody))),
+          PingOutcome.upgradeRequired,
+        );
+        expect(
+          await ping(
+            (_) async => (200, jsonEncode({'deviceId': deviceId, 'v': 2})),
+          ),
+          PingOutcome.unverified,
+        );
+        expect(await ping((_) async => null), PingOutcome.unverified);
+        expect(
+          await ping((_) async => (400, jsonEncode({'status': 'stale'}))),
+          PingOutcome.clockSkew,
+        );
+        expect(
+          await ping((_) async => (400, 'Bad Request')),
+          PingOutcome.unverified,
+        );
+      },
+    );
 
     test(
       'the responder answers 426, 401, 400 stale and 409 replayed',

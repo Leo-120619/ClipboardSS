@@ -94,6 +94,34 @@ public sealed class LivenessTests
     }
 
     [Fact]
+    public async Task StaleRefusedPingIsClockSkewNotOnlineAndHostUnchanged()
+    {
+        var device = new PairedDevice(Device, "Mac", "10.0.0.9");
+        var report = await DeviceLiveness.ResolveAsync(
+            [device],
+            [new Peer(Device, "Mac", "10.0.0.8", 51888)],
+            Ping(host => host == "10.0.0.8" ? PingOutcome.ClockSkew : PingOutcome.Unverified),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal([Device], report.ClockSkew);
+        Assert.Empty(report.OnlineIds);
+        Assert.Empty(DeviceLiveness.HostUpdates([device], report));
+    }
+
+    [Fact]
+    public async Task ValidPongClearsClockSkewFromAnotherAddress()
+    {
+        var report = await DeviceLiveness.ResolveAsync(
+            [new PairedDevice(Device, "Mac", "10.0.0.9")],
+            [new Peer(Device, "Mac", "10.0.0.8", 51888)],
+            Ping(host => host == "10.0.0.8" ? PingOutcome.ClockSkew : PingOutcome.Alive),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains(Device, report.OnlineIds);
+        Assert.Empty(report.ClockSkew);
+    }
+
+    [Fact]
     public async Task StaleMdnsHostFallsBackToStoredHost()
     {
         var pinged = new List<string>();
@@ -187,6 +215,10 @@ public sealed class LivenessTests
         Assert.Equal(PingOutcome.Unverified, LivenessPing.EvaluatePong(
             200, Encoding.UTF8.GetBytes("{\"deviceId\":\"x\",\"v\":2}"), "AAAAAAAAAAAAAAAB", Device, Local, Key));
         Assert.Equal(PingOutcome.Unverified, LivenessPing.EvaluatePong(401, [], "AAAAAAAAAAAAAAAB", Device, Local, Key));
+        Assert.Equal(PingOutcome.ClockSkew, LivenessPing.EvaluatePong(
+            400, "{\"status\":\"stale\"}"u8.ToArray(), "AAAAAAAAAAAAAAAB", Device, Local, Key));
+        Assert.Equal(PingOutcome.Unverified, LivenessPing.EvaluatePong(
+            400, "Bad Request"u8.ToArray(), "AAAAAAAAAAAAAAAB", Device, Local, Key));
     }
 
     [Fact]

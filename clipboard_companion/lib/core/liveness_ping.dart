@@ -16,6 +16,10 @@ enum PingOutcome {
   /// The host answered 426: it speaks another protocol version.
   upgradeRequired,
 
+  /// The host answered `400 {"status":"stale"}`: its clock disagrees with ours by
+  /// more than the freshness window. Unauthenticated, so it never proves liveness.
+  clockSkew,
+
   /// No evidence either way: unreachable, or an answer that is not a valid, fresh
   /// pong from the expected device for this ping.
   unverified,
@@ -87,6 +91,9 @@ class LivenessPing {
     DateTime? now,
   }) async {
     if (statusCode == 426) return PingOutcome.upgradeRequired;
+    if (statusCode == 400 && _status(body) == 'stale') {
+      return PingOutcome.clockSkew;
+    }
     if (statusCode != 200) return PingOutcome.unverified;
     try {
       final envelope = ClipEnvelope.fromJson(
@@ -159,6 +166,17 @@ class LivenessPing {
       pairKey: key,
     );
     return (200, pong.toJson());
+  }
+
+  static String? _status(String body) {
+    try {
+      final json = jsonDecode(body);
+      return json is Map<String, dynamic> && json['status'] is String
+          ? json['status'] as String
+          : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   static bool _sameBytes(List<int> a, List<int> b) {

@@ -36,6 +36,11 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     /// an older <c>v</c> on <c>/v1/id</c>). A valid pong clears the flag.
     /// </summary>
     private readonly HashSet<Guid> _outdatedDevices = [];
+    /// <summary>
+    /// Paired devices whose last ping was refused as stale: their clock disagrees with ours. Shown as
+    /// "Clock out of sync"; never makes a device online or moves its host.
+    /// </summary>
+    private readonly HashSet<Guid> _clockSkewDevices = [];
     private readonly System.Threading.Timer _livenessTimer;
     private readonly SemaphoreSlim _livenessRefreshLock = new(1, 1);
     private CancellationTokenSource? _clipboardDebounce;
@@ -317,10 +322,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         ApplyLiveness(report, [device], rebuildAll: false);
         if (!report.VerifiedHosts.ContainsKey(deviceId))
         {
-            if (reportError)
-                LastError = DeviceNeedsUpdate(deviceId)
-                    ? WireProtocol.UpdateOtherDeviceMessage
-                    : "That device is not reachable right now.";
+            if (reportError) LastError = UnreachableMessage(deviceId);
             StateChanged?.Invoke(this, EventArgs.Empty);
             return false;
         }
@@ -353,6 +355,12 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
             _outdatedDevices.ExceptWith(report.OnlineIds);
             _outdatedDevices.UnionWith(report.UpgradeRequired);
         }
+        lock (_clockSkewDevices)
+        {
+            if (rebuildAll) _clockSkewDevices.Clear();
+            else _clockSkewDevices.ExceptWith(devices.Select(device => device.Id));
+            _clockSkewDevices.UnionWith(report.ClockSkew);
+        }
 
         var changed = hostUpdates.Count > 0;
         lock (_onlineDevices)
@@ -374,14 +382,48 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     /// <summary>True when the device advertises an older wire protocol: listed, but nothing is sent to it.</summary>
     public bool DeviceNeedsUpdate(Guid deviceId)
     {
+        var online = OnlineDeviceSnapshot();
         lock (_outdatedDevices)
         {
-            return DeviceNeedsUpdate(deviceId, VisiblePeers, _outdatedDevices);
+            return DeviceNeedsUpdate(deviceId, VisiblePeers, _outdatedDevices, online);
         }
     }
 
-    public static bool DeviceNeedsUpdate(Guid deviceId, IEnumerable<Peer> mdnsPeers, IReadOnlySet<Guid> outdatedDeviceIds) =>
-        outdatedDeviceIds.Contains(deviceId) || mdnsPeers.Any(peer => peer.Id == deviceId && peer.NeedsUpdate);
+    /// <summary>True when the device's last ping was refused as stale (clocks out of sync).</summary>
+    public bool DeviceClockSkewed(Guid deviceId)
+    {
+        lock (_clockSkewDevices) return _clockSkewDevices.Contains(deviceId);
+    }
+
+    /// <summary>Why a device cannot be sent to right now, for reconnect and file-send errors.</summary>
+    public string UnreachableMessage(Guid deviceId)
+    {
+        if (DeviceNeedsUpdate(deviceId)) return WireProtocol.UpdateOtherDeviceMessage;
+        if (DeviceClockSkewed(deviceId))
+        {
+            var name = PairedDevices.FirstOrDefault(device => device.Id == deviceId)?.Name ?? deviceId.ToString("D");
+            return WireProtocol.ClockOutOfSyncMessage([name]);
+        }
+        return "That device is not reachable right now.";
+    }
+
+    private HashSet<Guid> OnlineDeviceSnapshot()
+    {
+        lock (_onlineDevices) return [.. _onlineDevices];
+    }
+
+    /// <summary>
+    /// An unauthenticated mDNS <c>v &lt; 2</c> counts only for devices that have not proved v2 with a valid
+    /// pong (<paramref name="verifiedOnlineIds"/>), so a LAN impostor cannot block a live device.
+    /// </summary>
+    public static bool DeviceNeedsUpdate(
+        Guid deviceId,
+        IEnumerable<Peer> mdnsPeers,
+        IReadOnlySet<Guid> outdatedDeviceIds,
+        IReadOnlySet<Guid>? verifiedOnlineIds = null) =>
+        outdatedDeviceIds.Contains(deviceId)
+        || (verifiedOnlineIds?.Contains(deviceId) != true
+            && mdnsPeers.Any(peer => peer.Id == deviceId && peer.NeedsUpdate));
 
     public bool IsDeviceOnline(Guid deviceId)
     {
@@ -433,6 +475,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         var reachable = await ReconnectDeviceAsync(deviceId, false);
         // Checked after the reconnect probe, which records the advertised version.
         if (DeviceNeedsUpdate(deviceId)) throw new PeerNeedsUpdateException();
+        if (!reachable && DeviceClockSkewed(deviceId))
+            throw new PeerClockOutOfSyncException(PairedDevices.First(item => item.Id == deviceId).Name);
         if (!reachable)
             throw new InvalidOperationException("The device is not currently reachable.");
         var device = PairedDevices.First(item => item.Id == deviceId);
@@ -517,14 +561,17 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     public static IReadOnlyList<Peer> ComposeSendTargets(
         IEnumerable<Peer> mdnsPeers,
         IEnumerable<PairedDevice> pairedDevices,
-        IReadOnlySet<Guid>? outdatedDeviceIds = null)
+        IReadOnlySet<Guid>? outdatedDeviceIds = null,
+        IReadOnlySet<Guid>? verifiedOnlineIds = null)
     {
         var devices = pairedDevices.ToArray();
         var peers = mdnsPeers.ToArray();
-        // Paired devices go to their stored (ping-verified) host, never an mDNS-claimed one;
-        // an older mDNS `v` still keeps them from being sent to.
+        // Paired devices go to their stored (ping-verified) host, never an mDNS-claimed one.
+        // An older mDNS `v` keeps them from being sent to, unless a valid pong proved v2.
         var outdated = new HashSet<Guid>(outdatedDeviceIds ?? new HashSet<Guid>());
-        outdated.UnionWith(peers.Where(peer => peer.NeedsUpdate).Select(peer => peer.Id));
+        outdated.UnionWith(peers
+            .Where(peer => peer.NeedsUpdate && verifiedOnlineIds?.Contains(peer.Id) != true)
+            .Select(peer => peer.Id));
         var byId = new Dictionary<Guid, Peer>();
         foreach (var device in devices)
         {
@@ -613,7 +660,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         {
             var result = await _sender.BroadcastAsync(
                 clip,
-                ComposeSendTargets(VisiblePeers, PairedDevices, OutdatedDeviceSnapshot()),
+                ComposeSendTargets(VisiblePeers, PairedDevices, OutdatedDeviceSnapshot(), OnlineDeviceSnapshot()),
                 cancellationToken);
             if (result.NeedsUpdateCount > 0) LastError = WireProtocol.UpdateOtherDeviceMessage;
             else if (result.ClockOutOfSyncPeerNames.Count > 0)

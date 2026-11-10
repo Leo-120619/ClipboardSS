@@ -183,6 +183,12 @@ struct PairedDeviceRow: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if model.deviceClockSkewed(device.id) {
+                        Text("· Clock out of sync")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.orange)
+                            .help(ProtocolMismatch.clockOutOfSyncMessage(deviceNames: [device.name]))
+                    }
                     if needsUpdate {
                         Text("· Needs update")
                             .font(.caption.weight(.medium))

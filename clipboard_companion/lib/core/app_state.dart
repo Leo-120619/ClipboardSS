@@ -74,22 +74,30 @@ Peer storedHostPeer(
 
 /// True when a paired device advertises an older wire protocol (via mDNS, or as
 /// recorded in [outdatedDeviceIds]): it is listed, but nothing is sent to it.
+///
+/// An unauthenticated mDNS `v < 2` counts only for devices that have not proved v2
+/// with a valid pong ([verifiedOnlineIds]), so a LAN impostor cannot block a live
+/// device.
 bool deviceNeedsUpdate({
   required String deviceId,
   required List<Peer> mdnsPeers,
   required Set<String> outdatedDeviceIds,
+  Set<String> verifiedOnlineIds = const {},
 }) {
   final canonical = canonicalDeviceId(deviceId);
   return outdatedDeviceIds.contains(canonical) ||
-      mdnsPeers.any(
-        (peer) => canonicalDeviceId(peer.id) == canonical && peer.needsUpdate,
-      );
+      (!verifiedOnlineIds.contains(canonical) &&
+          mdnsPeers.any(
+            (peer) =>
+                canonicalDeviceId(peer.id) == canonical && peer.needsUpdate,
+          ));
 }
 
 List<Peer> composeSendTargets(
   List<Peer> mdnsPeers,
   List<PairedDevice> pairedDevices, {
   Set<String> outdatedDeviceIds = const {},
+  Set<String> verifiedOnlineIds = const {},
 }) {
   final byId = <String, Peer>{};
   final pairedIds = {
@@ -100,11 +108,13 @@ List<Peer> composeSendTargets(
     if (!pairedIds.contains(canonicalDeviceId(peer.id))) byId[peer.id] = peer;
   }
   // Paired devices go to their stored (ping-verified) host, never an mDNS-claimed
-  // one; an older mDNS `v` still keeps them from being sent to.
+  // one. An older mDNS `v` keeps them from being sent to, unless a pong proved v2.
   final outdated = {
     ...outdatedDeviceIds,
     for (final peer in mdnsPeers)
-      if (peer.needsUpdate) canonicalDeviceId(peer.id),
+      if (peer.needsUpdate &&
+          !verifiedOnlineIds.contains(canonicalDeviceId(peer.id)))
+        canonicalDeviceId(peer.id),
   };
   for (final device in pairedDevices.where((device) => device.connected)) {
     final host = device.host;
@@ -124,6 +134,10 @@ class LivenessReport {
   /// Canonical ids of devices that answered 426 and no valid pong.
   final Set<String> upgradeRequired = {};
 
+  /// Canonical ids of devices that answered `400 stale` (clock out of sync) and no
+  /// valid pong.
+  final Set<String> clockSkew = {};
+
   Set<String> get onlineIds => verifiedHosts.keys.toSet();
 
   void merge(LivenessReport other) {
@@ -132,6 +146,9 @@ class LivenessReport {
     );
     upgradeRequired
       ..addAll(other.upgradeRequired)
+      ..removeAll(verifiedHosts.keys);
+    clockSkew
+      ..addAll(other.clockSkew)
       ..removeAll(verifiedHosts.keys);
   }
 }
@@ -167,9 +184,12 @@ Future<LivenessReport> verifyDevice(
       case PingOutcome.alive:
         report.verifiedHosts[id] = host;
         report.upgradeRequired.remove(id);
+        report.clockSkew.remove(id);
         return report;
       case PingOutcome.upgradeRequired:
         report.upgradeRequired.add(id);
+      case PingOutcome.clockSkew:
+        report.clockSkew.add(id);
       case PingOutcome.unverified:
         break;
     }
@@ -295,6 +315,10 @@ class AppState extends ChangeNotifier {
   /// Paired devices that answered a ping with 426 (or, found only by the reconnect
   /// sweep, advertised an older `v` on `/v1/id`). A valid pong clears the flag.
   final Set<String> outdatedDeviceIds = {};
+
+  /// Paired devices whose last ping was refused as stale: their clock disagrees with
+  /// ours. Shown as "Clock out of sync"; never makes a device online or moves its host.
+  final Set<String> clockSkewDeviceIds = {};
 
   /// One guard for every envelope endpoint, kept across network restarts, so a nonce
   /// is single-use for the whole process.
@@ -707,17 +731,14 @@ class AppState extends ChangeNotifier {
         }
       }
 
-      await _applyLiveness(report, [device], rebuildAll: false);
+      final stored = await _applyLiveness(report, [device], rebuildAll: false);
       if (!report.verifiedHosts.containsKey(canonical)) {
-        if (reportError) {
-          lastError = isDeviceOutdated(canonical)
-              ? updateOtherDeviceMessage
-              : 'That device is not reachable right now.';
-        }
+        if (reportError) lastError = unreachableMessage(canonical);
         notifyListeners();
         return false;
       }
-      lastError = null;
+      // Keep a failed stored-host update visible.
+      if (stored) lastError = null;
       notifyListeners();
       return true;
     } finally {
@@ -741,18 +762,25 @@ class AppState extends ChangeNotifier {
   /// has its outdated flag changed, and only from ping results: `/v1/id` and mDNS
   /// nominate hosts but never prove identity. With [rebuildAll], [deviceOnline] is
   /// rebuilt from [devices] (so unpaired devices drop out); otherwise only [devices]
-  /// are updated.
-  Future<void> _applyLiveness(
+  /// are updated. Returns false when a stored-host update failed (its error is left
+  /// in [lastError]); storage errors never escape, since the liveness timer calls this.
+  Future<bool> _applyLiveness(
     LivenessReport report,
     List<PairedDevice> devices, {
     required bool rebuildAll,
   }) async {
     var changed = false;
+    var stored = true;
     for (final MapEntry(key: id, value: host) in hostUpdates(
       devices,
       report,
     ).entries) {
-      await pairedStore.updateHost(id, host);
+      try {
+        await pairedStore.updateHost(id, host);
+      } catch (e) {
+        stored = false;
+        lastError = 'Could not save the device address: $e';
+      }
       changed = true;
     }
 
@@ -763,6 +791,20 @@ class AppState extends ChangeNotifier {
       outdatedDeviceIds
         ..clear()
         ..addAll(outdated);
+      changed = true;
+    }
+
+    final skewed = {
+      if (!rebuildAll)
+        ...clockSkewDeviceIds.difference({
+          for (final device in devices) canonicalDeviceId(device.id),
+        }),
+      ...report.clockSkew,
+    };
+    if (!setEquals(skewed, clockSkewDeviceIds)) {
+      clockSkewDeviceIds
+        ..clear()
+        ..addAll(skewed);
       changed = true;
     }
 
@@ -780,14 +822,39 @@ class AppState extends ChangeNotifier {
       changed = true;
     }
     if (changed) notifyListeners();
+    return stored;
   }
+
+  /// Canonical ids of pong-verified (online) devices.
+  Set<String> get _verifiedOnlineIds => {
+    for (final entry in deviceOnline.entries)
+      if (entry.value) entry.key,
+  };
 
   /// Whether [id] advertises an older wire protocol (see [deviceNeedsUpdate]).
   bool isDeviceOutdated(String id) => deviceNeedsUpdate(
     deviceId: id,
     mdnsPeers: _coreNetworkingStarted ? peerBrowser.peers : const [],
     outdatedDeviceIds: outdatedDeviceIds,
+    verifiedOnlineIds: _verifiedOnlineIds,
   );
+
+  /// Whether [id]'s last ping was refused as stale (clocks out of sync).
+  bool isDeviceClockSkewed(String id) =>
+      clockSkewDeviceIds.contains(canonicalDeviceId(id));
+
+  /// Why a device cannot be sent to right now, for reconnect and file-send errors.
+  String unreachableMessage(String id) {
+    if (isDeviceOutdated(id)) return updateOtherDeviceMessage;
+    if (isDeviceClockSkewed(id)) {
+      final canonical = canonicalDeviceId(id);
+      final device = pairedStore.devices
+          .where((candidate) => candidate.id == canonical)
+          .firstOrNull;
+      return clockOutOfSyncMessage([device?.name ?? canonical]);
+    }
+    return 'That device is not reachable right now.';
+  }
 
   /// Whether [id] answered on the network as of the last liveness refresh.
   bool isDeviceOnline(String id) =>
@@ -841,6 +908,7 @@ class AppState extends ChangeNotifier {
       peerBrowser.peers,
       pairedStore.devices,
       outdatedDeviceIds: outdatedDeviceIds,
+      verifiedOnlineIds: _verifiedOnlineIds,
     );
     return clipSender.broadcast(clip, targets);
   }
@@ -875,7 +943,7 @@ class AppState extends ChangeNotifier {
     }
     final peer = connected ? resolvePeer(deviceId) : null;
     if (peer == null) {
-      lastError = 'That device is not reachable right now.';
+      lastError = unreachableMessage(deviceId);
       notifyListeners();
       return false;
     }

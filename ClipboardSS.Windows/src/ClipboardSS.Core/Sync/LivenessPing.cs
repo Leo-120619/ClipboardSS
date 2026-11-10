@@ -15,6 +15,11 @@ public enum PingOutcome
     Alive,
     /// <summary>The host answered 426: it speaks another protocol version.</summary>
     UpgradeRequired,
+    /// <summary>
+    /// The host answered <c>400 {"status":"stale"}</c>: its clock disagrees with ours by more than the
+    /// freshness window. Unauthenticated, so it never proves liveness.
+    /// </summary>
+    ClockSkew,
 }
 
 /// <summary>Inner payload of a <c>ping</c> envelope: only the <c>sentAt</c> the seal helpers stamp.</summary>
@@ -72,6 +77,7 @@ public static class LivenessPing
         DateTimeOffset? now = null)
     {
         if (statusCode == 426) return PingOutcome.UpgradeRequired;
+        if (statusCode == 400 && ResponseStatus(body) == "stale") return PingOutcome.ClockSkew;
         if (statusCode != 200) return PingOutcome.Unverified;
         try
         {
@@ -88,6 +94,23 @@ public static class LivenessPing
         catch (Exception exception) when (exception is JsonException or EnvelopeCryptoException or FormatException or ArgumentException)
         {
             return PingOutcome.Unverified;
+        }
+    }
+
+    private static string? ResponseStatus(byte[] body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("status", out var status) &&
+                status.ValueKind == JsonValueKind.String
+                ? status.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 

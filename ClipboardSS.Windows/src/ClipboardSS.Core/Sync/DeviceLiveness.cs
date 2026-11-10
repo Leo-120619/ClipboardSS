@@ -9,6 +9,8 @@ public sealed class LivenessReport
     public Dictionary<Guid, string> VerifiedHosts { get; } = [];
     /// <summary>Devices that answered 426 and no valid pong.</summary>
     public HashSet<Guid> UpgradeRequired { get; } = [];
+    /// <summary>Devices that answered <c>400 stale</c> (clock out of sync) and no valid pong.</summary>
+    public HashSet<Guid> ClockSkew { get; } = [];
 
     public IReadOnlySet<Guid> OnlineIds => VerifiedHosts.Keys.ToHashSet();
 
@@ -17,6 +19,8 @@ public sealed class LivenessReport
         foreach (var (id, host) in other.VerifiedHosts) VerifiedHosts.TryAdd(id, host);
         UpgradeRequired.UnionWith(other.UpgradeRequired);
         UpgradeRequired.ExceptWith(VerifiedHosts.Keys);
+        ClockSkew.UnionWith(other.ClockSkew);
+        ClockSkew.ExceptWith(VerifiedHosts.Keys);
     }
 }
 
@@ -55,9 +59,13 @@ public static class DeviceLiveness
                 case PingOutcome.Alive:
                     report.VerifiedHosts[device.Id] = host;
                     report.UpgradeRequired.Remove(device.Id);
+                    report.ClockSkew.Remove(device.Id);
                     return report;
                 case PingOutcome.UpgradeRequired:
                     report.UpgradeRequired.Add(device.Id);
+                    break;
+                case PingOutcome.ClockSkew:
+                    report.ClockSkew.Add(device.Id);
                     break;
             }
         }

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import CryptoKit
 import ClipboardCore
 @testable import ClipboardSS
 
@@ -181,6 +182,69 @@ struct AppModelLivenessTests {
 
         #expect(report.onlineIds == [macId])
     }
+}
+
+@Suite("Device liveness: clock skew and mDNS version claims")
+@MainActor
+struct AppModelLivenessStateTests {
+    private func makeModel(deviceId: UUID) async throws -> AppModel {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppModelLivenessTests-\(UUID().uuidString)", isDirectory: true)
+        let model = try makeTestAppModel(store: try ClipStore(storageDirectory: directory), pasteboard: LivenessFakePasteboard())
+        try await model.pairingCoordinator.pairedStore.addDevice(
+            PairedDevice(id: deviceId, name: "Mac", host: "192.0.2.1"),
+            key: SymmetricKey(size: .bits256)
+        )
+        await model.refreshPairedDevices()
+        return model
+    }
+
+    @Test("a stale-refused ping is reported as clock skew, not online, host unchanged")
+    func clockSkewIsVisible() async throws {
+        let id = UUID()
+        let report = await AppModel.computeLiveness(
+            devices: [PairedDevice(id: id, name: "Mac", host: "192.0.2.1")],
+            mdnsPeers: [Peer(id: id, name: "Mac", host: "192.0.2.9", port: 51888)],
+            ping: { _, host in host == "192.0.2.9" ? .clockSkew : .unverified }
+        )
+        #expect(report.clockSkew == [id])
+        #expect(report.onlineIds.isEmpty)
+        #expect(AppModel.hostUpdates(devices: [PairedDevice(id: id, name: "Mac", host: "192.0.2.1")], report: report).isEmpty)
+
+        let model = try await makeModel(deviceId: id)
+        await model.applyLiveness(report)
+        #expect(model.deviceClockSkewed(id))
+        #expect(!model.isDeviceOnline(id))
+        #expect(model.pairedDevices.first?.host == "192.0.2.1")
+        #expect(model.unreachableMessage(for: id) == ProtocolMismatch.clockOutOfSyncMessage(deviceNames: ["Mac"]))
+
+        // A later valid pong clears it.
+        await model.applyLiveness(LivenessReport(verifiedHosts: [id: "192.0.2.1"]))
+        #expect(!model.deviceClockSkewed(id))
+    }
+
+    @Test("a valid pong overrides an mDNS v1 claim: not needsUpdate, sent to the stored host")
+    func pongBeatsMdnsVersionClaim() async throws {
+        let id = UUID()
+        let impostor = Peer(id: id, name: "Mac", host: "192.0.2.66", port: 51888, protocolVersion: 1)
+        let device = PairedDevice(id: id, name: "Mac", host: "192.0.2.1")
+
+        #expect(AppModel.deviceNeedsUpdate(id, mdnsPeers: [impostor], outdatedDeviceIds: []))
+        #expect(!AppModel.deviceNeedsUpdate(id, mdnsPeers: [impostor], outdatedDeviceIds: [], verifiedOnlineIds: [id]))
+
+        let target = AppModel.composeSendTargets(mdnsPeers: [impostor], pairedDevices: [device], verifiedOnlineIds: [id])
+            .first { $0.id == id }
+        #expect(target?.needsUpdate == false)
+        #expect(target?.host == "192.0.2.1")
+    }
+}
+
+private final class LivenessFakePasteboard: PasteboardClient {
+    func currentChangeCount() -> Int { 0 }
+    func readSnapshot() -> ClipboardSnapshot { ClipboardSnapshot(text: nil, imageData: nil) }
+    func clearContents() {}
+    func writeText(_ text: String) {}
+    func writeImageData(_ data: Data) {}
 }
 
 private actor Probed {

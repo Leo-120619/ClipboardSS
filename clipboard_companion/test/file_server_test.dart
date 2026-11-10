@@ -144,6 +144,7 @@ void main() {
     '/v1/file/offer',
     '/v1/file/finish',
     '/v1/file/cancel',
+    '/v1/ping',
   ]) {
     test('v1EnvelopeGetsUpgradeRequired on $path', () async {
       final handler = (await makeServer(withReceiver: true)).buildHandler();

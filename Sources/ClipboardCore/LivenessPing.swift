@@ -7,6 +7,9 @@ public enum PingOutcome: Sendable, Equatable {
     case alive
     /// The host answered 426: it speaks another protocol version.
     case upgradeRequired
+    /// The host answered `400 {"status":"stale"}`: its clock disagrees with ours by more
+    /// than the freshness window. Unauthenticated, so it never proves liveness.
+    case clockSkew
     /// No evidence either way: unreachable, or an answer that is not a valid, fresh pong
     /// from the expected device for this ping.
     case unverified
@@ -75,6 +78,7 @@ public enum LivenessPing {
         now: Date = Date()
     ) -> PingOutcome {
         if statusCode == 426 { return .upgradeRequired }
+        if statusCode == 400, ProtocolMismatch.responseStatus(body) == "stale" { return .clockSkew }
         guard
             statusCode == 200,
             let envelope = try? JSONDecoder().decode(ClipEnvelope.self, from: body),

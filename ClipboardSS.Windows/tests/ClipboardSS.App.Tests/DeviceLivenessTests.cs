@@ -50,6 +50,20 @@ public sealed class DeviceLivenessTests
     }
 
     [Fact]
+    public void ValidPongOverridesMdnsV1Claim()
+    {
+        var id = Guid.NewGuid();
+        var impostor = new Peer(id, "Mac", "10.0.0.66", 51888, 1);
+        var online = new HashSet<Guid> { id };
+
+        Assert.True(AppModel.DeviceNeedsUpdate(id, [impostor], new HashSet<Guid>()));
+        Assert.False(AppModel.DeviceNeedsUpdate(id, [impostor], new HashSet<Guid>(), online));
+        var target = AppModel.ComposeSendTargets([impostor], [new PairedDevice(id, "Mac", "10.0.0.9")], null, online).Single();
+        Assert.False(target.NeedsUpdate);
+        Assert.Equal("10.0.0.9", target.Host);
+    }
+
+    [Fact]
     public void SendTargetsUseStoredHostNeverMdnsClaimedAddress()
     {
         var id = Guid.NewGuid();
