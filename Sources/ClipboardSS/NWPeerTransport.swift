@@ -97,6 +97,13 @@ public final class NWPeerTransport: PeerTransport, @unchecked Sendable {
                                         buffer.data.append(responseData)
                                     }
 
+                                    if buffer.data.count > HTTPCodec.maxBodySize + HTTPCodec.maxHeaderSize {
+                                        timeoutTask.cancel()
+                                        logToFile("NWPeerTransport: response exceeded \(buffer.data.count) bytes; aborting")
+                                        respond(.failure(URLError(.dataLengthExceedsMaximum)))
+                                        return
+                                    }
+
                                     do {
                                         _ = try HTTPCodec.parseResponse(buffer.data)
                                         timeoutTask.cancel()

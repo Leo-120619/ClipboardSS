@@ -12,12 +12,27 @@ public final class ClipServer: @unchecked Sendable {
     private var retryWorkItem: DispatchWorkItem?
     private var isStarted = false
     private var failureCount = 0
+    private let port: NWEndpoint.Port
+    private let advertisesService: Bool
+    /// How long an accepted connection may take to deliver one complete request.
+    private let requestDeadline: TimeInterval
 
-    public init(identity: DeviceIdentity, receiver: ClipReceiver, pairingCoordinator: PairingCoordinator, fileReceiver: FileReceiver? = nil) throws {
+    public init(
+        identity: DeviceIdentity,
+        receiver: ClipReceiver,
+        pairingCoordinator: PairingCoordinator,
+        fileReceiver: FileReceiver? = nil,
+        port: NWEndpoint.Port = 51888,
+        advertisesService: Bool = true,
+        requestDeadline: TimeInterval = 15
+    ) throws {
         self.identity = identity
         self.receiver = receiver
         self.pairingCoordinator = pairingCoordinator
         self.fileReceiver = fileReceiver
+        self.port = port
+        self.advertisesService = advertisesService
+        self.requestDeadline = requestDeadline
         self.listener = nil
         self.listener = try makeListener()
     }
@@ -43,6 +58,11 @@ public final class ClipServer: @unchecked Sendable {
         }
     }
 
+    /// The port the listener is bound to, once it is ready (tests use an ephemeral port).
+    var boundPort: NWEndpoint.Port? {
+        listenerQueue.sync { listener?.port }
+    }
+
     static func retryDelaySeconds(failureCount: Int) -> Int {
         var delay = 1
         for _ in 1..<max(1, failureCount) {
@@ -52,18 +72,20 @@ public final class ClipServer: @unchecked Sendable {
     }
 
     private func makeListener() throws -> NWListener {
-        let listener = try NWListener(using: .tcp, on: 51888)
-        var txt = NWTXTRecord()
-        txt["deviceId"] = identity.id.uuidString
-        txt["deviceName"] = Self.bonjourSafeTXTValue(identity.name)
-        txt["v"] = "1"
+        let listener = try NWListener(using: .tcp, on: port)
+        if advertisesService {
+            var txt = NWTXTRecord()
+            txt["deviceId"] = identity.id.uuidString
+            txt["deviceName"] = Self.bonjourSafeTXTValue(identity.name)
+            txt["v"] = "1"
 
-        listener.service = NWListener.Service(
-            name: identity.id.uuidString,
-            type: "_clipboardss._tcp",
-            domain: "local",
-            txtRecord: txt
-        )
+            listener.service = NWListener.Service(
+                name: identity.id.uuidString,
+                type: "_clipboardss._tcp",
+                domain: "local",
+                txtRecord: txt
+            )
+        }
         listener.newConnectionHandler = { [weak self] connection in
             self?.handleConnection(connection)
         }
@@ -87,7 +109,7 @@ public final class ClipServer: @unchecked Sendable {
             }
         }
 
-        logToFile("ClipServer: Starting listener on TCP 51888")
+        logToFile("ClipServer: Starting listener on TCP \(port)")
         listener?.start(queue: listenerQueue)
     }
 
@@ -96,7 +118,7 @@ public final class ClipServer: @unchecked Sendable {
         switch state {
         case .ready:
             failureCount = 0
-            logToFile("ClipServer: Listener ready on TCP 51888")
+            logToFile("ClipServer: Listener ready on TCP \(current.port.map { "\($0)" } ?? "?")")
         case .waiting(let error):
             logToFile("ClipServer: Listener waiting for network: \(error)")
         case .failed(let error):
@@ -126,19 +148,51 @@ public final class ClipServer: @unchecked Sendable {
         listenerQueue.asyncAfter(deadline: .now() + .seconds(delay), execute: workItem)
     }
     
+    /// Largest chunk requested from the socket per receive call.
+    static let receiveChunkSize = 64 * 1024
+
     private func handleConnection(_ connection: NWConnection) {
         logToFile("ClipServer: Accepted incoming connection from \(connection.endpoint)")
+
+        /// Tracks whether this connection has produced a complete request (or was otherwise
+        /// resolved) so the accept deadline knows whether to drop it.
+        final class RequestDeadlineState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var resolved = false
+
+            /// Returns true only for the first caller.
+            func resolve() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !resolved else { return false }
+                resolved = true
+                return true
+            }
+        }
+        let deadlineState = RequestDeadlineState()
+
         connection.start(queue: .global())
-        
+        DispatchQueue.global().asyncAfter(deadline: .now() + requestDeadline) {
+            guard deadlineState.resolve() else { return }
+            logToFile("ClipServer: No complete request within deadline; closing connection")
+            connection.cancel()
+        }
+
+        @Sendable func resolveDeadline() -> Bool {
+            deadlineState.resolve()
+        }
+
         @Sendable func receiveNext(accumulatedData: Data) {
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 100 * 1024 * 1024) { [weak self] data, _, isComplete, error in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: Self.receiveChunkSize) { [weak self] data, _, isComplete, error in
                 guard let self = self else {
+                    _ = resolveDeadline()
                     connection.cancel()
                     return
                 }
                 
                 if let error = error {
                     logToFile("ClipServer: Connection receive error: \(error)")
+                    _ = resolveDeadline()
                     connection.cancel()
                     return
                 }
@@ -150,20 +204,30 @@ public final class ClipServer: @unchecked Sendable {
                 
                 do {
                     let request = try HTTPCodec.parseRequest(nextData)
+                    // The deadline already fired and cancelled this connection.
+                    guard resolveDeadline() else { return }
                     logToFile("ClipServer: Successfully parsed request \(request.method) \(request.path)")
                     self.handleRequest(request, on: connection)
                 } catch HTTPCodecError.incomplete {
                     if isComplete {
                         logToFile("ClipServer: Connection closed before full request was received")
+                        _ = resolveDeadline()
                         connection.cancel()
                     } else {
                         receiveNext(accumulatedData: nextData)
                     }
                 } catch HTTPCodecError.payloadTooLarge {
+                    guard resolveDeadline() else { return }
                     logToFile("ClipServer: Request payload too large")
                     let resp = HTTPResponse(statusCode: 413, headers: [:], body: Data("Payload Too Large".utf8))
                     self.sendResponse(resp, on: connection)
+                } catch HTTPCodecError.headersTooLarge {
+                    guard resolveDeadline() else { return }
+                    logToFile("ClipServer: Request headers too large")
+                    let resp = HTTPResponse(statusCode: 431, headers: [:], body: Data("Request Header Fields Too Large".utf8))
+                    self.sendResponse(resp, on: connection)
                 } catch {
+                    guard resolveDeadline() else { return }
                     logToFile("ClipServer: Failed to parse request: \(error)")
                     let resp = HTTPResponse(statusCode: 400, headers: [:], body: Data("Bad Request".utf8))
                     self.sendResponse(resp, on: connection)

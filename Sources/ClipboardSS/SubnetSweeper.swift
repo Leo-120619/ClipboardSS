@@ -171,6 +171,12 @@ extension SubnetSweeper {
                         buffer.data.append(responseData)
                     }
 
+                    if buffer.data.count > HTTPCodec.maxBodySize + HTTPCodec.maxHeaderSize {
+                        timeoutTask.cancel()
+                        respond(.failure(URLError(.dataLengthExceedsMaximum)))
+                        return
+                    }
+
                     do {
                         _ = try HTTPCodec.parseResponse(buffer.data)
                         timeoutTask.cancel()
