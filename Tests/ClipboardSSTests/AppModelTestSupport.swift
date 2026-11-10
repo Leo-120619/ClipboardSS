@@ -8,7 +8,10 @@ func makeTestAppModel(
     store: ClipStore,
     pasteboard: PasteboardClient,
     launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
-    screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService()
+    screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
+    snippetStore: TextSnippetStore = TextSnippetStore(
+        defaults: UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)") ?? .standard
+    )
 ) throws -> AppModel {
     let identity = DeviceIdentity(id: UUID(), name: "Test Mac")
     let pairedStore = try PairedDeviceStore(
@@ -54,6 +57,7 @@ func makeTestAppModel(
         screenTextCaptureService: screenTextCaptureService,
         launchAtLogin: launchAtLogin,
         pasteboard: pasteboard,
+        snippetStore: snippetStore,
         pairingCoordinator: pairingCoordinator,
         peerBrowser: peerBrowser,
         clipSender: clipSender,

@@ -14,6 +14,10 @@ final class HotKeyManager {
     private var clipboardCallback: (() -> Void)?
     private var screenshotCallback: (() -> Void)?
     private var screenTextCallback: (() -> Void)?
+    private var snippetCallback: ((UUID) -> Void)?
+    /// Carbon hot key IDs at or above this value belong to text snippets.
+    private static let firstSnippetHotKeyID: UInt32 = 1000
+    private var snippetIDsByHotKeyID: [UInt32: UUID] = [:]
     private var eventHandler: EventHandlerRef?
     private var registeredHotKeys: [UInt32: EventHotKeyRef] = [:]
 
@@ -38,14 +42,24 @@ final class HotKeyManager {
         }
     }
 
+    /// Global shortcuts for text snippets. Snippets without a shortcut are skipped.
+    var snippetShortcuts: [SnippetHotKey] = [] {
+        didSet {
+            guard snippetShortcuts != oldValue else { return }
+            registerHotKeys()
+        }
+    }
+
     func start(
         clipboardCallback: @escaping () -> Void,
         screenshotCallback: @escaping () -> Void,
-        screenTextCallback: @escaping () -> Void = {}
+        screenTextCallback: @escaping () -> Void = {},
+        snippetCallback: @escaping (UUID) -> Void = { _ in }
     ) {
         self.clipboardCallback = clipboardCallback
         self.screenshotCallback = screenshotCallback
         self.screenTextCallback = screenTextCallback
+        self.snippetCallback = snippetCallback
         installEventHandlerIfNeeded()
         registerHotKeys()
     }
@@ -60,6 +74,7 @@ final class HotKeyManager {
         clipboardCallback = nil
         screenshotCallback = nil
         screenTextCallback = nil
+        snippetCallback = nil
     }
 
     private func installEventHandlerIfNeeded() {
@@ -118,11 +133,27 @@ final class HotKeyManager {
         if let screenTextShortcut {
             register(screenTextShortcut, id: .screenText)
         }
+
+        let builtInShortcuts = Set([clipboardShortcut, screenshotShortcut, screenTextShortcut].compactMap { $0 })
+        var usedShortcuts = builtInShortcuts
+        for (offset, snippet) in snippetShortcuts.enumerated() {
+            // Built-in shortcuts win; a duplicate snippet shortcut only fires the first snippet.
+            guard usedShortcuts.insert(snippet.shortcut).inserted else { continue }
+            let hotKeyID = Self.firstSnippetHotKeyID + UInt32(offset)
+            if register(snippet.shortcut, rawID: hotKeyID) {
+                snippetIDsByHotKeyID[hotKeyID] = snippet.id
+            }
+        }
     }
 
     private func register(_ shortcut: KeyboardShortcut, id: HotKeyID) {
+        register(shortcut, rawID: id.rawValue)
+    }
+
+    @discardableResult
+    private func register(_ shortcut: KeyboardShortcut, rawID: UInt32) -> Bool {
         var hotKeyRef: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: id.rawValue)
+        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: rawID)
         let status = RegisterEventHotKey(
             UInt32(shortcut.keyCode),
             shortcut.carbonModifierFlags,
@@ -133,8 +164,10 @@ final class HotKeyManager {
         )
 
         if status == noErr, let hotKeyRef {
-            registeredHotKeys[id.rawValue] = hotKeyRef
+            registeredHotKeys[rawID] = hotKeyRef
+            return true
         }
+        return false
     }
 
     private func unregisterHotKeys() {
@@ -142,9 +175,15 @@ final class HotKeyManager {
             UnregisterEventHotKey(hotKeyRef)
         }
         registeredHotKeys.removeAll()
+        snippetIDsByHotKeyID.removeAll()
     }
 
     private func handleRegisteredHotKey(id: UInt32) {
+        if let snippetID = snippetIDsByHotKeyID[id] {
+            snippetCallback?(snippetID)
+            return
+        }
+
         if id == HotKeyID.clipboard.rawValue {
             clipboardCallback?()
             return

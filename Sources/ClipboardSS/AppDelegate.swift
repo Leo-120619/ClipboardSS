@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var screenTextOverlayController: ScreenTextOverlayController?
     private var model: AppModel?
     private var hotKeyManager: HotKeyManager?
+    private var snippetPaster: SnippetPaster?
     private var monitorTimer: Timer?
     private var clipboardMonitor: ClipboardMonitor?
     private var shareStagingDirectory: URL?
@@ -17,7 +18,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.applicationIconImage = ClipboardSSLogo.image(size: NSSize(width: 128, height: 128))
-        VisionTextRecognition.warmUp()
         let receivedFileNotifications = ReceivedFileNotificationService()
         receivedFileNotifications.initialize()
         self.receivedFileNotifications = receivedFileNotifications
@@ -115,6 +115,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.onScreenTextShortcutChanged = { [weak hotKeyManager] shortcut in
                 hotKeyManager?.screenTextShortcut = shortcut
             }
+            let snippetPaster = SnippetPaster()
+            self.snippetPaster = snippetPaster
+            snippetPaster.onPasteboardWritten = { [weak monitor] in
+                monitor?.ignoreCurrentChange()
+            }
+            hotKeyManager.snippetShortcuts = TextSnippet.hotKeys(for: model.snippets)
+            model.onSnippetsChanged = { [weak hotKeyManager] snippets in
+                hotKeyManager?.snippetShortcuts = TextSnippet.hotKeys(for: snippets)
+            }
+            model.onSnippetPasteRequested = { [weak snippetPaster] text in
+                snippetPaster?.paste(text)
+            }
             model.onPasteRequested = { [weak windowController] request in
                 windowController?.performPaste(request)
             }
@@ -146,6 +158,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.captureScreenshot()
             } screenTextCallback: {
                 model.startScreenTextSelection()
+            } snippetCallback: { snippetID in
+                // The hot key fires while another app is frontmost, so a
+                // failure (missing Accessibility access) has to bring the
+                // window forward for its alert to be seen.
+                guard !model.pasteSnippet(snippetID) else { return }
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                windowController.show()
             }
 
             monitorTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in

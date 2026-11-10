@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$project = Join-Path $projectRoot 'src\ClipboardSS.App\ClipboardSS.App.csproj'
+$project = Join-Path $projectRoot 'src\ClipboardSS.WinApp\ClipboardSS.App.csproj'
 $manifestTemplate = Join-Path $projectRoot 'Packaging\AppxManifest.xml'
 $assets = Join-Path $projectRoot 'Packaging\Assets'
 $artifactRoot = Join-Path $projectRoot 'artifacts'

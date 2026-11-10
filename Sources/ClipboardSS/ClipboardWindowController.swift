@@ -117,7 +117,8 @@ private final class ClipboardWindow: NSPanel {
     }
 }
 
-private enum PasteEventSender {
+/// Injects Command-V into the frontmost app. Requires Accessibility access.
+enum PasteEventSender {
     static func sendPasteShortcut() {
         let source = CGEventSource(stateID: .combinedSessionState)
         let keyCode = CGKeyCode(9)

@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var clipboardShortcut: KeyboardShortcut
     @Published var screenshotShortcut: KeyboardShortcut?
     @Published var screenTextShortcut: KeyboardShortcut?
+    @Published private(set) var snippets: [TextSnippet]
     @Published var launchAtLoginEnabled: Bool
     @Published var showCoachMarks: Bool
     @Published var currentCoachMarkIndex = 0
@@ -57,6 +58,9 @@ final class AppModel: ObservableObject {
     var onClipboardShortcutChanged: ((KeyboardShortcut) -> Void)?
     var onScreenshotShortcutChanged: ((KeyboardShortcut?) -> Void)?
     var onScreenTextShortcutChanged: ((KeyboardShortcut?) -> Void)?
+    var onSnippetsChanged: (([TextSnippet]) -> Void)?
+    var onSnippetPasteRequested: ((String) -> Void)?
+    private let snippetStore: TextSnippetStore
     var onPasteRequested: ((PasteRequest) -> Void)?
     var onPreferencesRequested: (() -> Void)?
     var onCloseRequested: (() -> Void)?
@@ -71,6 +75,7 @@ final class AppModel: ObservableObject {
         screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
         pasteboard: PasteboardClient,
+        snippetStore: TextSnippetStore = TextSnippetStore(),
         pairingCoordinator: PairingCoordinator,
         peerBrowser: PeerBrowser,
         clipSender: ClipSender,
@@ -85,6 +90,8 @@ final class AppModel: ObservableObject {
         self.screenTextCaptureService = screenTextCaptureService
         self.launchAtLogin = launchAtLogin
         self.pasteboard = pasteboard
+        self.snippetStore = snippetStore
+        self.snippets = snippetStore.load()
         self.pairingCoordinator = pairingCoordinator
         self.peerBrowser = peerBrowser
         self.clipSender = clipSender
@@ -730,6 +737,67 @@ final class AppModel: ObservableObject {
     func setScreenTextShortcut(_ shortcut: KeyboardShortcut?) {
         screenTextShortcut = shortcut
         onScreenTextShortcutChanged?(shortcut)
+    }
+
+    func addSnippet() {
+        snippets.append(TextSnippet())
+        saveSnippets()
+    }
+
+    func updateSnippet(_ snippet: TextSnippet) {
+        guard let index = snippets.firstIndex(where: { $0.id == snippet.id }) else { return }
+        var snippet = snippet
+        let previousShortcut = snippets[index].shortcut
+        if let shortcut = snippet.shortcut, shortcut != previousShortcut,
+           let conflict = snippetShortcutConflict(shortcut, excluding: snippet.id) {
+            lastError = conflict
+            snippet.shortcut = previousShortcut
+        }
+        snippets[index] = snippet
+        saveSnippets()
+    }
+
+    /// Explains why `shortcut` cannot be given to the snippet with `id`, or nil
+    /// if it is free. Built-in shortcuts and other snippets' shortcuts are taken.
+    func snippetShortcutConflict(_ shortcut: KeyboardShortcut, excluding id: UUID) -> String? {
+        let name = shortcut.displayName
+        if shortcut == clipboardShortcut {
+            return "\(name) already opens the clipboard window. Choose a different shortcut."
+        }
+        if shortcut == screenshotShortcut {
+            return "\(name) is already the screenshot shortcut. Choose a different shortcut."
+        }
+        if shortcut == screenTextShortcut {
+            return "\(name) is already the screen text shortcut. Choose a different shortcut."
+        }
+        if let other = snippets.first(where: { $0.id != id && $0.shortcut == shortcut }) {
+            let otherName = other.name.isEmpty ? "another snippet" : "the snippet “\(other.name)”"
+            return "\(name) is already used by \(otherName). Choose a different shortcut."
+        }
+        return nil
+    }
+
+    func deleteSnippet(_ id: UUID) {
+        snippets.removeAll { $0.id == id }
+        saveSnippets()
+    }
+
+    /// Returns false when the paste could not be performed and `lastError`
+    /// explains why, so the caller can bring the window forward to show it.
+    @discardableResult
+    func pasteSnippet(_ id: UUID) -> Bool {
+        guard let snippet = snippets.first(where: { $0.id == id }), !snippet.text.isEmpty else { return true }
+        guard AppPermission.accessibility.isGranted else {
+            lastError = AppPermission.accessibility.deniedMessage
+            return false
+        }
+        onSnippetPasteRequested?(snippet.text)
+        return true
+    }
+
+    private func saveSnippets() {
+        snippetStore.save(snippets)
+        onSnippetsChanged?(snippets)
     }
 
     func setLaunchAtLoginEnabled(_ enabled: Bool) {

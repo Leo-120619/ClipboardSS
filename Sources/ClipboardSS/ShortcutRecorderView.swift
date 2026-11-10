@@ -26,7 +26,7 @@ struct ShortcutRecorderView: View {
     }
 }
 
-private struct ShortcutRecorderField: NSViewRepresentable {
+struct ShortcutRecorderField: NSViewRepresentable {
     @Binding var shortcut: KeyboardShortcut?
 
     func makeNSView(context: Context) -> ShortcutRecorderButton {
@@ -45,7 +45,7 @@ private struct ShortcutRecorderField: NSViewRepresentable {
     }
 }
 
-private final class ShortcutRecorderButton: NSButton {
+final class ShortcutRecorderButton: NSButton {
     var shortcut: KeyboardShortcut? {
         didSet {
             updateTitle()

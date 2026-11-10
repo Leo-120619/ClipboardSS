@@ -11,7 +11,7 @@ dotnet build ClipboardSS.Windows.sln
 dotnet test ClipboardSS.Windows.sln
 ```
 
-The WPF app targets Windows 10 build 19041 or later. Run the `ClipboardSS.App` project from Visual Studio or start its build output directly; packaging is optional for development. Core tests also run on macOS and Linux.
+The WPF app targets Windows 10 build 19041 or later. Run the `ClipboardSS.App` project (folder `src/ClipboardSS.WinApp`, named so macOS does not mistake it for an app bundle) from Visual Studio or start its build output directly; packaging is optional for development. Core tests also run on macOS and Linux.
 
 The default dashboard shortcut is `Ctrl+Alt+V`. Shortcut conflicts are reported at startup and can be changed immediately in Preferences. Windows blocks paste injection into elevated applications when ClipboardSS is running normally; keep the destination app at the same privilege level.
 

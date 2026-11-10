@@ -59,6 +59,13 @@ public final class ClipboardMonitor {
         self.store = store
     }
 
+    /// Treats the pasteboard's current contents as already seen, so the next
+    /// `poll()` does not record them. Used when the app itself writes to the
+    /// pasteboard temporarily (for example when pasting a text snippet).
+    public func ignoreCurrentChange() {
+        lastChangeCount = pasteboard.currentChangeCount()
+    }
+
     public func poll() throws {
         let currentChangeCount = pasteboard.currentChangeCount()
         guard currentChangeCount != lastChangeCount else {

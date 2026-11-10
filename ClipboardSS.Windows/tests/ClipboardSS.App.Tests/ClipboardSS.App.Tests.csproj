@@ -12,6 +12,6 @@
     <PackageReference Include="xunit.v3" Version="3.2.2" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/ClipboardSS.App/ClipboardSS.App.csproj" />
+    <ProjectReference Include="../../src/ClipboardSS.WinApp/ClipboardSS.App.csproj" />
   </ItemGroup>
 </Project>

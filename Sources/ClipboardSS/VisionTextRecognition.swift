@@ -4,9 +4,11 @@ import Foundation
 import Vision
 
 /// Picks the Vision recognition level. The first `.accurate` request compiles a Neural
-/// Engine model; on macOS 27 that has taken over a minute and can still fail (E5RT
-/// error 13, surfacing as CRImageReaderError error 1). Callers get `.fast` until a
-/// background warm-up proves `.accurate` is loaded, so OCR never waits on the compile.
+/// Engine model (ANECompilerService); on macOS 27 that has taken over a minute and can
+/// still fail (E5RT error 13, surfacing as CRImageReaderError error 1). Callers get
+/// `.fast` until a background warm-up proves `.accurate` is loaded, so OCR never waits
+/// on the compile. The warm-up starts on the first OCR request, not at app launch, so
+/// the app does no Neural Engine work in the background until the user asks for OCR.
 final class RecognitionLevelGate: @unchecked Sendable {
     private enum State { case cold, warming, ready, unavailable }
 
@@ -38,8 +40,8 @@ final class RecognitionLevelGate: @unchecked Sendable {
 enum VisionTextRecognition {
     static let gate = RecognitionLevelGate()
 
-    /// Loads the `.accurate` model off the main thread so the first screen-text or
-    /// screenshot OCR doesn't pay for it. Safe to call more than once.
+    /// Loads the `.accurate` model off the main thread so later screen-text or screenshot
+    /// OCR doesn't pay for it. Called lazily from `perform(on:)`; safe to call more than once.
     static func warmUp() {
         guard gate.claimWarmUp() else { return }
         Task.detached(priority: .utility) {
@@ -50,6 +52,7 @@ enum VisionTextRecognition {
 
     /// Synchronous and can be slow — never call this on the main thread.
     static func perform(on image: CGImage) throws -> VNRecognizeTextRequest {
+        warmUp()
         if gate.level == .accurate {
             do {
                 return try recognize(image, level: .accurate)

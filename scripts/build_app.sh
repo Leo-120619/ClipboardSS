@@ -91,6 +91,9 @@ fi
 rm -rf "$APP_DIR"
 mkdir -p "$(dirname "$APP_DIR")"
 ditto "$BUILT_APP" "$APP_DIR"
+# iCloud Drive tags build products with extended attributes that codesign rejects
+# ("resource fork, Finder information, or similar detritus not allowed").
+xattr -cr "$APP_DIR"
 
 # 4. Stamp the app icon.
 generate_app_icon "$APP_DIR"

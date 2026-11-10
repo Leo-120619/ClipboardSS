@@ -52,6 +52,26 @@ struct ClipboardServiceTests {
         #expect(store.items.map(\.text) == ["two", "one"])
     }
 
+    @Test("monitor skips a pasteboard change the app marked as its own")
+    func monitorSkipsIgnoredChange() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: temporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+
+        pasteboard.changeCount = 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "snippet", imageData: nil)
+        monitor.ignoreCurrentChange()
+        try monitor.poll()
+
+        #expect(store.items.isEmpty)
+
+        pasteboard.changeCount = 2
+        pasteboard.snapshot = ClipboardSnapshot(text: "user copy", imageData: nil)
+        try monitor.poll()
+
+        #expect(store.items.map(\.text) == ["user copy"])
+    }
+
     @Test("PairedDevice persists optional host and legacy records decode")
     func pairedDeviceHostRoundTrip() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
