@@ -7,12 +7,15 @@ struct PhotoEditorView: View {
     @ObservedObject var model: AppModel
     /// The image at full pixel resolution; all editor geometry is in these pixels.
     private let sourcePixels: CGImage?
+    /// Source pixels per image point (2 for a Retina capture); brush sizes are in points.
+    private let pixelsPerPoint: CGFloat
     @Environment(\.dismiss) private var dismiss
 
     init(image: NSImage, model: AppModel) {
         self.image = image
         self.model = model
         self.sourcePixels = Self.pixelImage(of: image)
+        self.pixelsPerPoint = Self.pixelsPerPoint(of: image, source: sourcePixels)
     }
 
     // MARK: - Editor Tooling
@@ -340,7 +343,7 @@ struct PhotoEditorView: View {
                                 localContext.stroke(
                                     pathSwiftUI,
                                     with: .color(brushColor.opacity(brushOpacity)),
-                                    style: StrokeStyle(lineWidth: brushSize * lineScale, lineCap: .round, lineJoin: .round)
+                                    style: StrokeStyle(lineWidth: Self.strokeWidth(brushSize: brushSize, pixelsPerPoint: pixelsPerPoint) * lineScale, lineCap: .round, lineJoin: .round)
                                 )
                             }
                         }
@@ -360,7 +363,7 @@ struct PhotoEditorView: View {
                                         let newPath = DrawingPath(
                                             points: currentPoints,
                                             color: brushType == .eraser ? .clear : brushColor,
-                                            lineWidth: brushSize,
+                                            lineWidth: Self.strokeWidth(brushSize: brushSize, pixelsPerPoint: pixelsPerPoint),
                                             opacity: brushType == .eraser ? 1.0 : brushOpacity,
                                             isEraser: brushType == .eraser
                                         )
@@ -1014,11 +1017,22 @@ extension PhotoEditorView {
     /// Renders the edited image at the source's pixel resolution, keeping its points-per-pixel.
     nonisolated static func renderedImage(from image: NSImage, state: EditingState) -> NSImage? {
         guard let source = pixelImage(of: image), let output = render(source, state: state) else { return nil }
-        let pixelsPerPoint = image.size.width > 0 ? CGFloat(source.width) / image.size.width : 1
+        let pixelsPerPoint = pixelsPerPoint(of: image, source: source)
         return NSImage(
             cgImage: output,
             size: CGSize(width: CGFloat(output.width) / pixelsPerPoint, height: CGFloat(output.height) / pixelsPerPoint)
         )
+    }
+
+    nonisolated static func pixelsPerPoint(of image: NSImage, source: CGImage?) -> CGFloat {
+        guard let source, image.size.width > 0 else { return 1 }
+        return CGFloat(source.width) / image.size.width
+    }
+
+    /// A brush size in image points as a stroke width in source pixels, so a brush is the same
+    /// thickness relative to the image on 1x and 2x captures.
+    nonisolated static func strokeWidth(brushSize: CGFloat, pixelsPerPoint: CGFloat) -> CGFloat {
+        brushSize * pixelsPerPoint
     }
 
     /// The largest bitmap representation, so Retina images are edited at full resolution.

@@ -91,6 +91,9 @@ struct PhotoEditorRenderTests {
         // through its inverse. Centre of source pixel (3, 1), yellow, as shown on screen:
         let display = PhotoEditorView.displayTransform(state: state, imagePixelSize: pixelSize, viewSize: viewSize)
         let onScreen = CGPoint(x: 3.5, y: 1.5).applying(display)
+        // Independently: the 2x2 crop fitted into 400x300 scales by 150 with offset (50, 0),
+        // so output pixel centre (1.5, 1.5) is at (275, 225).
+        #expect(abs(onScreen.x - 275) < 0.001 && abs(onScreen.y - 225) < 0.001, "on screen at \(onScreen)")
         let stored = onScreen.applying(display.inverted())
         state.paths = [DrawingPath(
             points: [stored, CGPoint(x: stored.x + 0.01, y: stored.y)],
@@ -106,6 +109,59 @@ struct PhotoEditorRenderTests {
         #expect(output.first?.count == 2)
         #expect(output[safe: 1]?[safe: 1]?.isClose(to: .magenta) == true, "stroke missed the yellow pixel")
         #expect(output[safe: 0]?[safe: 0]?.isClose(to: .green) == true)
+    }
+
+    @Test("after a 90° turn of a non-square image, presets and the preview use the rotated pixel size")
+    func rotated90NonSquareImageUsesRotatedGeometry() {
+        let pixelSize = CGSize(width: 1600, height: 900)
+        var state = PhotoEditorView.EditingState()
+        state.rotation = .pi / 2 // output is 900 x 1600
+
+        let crop = PhotoEditorView.aspectCrop(ratio: 16.0 / 9.0, state: state, imagePixelSize: pixelSize)
+        // 16:9 on a 900 x 1600 frame: full width, 506.25 pixels tall, centred.
+        #expect(abs(crop.width * 900 - 900) < 0.5)
+        #expect(abs(crop.height * 1600 - 506.25) < 0.5)
+        #expect(abs(crop.midY - 0.5) < 0.001)
+
+        // 900 x 1600 fitted into 400 x 400: scale 0.25, offset (87.5, 0). Rotating clockwise
+        // puts the source's top-left pixel corner at the output's top-right.
+        let display = PhotoEditorView.displayTransform(state: state, imagePixelSize: pixelSize, viewSize: CGSize(width: 400, height: 400))
+        let topLeft = CGPoint.zero.applying(display)
+        #expect(abs(topLeft.x - 312.5) < 0.001 && abs(topLeft.y - 0) < 0.001, "top left at \(topLeft)")
+    }
+
+    @Test("a brush is twice as many pixels wide on a 2x image, so it matches 1x relative to the image")
+    func brushSizeScalesWithRetinaPixels() throws {
+        let rep = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 200, pixelsHigh: 100,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        rep.size = CGSize(width: 100, height: 50)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+
+        let brushSize: CGFloat = 10
+        let source = try #require(PhotoEditorView.pixelImage(of: image))
+        let width = PhotoEditorView.strokeWidth(
+            brushSize: brushSize,
+            pixelsPerPoint: PhotoEditorView.pixelsPerPoint(of: image, source: source)
+        )
+        var state = PhotoEditorView.EditingState()
+        state.paths = [DrawingPath(
+            points: [CGPoint(x: 20, y: 50), CGPoint(x: 180, y: 50)],
+            color: Color(.sRGB, red: 1, green: 0, blue: 1, opacity: 1),
+            lineWidth: width,
+            opacity: 1,
+            isEraser: false
+        )]
+
+        let rendered = try #require(PhotoEditorView.renderedImage(from: image, state: state))
+        let output = try #require(rendered.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let column = try Self.pixels(of: output).map { $0[100] }
+        let covered = column.filter { $0.a > 128 }.count
+
+        #expect(abs(covered - Int(brushSize * 2)) <= 1, "stroke is \(covered) px thick")
     }
 
     // MARK: - Helpers
