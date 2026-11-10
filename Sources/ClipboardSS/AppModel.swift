@@ -44,6 +44,9 @@ final class AppModel: ObservableObject {
     @Published var currentCoachMarkIndex = 0
     @Published var showDevices = false
     @Published var joinInProgress = false
+    /// Devices found by the last "Scan network" (subnet sweep), offered for pairing next to mDNS peers.
+    @Published private(set) var sweptPeers: [Peer] = []
+    @Published private(set) var scanInProgress = false
     @Published private(set) var pairedDevices: [PairedDevice] = []
     /// Live reachability per paired device. In-memory only: it is rebuilt from scratch
     /// on every refresh, so unpaired devices drop out on their own.
@@ -431,7 +434,24 @@ final class AppModel: ObservableObject {
         pairingCoordinator.stopHosting()
     }
 
-    func joinWithCode(_ code: String) {
+    /// Unpaired-or-paired devices the user can pick to pair with: mDNS peers plus the last sweep.
+    var pairingCandidates: [Peer] {
+        Self.composeJoinCandidates(mdnsPeers: peerBrowser.peers, sweptPeers: sweptPeers)
+    }
+
+    /// Sweeps the local subnet for devices mDNS missed, so the user can pick one to pair with.
+    func scanForDevices() {
+        guard !scanInProgress else { return }
+        scanInProgress = true
+        Task {
+            defer { scanInProgress = false }
+            sweptPeers = await SubnetSweeper.sweep()
+        }
+    }
+
+    /// Starts pairing with the one device the user selected. On success both screens show a
+    /// number; the user then calls `confirmJoin()` or `cancelJoin()`.
+    func joinWithCode(_ code: String, peer: Peer) {
         guard code.count == 6, code.allSatisfy(\.isNumber) else {
             lastError = "Enter a 6-digit pairing code."
             return
@@ -442,29 +462,48 @@ final class AppModel: ObservableObject {
 
         Task {
             defer { joinInProgress = false }
-
-            let mdnsCandidates = peerBrowser.peers
-            switch await tryPairing(with: mdnsCandidates, code: code) {
-            case .paired: return
-            case .alreadyPaired:
-                lastError = Self.alreadyPairedMessage
-                return
-            case .notAccepted: break
+            do {
+                try await pairingCoordinator.startPairing(with: peer, code: code)
+            } catch {
+                lastError = Self.joinErrorMessage(error)
             }
+        }
+    }
 
-            let sweptCandidates = Self.composeJoinCandidates(
-                mdnsPeers: mdnsCandidates,
-                sweptPeers: await SubnetSweeper.sweep()
-            )
-            switch await tryPairing(with: sweptCandidates, code: code) {
-            case .paired: return
-            case .alreadyPaired:
-                lastError = Self.alreadyPairedMessage
-                return
-            case .notAccepted: break
+    /// The user confirmed the numbers match on this device.
+    func confirmJoin() {
+        joinInProgress = true
+        lastError = nil
+        Task {
+            defer { joinInProgress = false }
+            do {
+                try await pairingCoordinator.confirmPairing()
+                await refreshPairedDevices()
+                await refreshDeviceLiveness()
+            } catch {
+                lastError = Self.joinErrorMessage(error)
             }
+        }
+    }
 
-            lastError = "No device accepted that code. Make sure the other device is showing a code on the same Wi-Fi."
+    func cancelJoin() {
+        pairingCoordinator.cancelPairing()
+    }
+
+    func confirmHostedPairing() {
+        pairingCoordinator.confirmHostedPairing()
+    }
+
+    func cancelHostedPairing() {
+        pairingCoordinator.cancelHostedPairing()
+    }
+
+    static func joinErrorMessage(_ error: Error) -> String {
+        switch error {
+        case PairingError.alreadyPaired: alreadyPairedMessage
+        case PairingError.timedOut: "The other device did not confirm in time. Show a new code and try again."
+        case PairingError.rejected: "The other device did not accept. Check the code, or show a new one, and try again."
+        default: "Could not reach that device. Make sure it is showing a code on the same Wi-Fi."
         }
     }
 
@@ -937,25 +976,6 @@ final class AppModel: ObservableObject {
     }
 
     static let alreadyPairedMessage = "Remove the existing pairing on the other device first"
-
-    private enum JoinOutcome { case paired, alreadyPaired, notAccepted }
-
-    private func tryPairing(with candidates: [Peer], code: String) async -> JoinOutcome {
-        for peer in candidates {
-            do {
-                try await pairingCoordinator.startPairing(with: peer, code: code)
-                await refreshPairedDevices()
-                await refreshDeviceLiveness()
-                return .paired
-            } catch PairingError.alreadyPaired {
-                // The target accepted the code but already knows this device; its code is now spent.
-                return .alreadyPaired
-            } catch {
-                continue
-            }
-        }
-        return .notAccepted
-    }
 
     func cleanupExpiredClips() throws {
         try store.cleanupExpiredClips()

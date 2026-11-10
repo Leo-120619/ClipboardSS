@@ -35,41 +35,70 @@ paired device always go to its stored host, never to an address mDNS or `/v1/id`
   }
   ```
 
-## Pairing Protocol
+## Pairing Protocol (v2: commit-reveal + on-screen number)
 
-The target must be in pairing mode before it accepts `POST /v1/pair/start`. Pairing mode shows a short-lived 6-digit code to the user. The initiator enters that code, and both peers use the ASCII bytes of the code as HKDF `info`/`sharedInfo`.
+Pairing endpoints are plaintext JSON (no envelope). The target must be in pairing mode: it
+shows a short-lived 6-digit code (180 s). The user picks **one** device on the initiator,
+enters the code there, and then both screens show a 6-digit `confirmCode` with both device
+names. The user confirms on both devices that the numbers match. The initiator commits to its
+key before seeing the target's, so neither side can grind keys toward a chosen number, and a
+device that answers `/v1/pair/start` without knowing the code learns nothing it can test offline
+until both users have confirmed.
 
-1. **Initiator -> Target**:
-   `POST /v1/pair/start`
+1. **Initiator -> Target**: `POST /v1/pair/start`
    ```json
    {
-    "deviceId": "<lowercase uuid>",
+     "deviceId": "<lowercase uuid>",
      "deviceName": "<string>",
-     "ephemeralPublicKey": "<base64>" // X25519 public key
+     "commitment": "<base64>" // SHA256(initiatorPublicKey || salt), salt = 16 random bytes
    }
    ```
-2. **Target -> Initiator** (on acceptance):
-   `200 OK`
-   ```json
-   {
-    "deviceId": "<lowercase uuid>",
-     "deviceName": "<string>",
-     "ephemeralPublicKey": "<base64>" // X25519 public key
-   }
-   ```
-3. **Both sides compute shared secret**:
-   - `sharedSecret` = X25519 DH(localPrivate, remotePublic)
-   - `pairKey` (32 bytes) = HKDF-SHA256(secret=sharedSecret, salt="ClipboardSS_PairKey", info=ASCII 6-digit code)
-   - `confirmCode` (6 digits) = Derived from HKDF-SHA256(secret=sharedSecret, salt="ClipboardSS_ConfirmCode", info=ASCII 6-digit code)
-4. **Initiator -> Target** (confirmation proof):
-   `POST /v1/pair/confirm`
-   ```json
-   {
-    "deviceId": "<lowercase uuid>",
-     "proof": "<base64>" // HMAC-SHA256(key=pairKey, message="confirm" + initiatorId + targetId)
-   }
-   ```
-5. **Target -> Initiator**: `200 OK` (if proof is valid, pair is finalized).
+2. **Target -> Initiator**: `200`
+   `{"deviceId": "<lowercase uuid>", "deviceName": "<string>", "ephemeralPublicKey": "<base64>"}`
+   (X25519 public key). `403` when no code is active, another initiator is pending, or the
+   commitment is not 32 bytes. The same deviceId may restart until it has revealed.
+3. **Initiator -> Target**: `POST /v1/pair/reveal`
+   `{"deviceId": "<lowercase uuid>", "ephemeralPublicKey": "<base64>", "salt": "<base64>"}`
+   → `200 {"status":"ok"}` · `401` no active code or no matching pending initiator ·
+   `400` the key and salt do not open the commitment (constant-time check).
+4. **Both compute**, with `sharedSecret` = X25519(localPrivate, remotePublic) and
+   `transcript` = ASCII code `||` initiatorPublicKey `||` targetPublicKey (raw 32-byte keys):
+   - `pairKey` (32 bytes) = HKDF-SHA256(secret=sharedSecret, salt="ClipboardSS_PairKey", info=transcript)
+   - `confirmCode` = HKDF-SHA256(secret=sharedSecret, salt="ClipboardSS_ConfirmCode", info=transcript, 4 bytes),
+     read as a big-endian UInt32, mod 1 000 000, zero-padded to 6 digits.
+5. **Both screens** show `confirmCode` and both device names with Confirm / Cancel. Confirm on
+   the target is local. Confirm on the initiator sends `POST /v1/pair/confirm`
+   `{"deviceId": "<lowercase uuid>", "proof": "<base64>"}` with
+   `proof` = HMAC-SHA256(key=pairKey, message="confirm" + initiatorId + targetId) (lowercase UUIDs).
+   The target checks the proof (constant-time), then **holds the request up to 60 s** until its
+   own user decides:
+   - `200 {"status":"ok"}`: both users confirmed; the target has stored the pairing, and the
+     initiator stores it on this answer. Neither side stores a key earlier.
+   - `401`: no active code, wrong deviceId or proof, or the target's user cancelled.
+   - `408 {"status":"timeout"}`: the target's user did not confirm within 60 s.
+   - `409 {"status":"alreadyPaired"}`: the target already has this deviceId paired.
+   Clients use a 75 s timeout for this request (10 s for the others). The servers' 15 s
+   request deadline covers only receiving the request, not this hold.
+
+Target rules: every confirm spends the code; any failure (bad reveal or commitment, bad proof,
+cancel on the target, 60 s timeout) ends the code and clears pending state, as do stop, expiry
+and starting a new code. Codes, numbers and keys are never logged.
+
+### Pairing v2 Test Vector (pinned, cross-platform)
+
+Swift, Dart, and .NET MUST reproduce this byte-for-byte. Keys are the RFC 7748 §6.1 pair.
+
+- initiator private key = `77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a`
+  → public `8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a`
+- target private key = `5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb`
+  → public `de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f`
+- `salt` = 16 bytes `000102...0e0f` (`00`..`0f`); code = `123456`
+- → `commitment` (hex) = `c288f1b99596594082bc7d2c3684e2baef0516454e44b3cd6d7bcbd8845f4c55`
+- → `pairKey` (hex) = `8088860b8ecd246dbb52966bba419592f44ab2da96dec0d03725257384cdb83f`
+- → `confirmCode` = `885454`
+- → `proof` for initiatorId `550e8400-e29b-41d4-a716-446655440000`, targetId
+  `4d967c79-47dc-4e1f-a3bd-d3160b082da7` (hex) =
+  `b4bb2c3b5b26e686aba290b1e6469b756684cb6f131b355f106905140204c23b`
 
 ## Clip Synchronization Protocol
 

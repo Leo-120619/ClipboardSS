@@ -22,8 +22,8 @@ struct ClipboardSyncTests {
         let iId = UUID()
         let tId = UUID()
         
-        let (iKey, iCode) = try initiator.completePairing(remotePublicKey: target.ephemeralPublicKey, initiatorId: iId, targetId: tId, isInitiator: true, code: "000000")
-        let (tKey, tCode) = try target.completePairing(remotePublicKey: initiator.ephemeralPublicKey, initiatorId: iId, targetId: tId, isInitiator: false, code: "000000")
+        let (iKey, iCode) = try initiator.completePairing(remotePublicKey: target.ephemeralPublicKey, isInitiator: true, code: "000000")
+        let (tKey, tCode) = try target.completePairing(remotePublicKey: initiator.ephemeralPublicKey, isInitiator: false, code: "000000")
         
         #expect(iKey == tKey)
         #expect(iCode == tCode)
@@ -37,20 +37,13 @@ struct ClipboardSyncTests {
     func codeBoundPairing() throws {
         let initiator = PairingSession()
         let target = PairingSession()
-        let iId = UUID()
-        let tId = UUID()
-
         let (keyA, _) = try initiator.completePairing(
             remotePublicKey: target.ephemeralPublicKey,
-            initiatorId: iId,
-            targetId: tId,
             isInitiator: true,
             code: "048213"
         )
         let (keyB, _) = try target.completePairing(
             remotePublicKey: initiator.ephemeralPublicKey,
-            initiatorId: iId,
-            targetId: tId,
             isInitiator: false,
             code: "048213"
         )
@@ -58,12 +51,38 @@ struct ClipboardSyncTests {
 
         let (keyWrong, _) = try target.completePairing(
             remotePublicKey: initiator.ephemeralPublicKey,
-            initiatorId: iId,
-            targetId: tId,
             isInitiator: false,
             code: "999999"
         )
         #expect(keyWrong != keyA)
+    }
+
+    @Test("Pairing v2 matches the pinned vector in docs/wire-protocol.md")
+    func pairingV2MatchesPinnedVector() throws {
+        let initiator = try PairingSession(privateKey: Data(hex: "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"))
+        let target = try PairingSession(privateKey: Data(hex: "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"))
+        let salt = Data(0..<16)
+        #expect(initiator.ephemeralPublicKey.hexString == "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+        #expect(target.ephemeralPublicKey.hexString == "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+
+        let commitment = PairingSession.commitment(publicKey: initiator.ephemeralPublicKey, salt: salt)
+        #expect(commitment.hexString == "c288f1b99596594082bc7d2c3684e2baef0516454e44b3cd6d7bcbd8845f4c55")
+        #expect(PairingSession.commitmentMatches(commitment, publicKey: initiator.ephemeralPublicKey, salt: salt))
+        #expect(!PairingSession.commitmentMatches(commitment, publicKey: target.ephemeralPublicKey, salt: salt))
+
+        let (iKey, iCode) = try initiator.completePairing(remotePublicKey: target.ephemeralPublicKey, isInitiator: true, code: "123456")
+        let (tKey, tCode) = try target.completePairing(remotePublicKey: initiator.ephemeralPublicKey, isInitiator: false, code: "123456")
+        #expect(iKey.withUnsafeBytes { Data($0) }.hexString == "8088860b8ecd246dbb52966bba419592f44ab2da96dec0d03725257384cdb83f")
+        #expect(tKey == iKey)
+        #expect(iCode == "885454")
+        #expect(tCode == "885454")
+
+        let proof = PairingSession.generateConfirmationProof(
+            pairKey: iKey,
+            initiatorId: UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!,
+            targetId: UUID(uuidString: "4D967C79-47DC-4E1F-A3BD-D3160B082DA7")!
+        )
+        #expect(proof.hexString == "b4bb2c3b5b26e686aba290b1e6469b756684cb6f131b355f106905140204c23b")
     }
 
     @Test("Confirmation proof uses lowercase canonical UUID strings")
@@ -399,4 +418,19 @@ private func syncTemporaryDirectory() throws -> URL {
     let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+private extension Data {
+    init(hex: String) {
+        var bytes: [UInt8] = []
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            bytes.append(UInt8(hex[index..<next], radix: 16)!)
+            index = next
+        }
+        self.init(bytes)
+    }
+
+    var hexString: String { map { String(format: "%02x", $0) }.joined() }
 }

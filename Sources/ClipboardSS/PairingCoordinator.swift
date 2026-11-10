@@ -2,238 +2,469 @@ import Foundation
 import CryptoKit
 import ClipboardCore
 
+/// Result of a `/v1/pair/reveal` request on the hosting (target) side.
+public enum PairRevealOutcome: Equatable, Sendable {
+    /// 200: the commitment opened; both screens now show the number.
+    case ok
+    /// 401: no active code, or no matching initiator waiting to reveal.
+    case rejected
+    /// 400: the revealed key or salt does not open the commitment.
+    case invalid
+}
+
 /// Result of a `/v1/pair/confirm` request on the hosting (target) side.
 public enum PairConfirmOutcome: Equatable, Sendable {
     case paired
     case rejected
     case alreadyPaired
+    /// 408: this device's user did not confirm the number in time.
+    case timedOut
+}
+
+/// The number both screens show during pairing, with the other device's name.
+public struct PairingComparison: Equatable, Sendable {
+    /// The other device.
+    public let deviceName: String
+    public let confirmCode: String
+    /// This device's user already pressed Confirm and is waiting for the other side.
+    public var localConfirmed: Bool
 }
 
 @MainActor
 public final class PairingCoordinator: ObservableObject {
+    /// How long the target holds `/v1/pair/confirm` waiting for its own user (else 408).
+    public static let confirmHoldTimeout: TimeInterval = 60
+    /// Client timeout for `/v1/pair/confirm`: longer than the target's hold.
+    public static let confirmRequestTimeout: TimeInterval = 75
+
     public let identity: DeviceIdentity
     public let pairedStore: PairedDeviceStore
     private let transport: PeerTransport
-    
-    /// The single initiator that has completed `/v1/pair/start` against the hosted code.
+    private let confirmTransport: PeerTransport
+    private let confirmHoldTimeout: TimeInterval
+
+    /// The single initiator that has sent `/v1/pair/start` against the hosted code.
     private struct PendingInitiator {
         let id: UUID
         let name: String
         let host: String
-        let pairKey: SymmetricKey
+        let commitment: Data
+        let session: PairingSession
+        /// Set by a valid `/v1/pair/reveal`.
+        var pairKey: SymmetricKey?
     }
 
-    // Hosting state. All pairing rules on the target side are enforced in
-    // `handlePairStartRequest` / `handlePairConfirmRequest` below:
-    // one pending initiator per code, confirm only while the code is active,
-    // any confirm ends the code, and no silent re-pair of a known deviceId.
-    private var pending: PendingInitiator?
+    /// A valid `/v1/pair/confirm` waiting for this device's user.
+    private struct HeldConfirm {
+        let continuation: CheckedContinuation<HostDecision, Never>
+        let timeout: Task<Void, Never>
+    }
 
-    @Published public var hostCode: String?
-    @Published public var isPairing: Bool = false
+    private enum HostDecision { case confirmed, cancelled, timedOut }
+
+    // Hosting state. All pairing rules on the target side are enforced in
+    // `handlePairStartRequest` / `handlePairRevealRequest` / `handlePairConfirmRequest`:
+    // - one pending initiator per code (the same deviceId may restart until it has
+    //   revealed; any other start is refused with 403);
+    // - reveal and confirm are refused (401) unless the code is active and unexpired;
+    // - any failure (bad reveal or commitment, bad proof, cancel here, 60 s confirm
+    //   timeout) ends the code and clears pending state; so do stop, expiry and start;
+    // - every confirm spends the code; an already paired deviceId gets 409;
+    // - keys are stored only after both users confirmed the number;
+    // - commitment and proof checks are constant-time; codes, numbers and keys are never logged.
+    private var pending: PendingInitiator?
+    private var held: HeldConfirm?
     private var hostCodeExpiry: Date?
+    private var expiryTask: Task<Void, Never>?
     private let now: () -> Date
+
+    @Published public private(set) var hostCode: String?
+    /// The number to compare while this device is the target.
+    @Published public private(set) var hostComparison: PairingComparison?
+    @Published public var isPairing: Bool = false
+
+    // Initiator state: the one device the user chose, waiting for the user to compare numbers.
+    private struct PendingJoin {
+        let peer: Peer
+        let targetId: UUID
+        let targetName: String
+        let pairKey: SymmetricKey
+    }
+    private var pendingJoin: PendingJoin?
+    /// The number to compare while this device is the initiator.
+    @Published public private(set) var joinComparison: PairingComparison?
 
     /// Invoked on the main actor whenever a device is successfully added to the
     /// paired store, so observers can refresh their view of paired devices.
     public var onPairedDevicesChanged: (() -> Void)?
-    
+
+    /// - Parameter confirmTransport: used for `/v1/pair/confirm`, which the target may hold
+    ///   for `confirmHoldTimeout`; give it a timeout of at least `confirmRequestTimeout`.
     public init(
         identity: DeviceIdentity,
         pairedStore: PairedDeviceStore,
         transport: PeerTransport,
+        confirmTransport: PeerTransport? = nil,
+        confirmHoldTimeout: TimeInterval = PairingCoordinator.confirmHoldTimeout,
         now: @escaping () -> Date = Date.init
     ) {
         self.identity = identity
         self.pairedStore = pairedStore
         self.transport = transport
+        self.confirmTransport = confirmTransport ?? transport
+        self.confirmHoldTimeout = confirmHoldTimeout
         self.now = now
     }
 
+    /// True while a `/v1/pair/confirm` is waiting for this device's user.
+    var isHoldingConfirm: Bool { held != nil }
+
+    // MARK: - Target
+
     public func startHosting(ttl: TimeInterval = 180) -> String {
+        endHosting()
         let code = String(format: "%06d", Int.random(in: 0...999_999))
-        pending = nil
         hostCode = code
         hostCodeExpiry = now().addingTimeInterval(ttl)
+        // Clears the code from the UI when it expires, without waiting for a request.
+        expiryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(ttl, 0) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            _ = self?.activeHostCode()
+        }
         return code
     }
 
     public func stopHosting() {
+        endHosting()
+    }
+
+    /// This device's user confirmed the number shown in `hostComparison`.
+    public func confirmHostedPairing() {
+        if let held {
+            resolveHeld(held, with: .confirmed)
+        } else if hostComparison != nil {
+            hostComparison?.localConfirmed = true
+        }
+    }
+
+    /// This device's user cancelled (or the numbers differ): the code is spent.
+    public func cancelHostedPairing() {
+        endHosting()
+    }
+
+    /// Ends the hosted code and all pending state; a held confirm is answered 401.
+    private func endHosting() {
         pending = nil
         hostCode = nil
         hostCodeExpiry = nil
+        expiryTask?.cancel()
+        expiryTask = nil
+        hostComparison = nil
+        if let held { resolveHeld(held, with: .cancelled) }
     }
 
-    /// The hosted code while it is unexpired; an expired code is cleared together with any pending initiator.
+    private func resolveHeld(_ held: HeldConfirm, with decision: HostDecision) {
+        self.held = nil
+        held.timeout.cancel()
+        held.continuation.resume(returning: decision)
+    }
+
+    /// The hosted code while it is unexpired; an expired code ends hosting.
     private func activeHostCode() -> String? {
-        guard let code = hostCode, let expiry = hostCodeExpiry, expiry > now() else {
-            stopHosting()
+        guard let code = hostCode else { return nil }
+        guard let expiry = hostCodeExpiry, expiry > now() else {
+            endHosting()
             return nil
         }
         return code
     }
-    
+
     public func handlePairStartRequest(
         initiatorId: UUID,
         initiatorName: String,
-        initiatorPubKeyBase64: String,
+        commitmentBase64: String,
         remoteHost: String
     ) async throws -> Data {
         logToFile("PairingCoordinator: handlePairStartRequest from \(initiatorName) (\(initiatorId.uuidString))")
-        guard let code = activeHostCode() else {
+        guard activeHostCode() != nil else {
             logToFile("PairingCoordinator: Rejecting pair start because this device is not hosting")
             throw PairingError.notHosting
         }
-        if let pending, pending.id != initiatorId {
+        if let pending, pending.id != initiatorId || pending.pairKey != nil {
             logToFile("PairingCoordinator: Rejecting pair start because another initiator is pending")
             throw PairingError.initiatorConflict
         }
-        guard let initiatorPubKey = Data(base64Encoded: initiatorPubKeyBase64) else {
-            logToFile("PairingCoordinator: Invalid public key base64")
-            throw PairingError.invalidPublicKey
+        guard let commitment = Data(base64Encoded: commitmentBase64), commitment.count == 32 else {
+            logToFile("PairingCoordinator: Rejecting pair start with a malformed commitment")
+            throw PairingError.invalidCommitment
         }
 
         let session = PairingSession()
-        let (pairKey, _) = try session.completePairing(
-            remotePublicKey: initiatorPubKey,
-            initiatorId: initiatorId,
-            targetId: identity.id,
-            isInitiator: false,
-            code: code
+        pending = PendingInitiator(
+            id: initiatorId,
+            name: initiatorName,
+            host: remoteHost,
+            commitment: commitment,
+            session: session
         )
-
-        pending = PendingInitiator(id: initiatorId, name: initiatorName, host: remoteHost, pairKey: pairKey)
-        logToFile("PairingCoordinator: Ephemeral key complete for hosted code")
         return session.ephemeralPublicKey
     }
-    
+
+    public func handlePairRevealRequest(
+        initiatorId: UUID,
+        initiatorPubKeyBase64: String,
+        saltBase64: String
+    ) -> PairRevealOutcome {
+        guard let code = activeHostCode() else { return .rejected }
+        guard var pending, pending.id == initiatorId, pending.pairKey == nil else {
+            logToFile("PairingCoordinator: Rejecting pair reveal; the code is now invalid")
+            endHosting()
+            return .rejected
+        }
+        guard let initiatorPublicKey = Data(base64Encoded: initiatorPubKeyBase64),
+              let salt = Data(base64Encoded: saltBase64), salt.count == PairingSession.saltLength,
+              PairingSession.commitmentMatches(pending.commitment, publicKey: initiatorPublicKey, salt: salt),
+              let derived = try? pending.session.completePairing(
+                  remotePublicKey: initiatorPublicKey,
+                  isInitiator: false,
+                  code: code
+              )
+        else {
+            logToFile("PairingCoordinator: Pair reveal does not open the commitment; the code is now invalid")
+            endHosting()
+            return .invalid
+        }
+
+        pending.pairKey = derived.pairKey
+        self.pending = pending
+        hostComparison = PairingComparison(deviceName: pending.name, confirmCode: derived.confirmCode, localConfirmed: false)
+        return .ok
+    }
+
     public func handlePairConfirmRequest(initiatorId: UUID, proofBase64: String) async throws -> PairConfirmOutcome {
         logToFile("PairingCoordinator: handlePairConfirmRequest from \(initiatorId.uuidString)")
-        // Every confirm ends the hosted code, whatever its outcome. Taking the pending
-        // initiator before any suspension point also keeps concurrent confirms from racing.
-        let codeIsActive = activeHostCode() != nil
+        guard activeHostCode() != nil else { return .rejected }
+        // Every confirm spends the code. The comparison stays on screen until it is resolved.
         let pending = self.pending
-        stopHosting()
+        let localConfirmed = hostComparison?.localConfirmed == true
+        self.pending = nil
+        hostCode = nil
+        hostCodeExpiry = nil
+        expiryTask?.cancel()
 
-        guard codeIsActive,
-              let pending, pending.id == initiatorId,
+        guard let pending, pending.id == initiatorId, let pairKey = pending.pairKey,
               let proof = Data(base64Encoded: proofBase64),
-              PairingSession.verifyConfirmationProof(proof: proof, pairKey: pending.pairKey, initiatorId: initiatorId, targetId: identity.id)
+              PairingSession.verifyConfirmationProof(proof: proof, pairKey: pairKey, initiatorId: initiatorId, targetId: identity.id)
         else {
             logToFile("PairingCoordinator: Rejecting pair confirm; the code is now invalid")
+            endHosting()
             return .rejected
         }
 
         if await pairedStore.devices.contains(where: { $0.id == initiatorId }) {
             logToFile("PairingCoordinator: Rejecting pair confirm for an already paired device")
+            endHosting()
             return .alreadyPaired
         }
 
+        if !localConfirmed {
+            let decision = await holdForLocalDecision()
+            guard decision == .confirmed else {
+                logToFile("PairingCoordinator: Pairing was not confirmed on this device")
+                endHosting()
+                return decision == .timedOut ? .timedOut : .rejected
+            }
+        }
+        endHosting()
+
         try await pairedStore.addDevice(
             PairedDevice(id: initiatorId, name: pending.name, host: pending.host),
-            key: pending.pairKey
+            key: pairKey
         )
         logToFile("PairingCoordinator: Device paired successfully and saved!")
         onPairedDevicesChanged?()
         return .paired
     }
-    
-    public func startPairing(with peer: Peer, code: String) async throws {
-        logToFile("PairingCoordinator: startPairing initiated with peer \(peer.name) (\(peer.id.uuidString)) host=\(peer.host) port=\(peer.port)")
+
+    private func holdForLocalDecision() async -> HostDecision {
+        let holdNanoseconds = UInt64(max(confirmHoldTimeout, 0) * 1_000_000_000)
+        return await withCheckedContinuation { continuation in
+            let timeout = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: holdNanoseconds)
+                guard !Task.isCancelled, let self, let held = self.held else { return }
+                self.resolveHeld(held, with: .timedOut)
+            }
+            held = HeldConfirm(continuation: continuation, timeout: timeout)
+        }
+    }
+
+    /// Answers `/v1/pair/start`, `/v1/pair/reveal` and `/v1/pair/confirm` (plaintext JSON).
+    public func respond(toPairRequest request: HTTPRequest, remoteHost: String) async -> HTTPResponse {
+        switch request.path {
+        case "/v1/pair/start":
+            struct PairStartReq: Decodable { let deviceId: UUID; let deviceName: String; let commitment: String }
+            struct PairStartResp: Encodable { let deviceId: UUID; let deviceName: String; let ephemeralPublicKey: String }
+            do {
+                let req = try JSONDecoder().decode(PairStartReq.self, from: request.body)
+                let targetPub = try await handlePairStartRequest(
+                    initiatorId: req.deviceId,
+                    initiatorName: req.deviceName,
+                    commitmentBase64: req.commitment,
+                    remoteHost: remoteHost
+                )
+                let body = try JSONEncoder().encode(PairStartResp(
+                    deviceId: identity.id,
+                    deviceName: identity.name,
+                    ephemeralPublicKey: targetPub.base64EncodedString()
+                ))
+                return Self.json(200, body)
+            } catch {
+                logToFile("PairingCoordinator: /v1/pair/start rejected/failed: \(error)")
+                return HTTPResponse(statusCode: 403, headers: [:], body: Data("Rejected".utf8))
+            }
+        case "/v1/pair/reveal":
+            struct PairRevealReq: Decodable { let deviceId: UUID; let ephemeralPublicKey: String; let salt: String }
+            guard let req = try? JSONDecoder().decode(PairRevealReq.self, from: request.body) else {
+                return HTTPResponse(statusCode: 400, headers: [:], body: Data("Bad Request".utf8))
+            }
+            switch handlePairRevealRequest(initiatorId: req.deviceId, initiatorPubKeyBase64: req.ephemeralPublicKey, saltBase64: req.salt) {
+            case .ok: return Self.json(200, Data(#"{"status":"ok"}"#.utf8))
+            case .rejected: return HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
+            case .invalid: return HTTPResponse(statusCode: 400, headers: [:], body: Data("Bad Request".utf8))
+            }
+        case "/v1/pair/confirm":
+            struct PairConfirmReq: Decodable { let deviceId: UUID; let proof: String }
+            do {
+                let req = try JSONDecoder().decode(PairConfirmReq.self, from: request.body)
+                switch try await handlePairConfirmRequest(initiatorId: req.deviceId, proofBase64: req.proof) {
+                case .paired: return Self.json(200, Data(#"{"status":"ok"}"#.utf8))
+                case .alreadyPaired: return Self.json(409, Data(#"{"status":"alreadyPaired"}"#.utf8))
+                case .timedOut: return Self.json(408, Data(#"{"status":"timeout"}"#.utf8))
+                case .rejected: return HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
+                }
+            } catch {
+                logToFile("PairingCoordinator: /v1/pair/confirm error: \(error)")
+                return HTTPResponse(statusCode: 400, headers: [:], body: Data("Bad Request".utf8))
+            }
+        default:
+            return HTTPResponse(statusCode: 404, headers: [:], body: Data("Not Found".utf8))
+        }
+    }
+
+    private static func json(_ status: Int, _ body: Data) -> HTTPResponse {
+        HTTPResponse(statusCode: status, headers: ["Content-Type": "application/json"], body: body)
+    }
+
+    // MARK: - Initiator
+
+    /// Runs `/v1/pair/start` and `/v1/pair/reveal` against the one device the user chose and
+    /// returns the number to compare. Nothing is stored until `confirmPairing()` succeeds.
+    @discardableResult
+    public func startPairing(with peer: Peer, code: String) async throws -> PairingComparison {
+        logToFile("PairingCoordinator: startPairing with peer \(peer.name) (\(peer.id.uuidString)) host=\(peer.host) port=\(peer.port)")
+        cancelPairing()
         isPairing = true
         defer { isPairing = false }
-        
+
         let session = PairingSession()
-        
-        struct PairStartReq: Codable {
-            let deviceId: UUID
-            let deviceName: String
-            let ephemeralPublicKey: String
+        let salt = PairingSession.randomSalt()
+
+        struct PairStartReq: Encodable { let deviceId: UUID; let deviceName: String; let commitment: String }
+        let startResponse = try await post(
+            PairStartReq(
+                deviceId: identity.id,
+                deviceName: identity.name,
+                commitment: PairingSession.commitment(publicKey: session.ephemeralPublicKey, salt: salt).base64EncodedString()
+            ),
+            path: "/v1/pair/start",
+            to: peer,
+            via: transport
+        )
+        guard startResponse.statusCode == 200 else {
+            logToFile("PairingCoordinator: /v1/pair/start returned status \(startResponse.statusCode)")
+            throw PairingError.rejected
         }
-        let req = PairStartReq(deviceId: identity.id, deviceName: identity.name, ephemeralPublicKey: session.ephemeralPublicKey.base64EncodedString())
-        let reqData = try JSONEncoder().encode(req)
-        
-        let request = HTTPRequest(method: "POST", path: "/v1/pair/start", headers: ["Content-Type": "application/json"], body: reqData)
-        let requestBytes = HTTPCodec.encodeRequest(request, host: "\(peer.host)")
-        
-        logToFile("PairingCoordinator: Sending /v1/pair/start to \(peer.host)...")
-        let responseData: Data
-        do {
-            responseData = try await transport.send(requestBytes, to: peer)
-            logToFile("PairingCoordinator: Received /v1/pair/start response (\(responseData.count) bytes)")
-        } catch {
-            logToFile("PairingCoordinator: /v1/pair/start failed with transport error: \(error)")
-            throw error
-        }
-        
-        let response = try HTTPCodec.parseResponse(responseData)
-        logToFile("PairingCoordinator: /v1/pair/start HTTP Status: \(response.statusCode)")
-        
-        if response.statusCode != 200 {
-            logToFile("PairingCoordinator: /v1/pair/start returned bad status: \(response.statusCode)")
-            throw URLError(.badServerResponse)
-        }
-        
-        struct PairStartResp: Codable {
-            let deviceId: UUID
-            let deviceName: String
-            let ephemeralPublicKey: String
-        }
-        let targetResp = try JSONDecoder().decode(PairStartResp.self, from: response.body)
-        logToFile("PairingCoordinator: Decoded PairStartResp, targetDeviceId=\(targetResp.deviceId), targetDeviceName=\(targetResp.deviceName)")
-        
-        guard let targetPubKey = Data(base64Encoded: targetResp.ephemeralPublicKey) else {
-            logToFile("PairingCoordinator: Target returned invalid public key")
+        struct PairStartResp: Decodable { let deviceId: UUID; let deviceName: String; let ephemeralPublicKey: String }
+        let target = try JSONDecoder().decode(PairStartResp.self, from: startResponse.body)
+        guard let targetPublicKey = Data(base64Encoded: target.ephemeralPublicKey) else {
             throw PairingError.invalidPublicKey
         }
-        
-        let (pairKey, _) = try session.completePairing(
-            remotePublicKey: targetPubKey,
-            initiatorId: identity.id,
-            targetId: targetResp.deviceId,
+
+        struct PairRevealReq: Encodable { let deviceId: UUID; let ephemeralPublicKey: String; let salt: String }
+        let revealResponse = try await post(
+            PairRevealReq(
+                deviceId: identity.id,
+                ephemeralPublicKey: session.ephemeralPublicKey.base64EncodedString(),
+                salt: salt.base64EncodedString()
+            ),
+            path: "/v1/pair/reveal",
+            to: peer,
+            via: transport
+        )
+        guard revealResponse.statusCode == 200 else {
+            logToFile("PairingCoordinator: /v1/pair/reveal returned status \(revealResponse.statusCode)")
+            throw PairingError.rejected
+        }
+
+        let (pairKey, confirmCode) = try session.completePairing(
+            remotePublicKey: targetPublicKey,
             isInitiator: true,
             code: code
         )
-        logToFile("PairingCoordinator: Completed ephemeral key exchange")
-        
-        let proof = PairingSession.generateConfirmationProof(pairKey: pairKey, initiatorId: identity.id, targetId: targetResp.deviceId)
-        
-        struct PairConfirmReq: Codable {
-            let deviceId: UUID
-            let proof: String
+        pendingJoin = PendingJoin(peer: peer, targetId: target.deviceId, targetName: target.deviceName, pairKey: pairKey)
+        let comparison = PairingComparison(deviceName: target.deviceName, confirmCode: confirmCode, localConfirmed: false)
+        joinComparison = comparison
+        return comparison
+    }
+
+    /// This device's user confirmed the number: sends the proof and, once the other
+    /// device's user confirmed too (200), stores the pairing.
+    public func confirmPairing() async throws {
+        guard let join = pendingJoin else { throw PairingError.noPendingPairing }
+        joinComparison?.localConfirmed = true
+        defer {
+            pendingJoin = nil
+            joinComparison = nil
         }
-        let confirmReq = PairConfirmReq(deviceId: identity.id, proof: proof.base64EncodedString())
-        let confirmReqData = try JSONEncoder().encode(confirmReq)
-        
-        let confirmRequest = HTTPRequest(method: "POST", path: "/v1/pair/confirm", headers: ["Content-Type": "application/json"], body: confirmReqData)
-        let confirmRequestBytes = HTTPCodec.encodeRequest(confirmRequest, host: "\(peer.host)")
-        
-        logToFile("PairingCoordinator: Sending /v1/pair/confirm...")
-        let confirmResponseData: Data
-        do {
-            confirmResponseData = try await transport.send(confirmRequestBytes, to: peer)
-            logToFile("PairingCoordinator: Received /v1/pair/confirm response (\(confirmResponseData.count) bytes)")
-        } catch {
-            logToFile("PairingCoordinator: /v1/pair/confirm failed with transport error: \(error)")
-            throw error
-        }
-        
-        let confirmResponse = try HTTPCodec.parseResponse(confirmResponseData)
-        logToFile("PairingCoordinator: /v1/pair/confirm HTTP Status: \(confirmResponse.statusCode)")
-        
-        if confirmResponse.statusCode == 200 {
-            logToFile("PairingCoordinator: Pairing SUCCESSFUL! Saving peer to PairedStore.")
+
+        let proof = PairingSession.generateConfirmationProof(pairKey: join.pairKey, initiatorId: identity.id, targetId: join.targetId)
+        struct PairConfirmReq: Encodable { let deviceId: UUID; let proof: String }
+        let response = try await post(
+            PairConfirmReq(deviceId: identity.id, proof: proof.base64EncodedString()),
+            path: "/v1/pair/confirm",
+            to: join.peer,
+            via: confirmTransport
+        )
+        logToFile("PairingCoordinator: /v1/pair/confirm HTTP Status: \(response.statusCode)")
+
+        switch response.statusCode {
+        case 200:
             try await pairedStore.addDevice(
-                PairedDevice(id: targetResp.deviceId, name: targetResp.deviceName, host: peer.host),
-                key: pairKey
+                PairedDevice(id: join.targetId, name: join.targetName, host: join.peer.host),
+                key: join.pairKey
             )
             onPairedDevicesChanged?()
-        } else if confirmResponse.statusCode == 409 {
-            logToFile("PairingCoordinator: Target already has this device paired")
-            throw PairingError.alreadyPaired
-        } else {
-            logToFile("PairingCoordinator: Confirm returned status \(confirmResponse.statusCode), user denied pairing?")
-            throw URLError(.userAuthenticationRequired)
+        case 409: throw PairingError.alreadyPaired
+        case 408: throw PairingError.timedOut
+        default: throw PairingError.rejected
         }
+    }
+
+    /// This device's user cancelled (or the numbers differ). Nothing was stored.
+    public func cancelPairing() {
+        pendingJoin = nil
+        joinComparison = nil
+    }
+
+    private func post<Body: Encodable>(_ body: Body, path: String, to peer: Peer, via transport: PeerTransport) async throws -> HTTPResponse {
+        let request = HTTPRequest(
+            method: "POST",
+            path: path,
+            headers: ["Content-Type": "application/json"],
+            body: try JSONEncoder().encode(body)
+        )
+        let responseData = try await transport.send(HTTPCodec.encodeRequest(request, host: peer.host), to: peer)
+        return try HTTPCodec.parseResponse(responseData)
     }
 }

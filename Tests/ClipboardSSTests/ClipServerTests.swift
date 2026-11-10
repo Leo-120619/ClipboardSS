@@ -77,6 +77,50 @@ struct ClipServerTests {
         #expect(response.statusCode == 431)
     }
 
+    @Test("a pair confirm held for the user outlives the request deadline")
+    @MainActor
+    func heldPairConfirmOutlivesRequestDeadline() async throws {
+        let harness = try ClipServerHarness(requestDeadline: 0.2)
+        defer { harness.server.stop() }
+        let port = try await harness.start()
+
+        let code = harness.coordinator.startHosting()
+        let initiatorId = UUID()
+        let session = PairingSession()
+        let salt = PairingSession.randomSalt()
+        let targetPublicKey = try await harness.coordinator.handlePairStartRequest(
+            initiatorId: initiatorId,
+            initiatorName: "Phone",
+            commitmentBase64: PairingSession.commitment(publicKey: session.ephemeralPublicKey, salt: salt).base64EncodedString(),
+            remoteHost: "127.0.0.1"
+        )
+        #expect(harness.coordinator.handlePairRevealRequest(
+            initiatorId: initiatorId,
+            initiatorPubKeyBase64: session.ephemeralPublicKey.base64EncodedString(),
+            saltBase64: salt.base64EncodedString()
+        ) == .ok)
+        let (pairKey, _) = try session.completePairing(remotePublicKey: targetPublicKey, isInitiator: true, code: code)
+        let proof = PairingSession.generateConfirmationProof(pairKey: pairKey, initiatorId: initiatorId, targetId: harness.identity.id)
+        let body = try JSONSerialization.data(withJSONObject: [
+            "deviceId": initiatorId.uuidString.lowercased(),
+            "proof": proof.base64EncodedString(),
+        ])
+        let request = HTTPRequest(method: "POST", path: "/v1/pair/confirm", headers: ["Content-Type": "application/json"], body: body)
+
+        let coordinator = harness.coordinator
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            coordinator.confirmHostedPairing()
+        }
+        let outcome = await ClipServerHarness.exchange(
+            port: port,
+            payload: HTTPCodec.encodeRequest(request, host: "127.0.0.1:\(port.rawValue)"),
+            timeout: 5
+        )
+        #expect(outcome.elapsed > 0.5)
+        #expect(try HTTPCodec.parseResponse(outcome.received).statusCode == 200)
+    }
+
     @Test("v1 envelopes get 426 upgradeRequired on every envelope endpoint",
           arguments: ["/v1/clip", "/v1/file/offer", "/v1/file/finish", "/v1/file/cancel", "/v1/ping"])
     @MainActor
@@ -198,17 +242,21 @@ private final class CountingPasteboard: PasteboardClient {
 /// Runs a real ClipServer on an ephemeral loopback port without advertising Bonjour.
 private final class ClipServerHarness: @unchecked Sendable {
     let server: ClipServer
+    let coordinator: PairingCoordinator
+    let identity: DeviceIdentity
 
     @MainActor
     init(requestDeadline: TimeInterval) throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let store = try ClipStore(storageDirectory: directory)
         let identity = DeviceIdentity(id: UUID(), name: "Test Mac")
+        self.identity = identity
         let pairedStore = try PairedDeviceStore(
             storageURL: directory.appendingPathComponent("paired-devices.json"),
             keyStorage: HarnessPairKeyStorage()
         )
         let coordinator = PairingCoordinator(identity: identity, pairedStore: pairedStore, transport: HarnessPeerTransport())
+        self.coordinator = coordinator
         let fileReceiver = FileReceiver(
             pairedStore: pairedStore,
             localDeviceId: identity.id,

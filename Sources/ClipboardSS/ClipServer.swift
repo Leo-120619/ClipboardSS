@@ -267,69 +267,12 @@ public final class ClipServer: @unchecked Sendable {
             Task {
                 self.sendResponse(await self.handleClipRequest(body: request.body), on: connection)
             }
-        } else if request.path == "/v1/pair/start" {
+        } else if request.path.hasPrefix("/v1/pair/") {
+            // Pairing is plaintext JSON. The 15 s request deadline only covers receiving the
+            // request, so a `/v1/pair/confirm` held up to 60 s for the user still gets its answer.
+            let remoteHost = Self.remoteHost(from: connection.endpoint)
             Task {
-                do {
-                    let decoder = JSONDecoder()
-                    struct PairStartReq: Codable {
-                        let deviceId: UUID
-                        let deviceName: String
-                        let ephemeralPublicKey: String
-                    }
-                    let req = try decoder.decode(PairStartReq.self, from: request.body)
-                    
-                    let targetPub = try await self.pairingCoordinator.handlePairStartRequest(
-                        initiatorId: req.deviceId,
-                        initiatorName: req.deviceName,
-                        initiatorPubKeyBase64: req.ephemeralPublicKey,
-                        remoteHost: Self.remoteHost(from: connection.endpoint)
-                    )
-                    
-                    struct PairStartResp: Codable {
-                        let deviceId: UUID
-                        let deviceName: String
-                        let ephemeralPublicKey: String
-                    }
-                    let targetResp = PairStartResp(deviceId: self.pairingCoordinator.identity.id, deviceName: self.pairingCoordinator.identity.name, ephemeralPublicKey: targetPub.base64EncodedString())
-                    let responseData = try JSONEncoder().encode(targetResp)
-                    
-                    let resp = HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: responseData)
-                    self.sendResponse(resp, on: connection)
-                } catch {
-                    logToFile("ClipServer: /v1/pair/start rejected/failed: \(error)")
-                    let resp = HTTPResponse(statusCode: 403, headers: [:], body: Data("Rejected".utf8))
-                    self.sendResponse(resp, on: connection)
-                }
-            }
-        } else if request.path == "/v1/pair/confirm" {
-            Task {
-                do {
-                    let decoder = JSONDecoder()
-                    struct PairConfirmReq: Codable {
-                        let deviceId: UUID
-                        let proof: String
-                    }
-                    let req = try decoder.decode(PairConfirmReq.self, from: request.body)
-                    
-                    let outcome = try await self.pairingCoordinator.handlePairConfirmRequest(initiatorId: req.deviceId, proofBase64: req.proof)
-                    switch outcome {
-                    case .paired:
-                        let resp = HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: Data("{\"status\":\"ok\"}".utf8))
-                        self.sendResponse(resp, on: connection)
-                    case .alreadyPaired:
-                        logToFile("ClipServer: /v1/pair/confirm rejected (device already paired)")
-                        let resp = HTTPResponse(statusCode: 409, headers: ["Content-Type": "application/json"], body: Data("{\"status\":\"alreadyPaired\"}".utf8))
-                        self.sendResponse(resp, on: connection)
-                    case .rejected:
-                        logToFile("ClipServer: /v1/pair/confirm failed (verification returned false)")
-                        let resp = HTTPResponse(statusCode: 401, headers: [:], body: Data("Unauthorized".utf8))
-                        self.sendResponse(resp, on: connection)
-                    }
-                } catch {
-                    logToFile("ClipServer: /v1/pair/confirm error: \(error)")
-                    let resp = HTTPResponse(statusCode: 400, headers: [:], body: Data("Bad Request".utf8))
-                    self.sendResponse(resp, on: connection)
-                }
+                self.sendResponse(await self.pairingCoordinator.respond(toPairRequest: request, remoteHost: remoteHost), on: connection)
             }
         } else if request.path.hasPrefix("/v1/file/") {
             handleFileRequest(request, on: connection)

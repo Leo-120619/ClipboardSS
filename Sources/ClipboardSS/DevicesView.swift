@@ -8,6 +8,7 @@ struct DevicesView: View {
     @ObservedObject var coordinator: PairingCoordinator
     @Environment(\.dismiss) private var dismiss
     @State private var enteredCode = ""
+    @State private var selectedPeerId: UUID?
 
     init(model: AppModel) {
         self.model = model
@@ -31,8 +32,22 @@ struct DevicesView: View {
 
             List {
                 Section("Pair a device") {
-                    if let code = coordinator.hostCode {
-                        Text("Show this code on the other device:")
+                    if let comparison = coordinator.hostComparison {
+                        PairingComparisonView(
+                            localName: coordinator.identity.name,
+                            comparison: comparison,
+                            onConfirm: model.confirmHostedPairing,
+                            onCancel: model.cancelHostedPairing
+                        )
+                    } else if let comparison = coordinator.joinComparison {
+                        PairingComparisonView(
+                            localName: coordinator.identity.name,
+                            comparison: comparison,
+                            onConfirm: model.confirmJoin,
+                            onCancel: model.cancelJoin
+                        )
+                    } else if let code = coordinator.hostCode {
+                        Text("Enter this code on the other device:")
                             .font(.caption)
                         Text(code)
                             .font(.system(size: 40, weight: .bold, design: .monospaced))
@@ -43,6 +58,19 @@ struct DevicesView: View {
                         Button("Show pairing code") {
                             _ = model.showPairingCode()
                         }
+                        Picker("Pair with", selection: $selectedPeerId) {
+                            Text("Choose a device").tag(UUID?.none)
+                            ForEach(joinablePeers, id: \.id) { peer in
+                                Text("\(peer.name) (\(peer.host))").tag(Optional(peer.id))
+                            }
+                        }
+                        HStack {
+                            Button(model.scanInProgress ? "Scanning…" : "Scan network") {
+                                model.scanForDevices()
+                            }
+                            .disabled(model.scanInProgress)
+                            Spacer()
+                        }
                         HStack {
                             TextField("6-digit code", text: $enteredCode)
                                 .onChange(of: enteredCode) { value in
@@ -50,9 +78,11 @@ struct DevicesView: View {
                                     enteredCode = String(digits.prefix(6))
                                 }
                             Button("Connect") {
-                                model.joinWithCode(enteredCode)
+                                if let peer = selectedPeer {
+                                    model.joinWithCode(enteredCode, peer: peer)
+                                }
                             }
-                            .disabled(enteredCode.count != 6 || model.joinInProgress)
+                            .disabled(enteredCode.count != 6 || selectedPeer == nil || model.joinInProgress)
                         }
                     }
                 }
@@ -99,6 +129,52 @@ struct DevicesView: View {
             }
         }
         .frame(width: 400, height: 500)
+    }
+
+    /// Devices the user can pick to pair with: discovered, not paired yet, and on protocol v2.
+    private var joinablePeers: [Peer] {
+        model.pairingCandidates.filter { peer in
+            !peer.needsUpdate && !model.pairedDevices.contains(where: { $0.id == peer.id })
+        }
+    }
+
+    private var selectedPeer: Peer? {
+        joinablePeers.first(where: { $0.id == selectedPeerId })
+    }
+}
+
+/// Both device names and the 6-digit number, with Confirm / Cancel.
+struct PairingComparisonView: View {
+    let localName: String
+    let comparison: PairingComparison
+    let onConfirm: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(localName) ↔ \(comparison.deviceName)")
+                .font(.headline)
+            Text("Check that \(comparison.deviceName) shows the same number:")
+                .font(.caption)
+            Text(comparison.confirmCode)
+                .font(.system(size: 48, weight: .bold, design: .monospaced))
+                .accessibilityLabel("Confirmation number \(comparison.confirmCode.map(String.init).joined(separator: " "))")
+            if comparison.localConfirmed {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for \(comparison.deviceName) to confirm…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button("Numbers match", action: onConfirm)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(comparison.localConfirmed)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
