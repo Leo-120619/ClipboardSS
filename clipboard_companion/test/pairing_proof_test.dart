@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'fake_pair_key_storage.dart';
 
 void main() {
   test('confirmation proof uses lowercase canonical UUID strings', () async {
@@ -39,7 +40,7 @@ void main() {
         id: '4d967c79-47dc-4e1f-a3bd-d3160b082da7',
         name: 'Phone',
       ),
-      pairedStore: PairedDeviceStore(prefs),
+      pairedStore: PairedDeviceStore(prefs, keyStorage: FakePairKeyStorage()),
       client: MockClient((request) => Completer<http.Response>().future),
       requestTimeout: const Duration(milliseconds: 10),
     );

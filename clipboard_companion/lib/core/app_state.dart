@@ -299,6 +299,12 @@ class AppState extends ChangeNotifier {
       lastError =
           'Saved paired devices could not be read and were reset. Pair your devices again.';
     }
+    try {
+      await pairedStore.migrateLegacyKeys();
+    } catch (e) {
+      // Keys stay in prefs and getKey retries the move on next use.
+      debugPrint('Pair key migration deferred: ${e.runtimeType}');
+    }
     _loadClips();
     if (Platform.isAndroid || Platform.isIOS) {
       _shareChannel.setMethodCallHandler(_handleShareMethod);

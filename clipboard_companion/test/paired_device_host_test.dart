@@ -3,6 +3,7 @@ import 'package:clipboard_companion/core/paired_device_store.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'fake_pair_key_storage.dart';
 
 void main() {
   test('PairedDevice host round-trips and legacy JSON decodes to null', () {
@@ -18,14 +19,10 @@ void main() {
   test('store canonicalization preserves host', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    final store = PairedDeviceStore(prefs);
+    final store = PairedDeviceStore(prefs, keyStorage: FakePairKeyStorage());
 
     await store.addDevice(
-      PairedDevice(
-        id: 'ABC',
-        name: 'Mac',
-        host: '192.168.0.4',
-      ),
+      PairedDevice(id: 'ABC', name: 'Mac', host: '192.168.0.4'),
       SecretKey(List<int>.filled(32, 7)),
     );
 

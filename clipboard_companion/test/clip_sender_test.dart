@@ -10,12 +10,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'fake_pair_key_storage.dart';
 
 void main() {
   test('broadcast reports skipped peers and HTTP failures', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    final pairedStore = PairedDeviceStore(prefs);
+    final pairedStore = PairedDeviceStore(
+      prefs,
+      keyStorage: FakePairKeyStorage(),
+    );
     final pairedId = '550e8400-e29b-41d4-a716-446655440000';
     await pairedStore.addDevice(
       PairedDevice(id: pairedId, name: 'Mac'),
@@ -53,7 +57,10 @@ void main() {
   test('broadcast wraps IPv6 literal hosts in URLs', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    final pairedStore = PairedDeviceStore(prefs);
+    final pairedStore = PairedDeviceStore(
+      prefs,
+      keyStorage: FakePairKeyStorage(),
+    );
     final peerId = '550e8400-e29b-41d4-a716-446655440000';
     await pairedStore.addDevice(
       PairedDevice(id: peerId, name: 'Mac'),
@@ -84,7 +91,10 @@ void main() {
   test('broadcast bounds stalled HTTP requests', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    final pairedStore = PairedDeviceStore(prefs);
+    final pairedStore = PairedDeviceStore(
+      prefs,
+      keyStorage: FakePairKeyStorage(),
+    );
     const peerId = '550e8400-e29b-41d4-a716-446655440000';
     await pairedStore.addDevice(
       PairedDevice(id: peerId, name: 'Mac'),
@@ -112,7 +122,10 @@ void main() {
     () async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
-      final pairedStore = PairedDeviceStore(prefs);
+      final pairedStore = PairedDeviceStore(
+        prefs,
+        keyStorage: FakePairKeyStorage(),
+      );
       const currentId = '550e8400-e29b-41d4-a716-446655440000';
       const outdatedId = 'a4f030ff-f094-4a28-a3d7-a0d4f0186545';
       final key = SecretKey(List<int>.filled(32, 1));
@@ -167,7 +180,10 @@ void main() {
   test('broadcast counts a 426 answer as needing an update', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    final pairedStore = PairedDeviceStore(prefs);
+    final pairedStore = PairedDeviceStore(
+      prefs,
+      keyStorage: FakePairKeyStorage(),
+    );
     const peerId = '550e8400-e29b-41d4-a716-446655440000';
     await pairedStore.addDevice(
       PairedDevice(id: peerId, name: 'Mac'),
@@ -198,7 +214,10 @@ void main() {
     () async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
-      final pairedStore = PairedDeviceStore(prefs);
+      final pairedStore = PairedDeviceStore(
+        prefs,
+        keyStorage: FakePairKeyStorage(),
+      );
       const peerId = '550e8400-e29b-41d4-a716-446655440000';
       await pairedStore.addDevice(
         PairedDevice(id: peerId, name: 'Mac'),
