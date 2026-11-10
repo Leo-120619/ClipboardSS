@@ -34,19 +34,22 @@ public sealed class TcpClipServer(ClipServerRouter router, int port = 51888) : I
         }
 
         _cancellation = new CancellationTokenSource();
-        _acceptLoop = AcceptLoopAsync(_cancellation.Token);
+        var token = _cancellation.Token;
+        // Run the accept loop on the thread pool so no server continuation is queued onto the
+        // UI thread: OnExit blocks that thread while disposing, which would otherwise deadlock.
+        _acceptLoop = Task.Run(() => AcceptLoopAsync(token), CancellationToken.None);
     }
 
     public async ValueTask DisposeAsync()
     {
         if (_cancellation is null) return;
-        await _cancellation.CancelAsync();
+        await _cancellation.CancelAsync().ConfigureAwait(false);
         _listener.Stop();
         if (_acceptLoop is not null)
         {
             try
             {
-                await _acceptLoop;
+                await _acceptLoop.ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -68,13 +71,13 @@ public sealed class TcpClipServer(ClipServerRouter router, int port = 51888) : I
             TcpClient client;
             try
             {
-                client = await _listener.AcceptTcpClientAsync(cancellationToken);
+                client = await _listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (SocketException exception) when (!cancellationToken.IsCancellationRequested)
             {
                 // A failed accept (e.g. a peer resetting mid-handshake) must not end the listener.
                 Debug.WriteLine($"TcpClipServer: accept failed ({exception.SocketErrorCode}); continuing");
-                await Task.Delay(AcceptRetryDelay, cancellationToken);
+                await Task.Delay(AcceptRetryDelay, cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -94,34 +97,37 @@ public sealed class TcpClipServer(ClipServerRouter router, int port = 51888) : I
         try
         {
             using (client)
-            await using (var stream = client.GetStream())
             {
-                var remoteHost = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? string.Empty;
-                HttpResponse response;
-                try
+                var stream = client.GetStream();
+                await using (stream.ConfigureAwait(false))
                 {
-                    var request = await ReadRequestWithDeadlineAsync(stream, cancellationToken);
-                    if (request is null) return;
-                    response = await router.RouteAsync(request, remoteHost, cancellationToken);
-                }
-                catch (HttpCodecException exception) when (exception.Error == HttpCodecError.PayloadTooLarge)
-                {
-                    response = new HttpResponse(413, new Dictionary<string, string>(), "Payload Too Large"u8.ToArray());
-                }
-                catch (HttpCodecException exception) when (exception.Error == HttpCodecError.HeadersTooLarge)
-                {
-                    response = new HttpResponse(
-                        431,
-                        new Dictionary<string, string>(),
-                        "Request Header Fields Too Large"u8.ToArray());
-                }
-                catch (Exception) when (!cancellationToken.IsCancellationRequested)
-                {
-                    response = new HttpResponse(400, new Dictionary<string, string>(), "Bad Request"u8.ToArray());
-                }
+                    var remoteHost = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? string.Empty;
+                    HttpResponse response;
+                    try
+                    {
+                        var request = await ReadRequestWithDeadlineAsync(stream, cancellationToken).ConfigureAwait(false);
+                        if (request is null) return;
+                        response = await router.RouteAsync(request, remoteHost, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (HttpCodecException exception) when (exception.Error == HttpCodecError.PayloadTooLarge)
+                    {
+                        response = new HttpResponse(413, new Dictionary<string, string>(), "Payload Too Large"u8.ToArray());
+                    }
+                    catch (HttpCodecException exception) when (exception.Error == HttpCodecError.HeadersTooLarge)
+                    {
+                        response = new HttpResponse(
+                            431,
+                            new Dictionary<string, string>(),
+                            "Request Header Fields Too Large"u8.ToArray());
+                    }
+                    catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        response = new HttpResponse(400, new Dictionary<string, string>(), "Bad Request"u8.ToArray());
+                    }
 
-                var bytes = HttpCodec.EncodeResponse(response);
-                await stream.WriteAsync(bytes, cancellationToken);
+                    var bytes = HttpCodec.EncodeResponse(response);
+                    await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
@@ -146,7 +152,7 @@ public sealed class TcpClipServer(ClipServerRouter router, int port = 51888) : I
         deadline.CancelAfter(RequestDeadline);
         try
         {
-            return await HttpRequestReader.ReadAsync(stream, deadline.Token);
+            return await HttpRequestReader.ReadAsync(stream, deadline.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {

@@ -98,7 +98,9 @@ public partial class App : System.Windows.Application
         _hotKeys?.Dispose();
         _model?.Dispose();
         _receivedFileNotifications?.Dispose();
-        if (_server is not null) _server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        // Dispose off the UI thread (which this method blocks) and give up after 2 s so Quit
+        // can never hang holding TCP 51888.
+        if (_server is not null) Task.Run(() => _server.DisposeAsync().AsTask()).Wait(TimeSpan.FromSeconds(2));
         _clipboard?.Dispose();
         if (_primaryInstance is not null) _primaryInstance.Activated -= PrimaryInstance_OnActivated;
         if (_fallbackMutex is not null)

@@ -17,5 +17,6 @@
     <Compile Include="../../src/ClipboardSS.WinApp/Settings/AppSettings.cs" Link="AppSettings.cs" />
     <Compile Include="../../src/ClipboardSS.WinApp/Settings/SettingsStore.cs" Link="SettingsStore.cs" />
     <Compile Include="../../src/ClipboardSS.WinApp/Pairing/PairingCoordinator.cs" Link="PairingCoordinator.cs" />
+    <Compile Include="../../src/ClipboardSS.WinApp/Win32/NativeInput.cs" Link="NativeInput.cs" />
   </ItemGroup>
 </Project>
