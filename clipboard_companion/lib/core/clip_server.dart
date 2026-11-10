@@ -190,7 +190,7 @@ class ClipServer {
       return _payloadTooLarge();
     } catch (e) {
       developer.log('Pair start error: $e', name: 'ClipServer');
-      return Response.internalServerError(body: e.toString());
+      return Response.internalServerError(body: 'Internal error');
     }
   }
 
@@ -221,7 +221,7 @@ class ClipServer {
       return _payloadTooLarge();
     } catch (e) {
       developer.log('Pair confirm error: $e', name: 'ClipServer');
-      return Response(400, body: e.toString());
+      return Response(400, body: 'Bad request');
     }
   }
 
@@ -295,7 +295,7 @@ class ClipServer {
       return _payloadTooLarge();
     } catch (e) {
       developer.log('Clip handle error: $e', name: 'ClipServer');
-      return Response(400, body: e.toString());
+      return Response(400, body: 'Bad request');
     }
   }
 

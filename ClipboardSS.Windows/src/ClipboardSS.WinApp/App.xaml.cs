@@ -43,18 +43,27 @@ public partial class App : System.Windows.Application
         base.OnStartup(args);
         DispatcherUnhandledException += App_OnDispatcherUnhandledException;
         AppActivationArguments? activation;
+        var redirecting = false;
         try
         {
             activation = AppInstance.GetCurrent().GetActivatedEventArgs();
             var instance = AppInstance.FindOrRegisterForKey("ClipboardSS.Windows.Singleton");
             if (!instance.IsCurrent)
             {
+                redirecting = true;
                 await instance.RedirectActivationToAsync(activation);
                 Shutdown();
                 return;
             }
             _primaryInstance = instance;
             _primaryInstance.Activated += PrimaryInstance_OnActivated;
+        }
+        catch when (redirecting)
+        {
+            // A primary instance exists; the redirect failing must not start a second full
+            // instance (it would contend for TCP 51888, the clipboard listener and hot keys).
+            Shutdown(1);
+            return;
         }
         catch
         {

@@ -35,6 +35,33 @@ class AsyncOperationQueue {
   }
 }
 
+/// Lets a flow that backgrounded the app (a system file picker) wait until
+/// the resume that follows has restarted networking and re-probed devices:
+/// pausing clears liveness, so nothing looks reachable until then.
+class ResumeGate {
+  Completer<void>? _pending;
+
+  void paused() => _pending ??= Completer<void>();
+
+  Future<void> resumed(Future<void> Function() probe) async {
+    final pending = _pending;
+    try {
+      await probe();
+    } finally {
+      if (identical(_pending, pending)) _pending = null;
+      if (pending != null && !pending.isCompleted) pending.complete();
+    }
+  }
+
+  /// Completes once the resume after the last pause has finished (at once
+  /// when nothing is paused), or after [timeout].
+  Future<void> settled({Duration timeout = const Duration(seconds: 5)}) {
+    final pending = _pending;
+    if (pending == null) return Future<void>.value();
+    return pending.future.timeout(timeout, onTimeout: () {});
+  }
+}
+
 bool isDeviceConnectionActive({required bool enabled, required bool online}) =>
     enabled && online;
 
@@ -307,6 +334,8 @@ class AppState extends ChangeNotifier {
   Timer? _livenessTimer;
   http.Client? _livenessClient;
   final AsyncOperationQueue _networkTransitions = AsyncOperationQueue();
+  final ResumeGate _resumeGate = ResumeGate();
+  Future<void>? _startupLivenessProbe;
 
   /// Live reachability per paired device id. In-memory only: it is rebuilt from
   /// scratch on every refresh, so unpaired devices drop out on their own.
@@ -658,8 +687,10 @@ class AppState extends ChangeNotifier {
     return false;
   }
 
-  Future<void> pauseSyncServices() =>
-      _enqueueNetworkTransition(_pauseSyncServices);
+  Future<void> pauseSyncServices() {
+    _resumeGate.paused();
+    return _enqueueNetworkTransition(_pauseSyncServices);
+  }
 
   Future<void> _pauseSyncServices() async {
     if (!_coreNetworkingStarted || !_discoveryRunning) return;
@@ -882,7 +913,9 @@ class AppState extends ChangeNotifier {
       _livenessInterval,
       (_) => unawaited(refreshDeviceLiveness()),
     );
-    unawaited(refreshDeviceLiveness());
+    final probe = refreshDeviceLiveness();
+    _startupLivenessProbe = probe;
+    unawaited(probe);
   }
 
   void _stopLivenessTimer() {
@@ -895,13 +928,26 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> resumeSyncServices() => startSyncServices();
+  Future<void> resumeSyncServices() => _resumeGate.resumed(() async {
+    await startSyncServices();
+    await _startupLivenessProbe;
+  });
 
-  Future<ClipSendSummary> sendClip(ClipPayload clip) async {
-    // Add to local UI
+  /// Completes once a pending resume has restarted sync and re-probed device
+  /// liveness (immediately if the app was not paused).
+  Future<void> whenResumeSettled() => _resumeGate.settled();
+
+  /// Adds a clip this device sends to the local history, unless it is already
+  /// there (re-sending an existing clip).
+  void recordOutgoingClip(ClipPayload clip) {
+    if (clips.any((existing) => existing.id == clip.id)) return;
     clips.insert(0, clip);
     _saveClips();
     notifyListeners();
+  }
+
+  Future<ClipSendSummary> sendClip(ClipPayload clip) async {
+    recordOutgoingClip(clip);
 
     // Broadcast
     final targets = composeSendTargets(

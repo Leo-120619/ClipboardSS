@@ -27,6 +27,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private readonly IReceivedFileNotificationService _receivedFileNotifications;
     private readonly HashSet<string> _notifiedReceiveIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CancellationTokenSource> _fileCancellations = [];
+    private const int MaxTransfers = 100;
     private readonly List<FileTransferProgress> _transfers = [];
     private readonly MdnsService _mdns;
     private readonly SubnetSweeper _sweeper;
@@ -706,6 +707,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         {
             var index = _transfers.FindIndex(item => item.TransferId == progress.TransferId);
             if (index >= 0) _transfers[index] = progress; else _transfers.Insert(0, progress);
+            // Newest first; keep only the most recent MaxTransfers rows.
+            if (_transfers.Count > MaxTransfers) _transfers.RemoveRange(MaxTransfers, _transfers.Count - MaxTransfers);
             OnPropertyChanged(nameof(Transfers)); StateChanged?.Invoke(this, EventArgs.Empty);
             if (progress.Direction == FileTransferDirection.Receiving && progress.Status == FileTransferStatus.Completed)
                 ProcessCompletedReceive(progress);

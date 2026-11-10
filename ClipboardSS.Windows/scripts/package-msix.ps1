@@ -4,10 +4,13 @@ param(
     [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')]
     [string] $Version = '1.0.0.0',
     [string] $Publisher = 'CN=ClipboardSS Development',
+    # Thumbprint of a code-signing certificate (with private key) in the Personal store. signtool
+    # selects it with /sha1, so no PFX password ever appears on a command line or in process lists.
     [Parameter(Mandatory)]
-    [string] $CertificatePath,
-    [Parameter(Mandatory)]
-    [securestring] $CertificatePassword,
+    [ValidatePattern('^[0-9A-Fa-f]{40}$')]
+    [string] $CertificateThumbprint,
+    [ValidateSet('CurrentUser', 'LocalMachine')]
+    [string] $CertificateStoreLocation = 'CurrentUser',
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release'
 )
@@ -23,12 +26,14 @@ $stageRoot = Join-Path $projectRoot '.msix-staging'
 if ($Architecture | Where-Object { $_ -notin @('x64', 'arm64') }) {
     throw 'Architecture must be x64, arm64, or both.'
 }
-if (-not (Test-Path -LiteralPath $CertificatePath -PathType Leaf)) {
-    throw "Certificate PFX was not found: $CertificatePath"
+$CertificateThumbprint = $CertificateThumbprint.ToUpperInvariant()
+$certificate = Get-Item -LiteralPath "Cert:\$CertificateStoreLocation\My\$CertificateThumbprint" -ErrorAction SilentlyContinue
+if (-not $certificate) {
+    throw "No certificate with thumbprint $CertificateThumbprint in Cert:\$CertificateStoreLocation\My. Import the PFX first with Import-PfxCertificate."
 }
-
-$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-    (Resolve-Path -LiteralPath $CertificatePath), $CertificatePassword)
+if (-not $certificate.HasPrivateKey) {
+    throw "The certificate $CertificateThumbprint has no private key in Cert:\$CertificateStoreLocation\My."
+}
 if ($certificate.Subject -ne $Publisher) {
     throw "The certificate subject '$($certificate.Subject)' must exactly match manifest publisher '$Publisher'."
 }
@@ -46,7 +51,6 @@ if (-not $makeAppx -or -not $signTool) {
 
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
-$password = [System.Net.NetworkCredential]::new('', $CertificatePassword).Password
 
 foreach ($ridArchitecture in $Architecture) {
     $publish = Join-Path $stageRoot "publish-$ridArchitecture"
@@ -73,7 +77,9 @@ foreach ($ridArchitecture in $Architecture) {
     Remove-Item -Force -LiteralPath $package -ErrorAction SilentlyContinue
     & $makeAppx pack /d $stage /p $package /o
     if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed for $ridArchitecture." }
-    & $signTool sign /fd SHA256 /f $CertificatePath /p $password /v $package
+    $storeArguments = @('/s', 'My')
+    if ($CertificateStoreLocation -eq 'LocalMachine') { $storeArguments += '/sm' }
+    & $signTool sign /fd SHA256 /sha1 $CertificateThumbprint @storeArguments /v $package
     if ($LASTEXITCODE -ne 0) { throw "SignTool failed for $ridArchitecture." }
     & $signTool verify /pa /v $package
     if ($LASTEXITCODE -ne 0) {

@@ -1275,6 +1275,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
             .toList() ??
         const <File>[];
     if (files.isEmpty || !context.mounted) return;
+    // The picker backgrounded the app; wait for the resume to re-probe
+    // devices, or the chooser would list none.
+    await state.whenResumeSettled();
+    if (!context.mounted || !_ensureReachable(context, state)) return;
     final deviceId = await _chooseReachableDevice(
       context,
       state,

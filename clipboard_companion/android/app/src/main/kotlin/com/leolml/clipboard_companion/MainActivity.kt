@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.app.DownloadManager
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.MediaStore
@@ -27,6 +28,7 @@ import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.Inet4Address
 import java.util.UUID
 import android.util.Base64
 import android.util.Xml
@@ -39,6 +41,7 @@ class MainActivity : FlutterActivity() {
     private val shareChannelName = "clipboard_companion/incoming_share"
     private val downloadsChannelName = "clipboard_companion/android_downloads"
     private val storageChannelName = "clipboard_companion/storage"
+    private val networkChannelName = "clipboard_companion/network"
     private val nearbyWifiRequestCode = 4107
     private var pendingPermissionResult: MethodChannel.Result? = null
     private var shareChannel: MethodChannel? = null
@@ -130,6 +133,17 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, networkChannelName).setMethodCallHandler { call, result ->
+            when (call.method) {
+                // IPv4 addresses with prefix lengths, flagging the default network (subnet sweep).
+                "ipv4Interfaces" -> try {
+                    result.success(ipv4Interfaces())
+                } catch (e: Exception) {
+                    result.error("ipv4Interfaces", e.message, null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, downloadsChannelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "publishReceivedFile" -> publishReceivedFile(
@@ -156,6 +170,32 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+    }
+
+    private fun ipv4Interfaces(): List<Map<String, Any>> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return emptyList()
+        val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val active = connectivity.activeNetwork
+        val interfaces = mutableListOf<Map<String, Any>>()
+        @Suppress("DEPRECATION")
+        for (network in connectivity.allNetworks) {
+            val link = connectivity.getLinkProperties(network) ?: continue
+            val name = link.interfaceName ?: continue
+            val isDefaultRoute = network == active && link.routes.any { it.isDefaultRoute }
+            for (linkAddress in link.linkAddresses) {
+                val address = linkAddress.address as? Inet4Address ?: continue
+                val host = address.hostAddress ?: continue
+                interfaces.add(
+                    mapOf(
+                        "name" to name,
+                        "address" to host,
+                        "prefixLength" to linkAddress.prefixLength,
+                        "isDefaultRoute" to isDefaultRoute,
+                    )
+                )
+            }
+        }
+        return interfaces
     }
 
     private fun publishReceivedFile(

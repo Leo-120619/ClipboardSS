@@ -33,21 +33,21 @@ $password = Read-Host 'PFX password' -AsSecureString
 Import-Certificate -FilePath .\artifacts\certificates\ClipboardSS-development.cer -CertStoreLocation Cert:\CurrentUser\Root
 ```
 
-Build and sign both packages:
+Build and sign both packages. The script signs with a certificate from your Personal certificate store, selected by thumbprint, so the PFX password is never passed on a command line. The development certificate script already created it in `Cert:\CurrentUser\My` and printed its thumbprint:
 
 ```powershell
-$password = Read-Host 'PFX password' -AsSecureString
-.\scripts\package-msix.ps1 -CertificatePath .\artifacts\certificates\ClipboardSS-development.pfx -CertificatePassword $password
+$thumbprint = (Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -eq 'CN=ClipboardSS Development' | Select-Object -First 1).Thumbprint
+.\scripts\package-msix.ps1 -CertificateThumbprint $thumbprint
 ```
 
 The results are `artifacts\ClipboardSS_<version>_x64.msix` and `artifacts\ClipboardSS_<version>_arm64.msix`. Install the x64 build on an x64 development machine with `Add-AppxPackage .\artifacts\ClipboardSS_1.0.0.0_x64.msix`. ARM64 packages can be inspected and signature-verified on x64, but require an ARM64 Windows device or runner to execute.
 
-For a release certificate, supply the external PFX and make its certificate subject exactly match the explicit publisher:
+For a release certificate, import the external PFX into your Personal store once (the password is only entered at that prompt), and make its certificate subject exactly match the explicit publisher. Use `-CertificateStoreLocation LocalMachine` if the certificate lives in the machine store:
 
 ```powershell
 $password = Read-Host 'Release PFX password' -AsSecureString
-.\scripts\package-msix.ps1 -Version 1.2.3.0 -Publisher 'CN=Example Publisher' `
-  -CertificatePath C:\secure\ClipboardSS-release.pfx -CertificatePassword $password
+$release = Import-PfxCertificate -FilePath C:\secure\ClipboardSS-release.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+.\scripts\package-msix.ps1 -Version 1.2.3.0 -Publisher 'CN=Example Publisher' -CertificateThumbprint $release.Thumbprint
 ```
 
 MSIX builds use the package startup task. Direct EXE builds retain the current-user Run-key entry. In either form, ClipboardSS persists the state Windows actually grants; if Windows denies startup permission, the Preferences checkbox reflects that result and explains how to change it.
