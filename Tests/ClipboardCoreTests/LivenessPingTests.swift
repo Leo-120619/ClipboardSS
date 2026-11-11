@@ -103,6 +103,12 @@ struct LivenessPingTests {
                                           deviceId: device, localDeviceId: local, pairKey: key) == .unverified)
     }
 
+    @Test("a 404 on /v1/ping is a v1 server: upgradeRequired")
+    func notFoundIsUpgradeRequired() {
+        #expect(LivenessPing.evaluatePong(statusCode: 404, body: Data("Not Found".utf8), pingNonce: "AAAAAAAAAAAAAAAB",
+                                          deviceId: device, localDeviceId: local, pairKey: key) == .upgradeRequired)
+    }
+
     @Test("a pong captured for an earlier ping does not answer a new one")
     func replayedPongIsUnverified() async throws {
         let send = try await responder()

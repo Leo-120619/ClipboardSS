@@ -93,6 +93,89 @@ struct AppModelShareTests {
         #expect(fixture.model.pendingSend?.shareDrops == [AppModel.shareKey(late)])
     }
 
+    @Test("nine shared files go to one device one at a time, and every one is sent")
+    func nineFilesAreSentOneAtATime() async throws {
+        let transport = CountingTransport()
+        let fixture = try await ShareFixture(transport: transport)
+        let names = (1...9).map { "photo\($0).png" }
+        let drop = try fixture.makeDrop(names: names)
+        await fixture.goOnline([fixture.deviceId])
+
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        #expect(fixture.model.transfers.count == 9)
+        try await fixture.waitForTransfersToSettle()
+
+        // The receiver accepts at most 8 sessions per device; one at a time never exceeds it.
+        #expect(transport.maxConcurrentSends == 1)
+        #expect(Set(transport.offeredPaths) == ["/v1/file/offer"])
+        #expect(transport.offeredPaths.count == 9)
+        #expect(!FileManager.default.fileExists(atPath: drop.path))
+    }
+
+    @Test("a share whose device drops out before its files are handed off stays in the outbox")
+    func queuedShareIsKeptWhenDeviceDropsBeforeHandOff() async throws {
+        let transport = CountingTransport(delay: .milliseconds(50))
+        let fixture = try await ShareFixture(transport: transport)
+        let first = try fixture.makeDrop(names: ["a.png"])
+        await fixture.goOnline([fixture.deviceId])
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        let second = try fixture.makeDrop(names: ["b.png", "c.png"])
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        #expect(fixture.model.transfers.count == 3)
+
+        await fixture.goOnline([])
+        try await fixture.waitForTransfersToSettle()
+
+        #expect(!FileManager.default.fileExists(atPath: first.path))
+        #expect(FileManager.default.fileExists(atPath: second.appendingPathComponent("b.png").path))
+        #expect(FileManager.default.fileExists(atPath: second.appendingPathComponent("c.png").path))
+        #expect(fixture.model.pendingShares.map { AppModel.shareKey($0.directory) } == [AppModel.shareKey(second)])
+        #expect(transport.offeredPaths.count == 1)
+
+        await fixture.goOnline([fixture.deviceId])
+        try await fixture.waitForTransfersToSettle()
+        #expect(transport.offeredPaths.count == 3)
+        #expect(!FileManager.default.fileExists(atPath: second.path))
+    }
+
+    @Test("a picked device that is unreachable never sends the drop to another device")
+    func failedPickDoesNotAutoSendElsewhere() async throws {
+        let fixture = try await ShareFixture(deviceCount: 2)
+        await fixture.goOnline(fixture.deviceIds)
+        let drop = try fixture.makeDrop()
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        #expect(fixture.model.pendingSend != nil)
+        await fixture.goOnline([fixture.deviceIds[1]])
+
+        fixture.model.completePendingSend(to: fixture.deviceIds[0])
+
+        #expect(fixture.model.transfers.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: drop.path))
+        #expect(fixture.model.lastError == fixture.model.unreachableMessage(for: fixture.deviceIds[0]))
+        // Another device coming and going does not send it either.
+        await fixture.goOnline([])
+        await fixture.goOnline([fixture.deviceIds[1]])
+        #expect(fixture.model.transfers.isEmpty)
+        #expect(fixture.model.pendingSend == nil)
+
+        // Once the picked device is back, the drop goes to it.
+        await fixture.goOnline([fixture.deviceIds[0]])
+        #expect(fixture.model.transfers.map(\.fileName) == ["photo.png"])
+        #expect(!FileManager.default.fileExists(atPath: drop.path))
+    }
+
+    @Test("a share for a clock-skewed device says the clock is out of sync")
+    func clockSkewedTargetReportsClockMessage() async throws {
+        let fixture = try await ShareFixture()
+        await fixture.model.applyLiveness(LivenessReport(clockSkew: [fixture.deviceId]))
+        _ = try fixture.makeDrop()
+
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+
+        #expect(fixture.model.lastError == ProtocolMismatch.clockOutOfSyncMessage(deviceNames: ["Device 0"]))
+        #expect(fixture.model.pendingShares.count == 1)
+    }
+
     @Test("picking a device sends only the drops the picker showed")
     func completeSendsOnlyShownDrops() async throws {
         let fixture = try await ShareFixture(deviceCount: 2)
@@ -120,12 +203,12 @@ private struct ShareFixture {
 
     /// Devices use a TEST-NET address; sends go through the fake transport in
     /// `makeTestAppModel`, so nothing touches the network.
-    init(deviceCount: Int = 1) async throws {
+    init(deviceCount: Int = 1, transport: PeerTransport = TestPeerTransport()) async throws {
         deviceIds = (0..<deviceCount).map { _ in UUID() }
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppModelShareTests-\(UUID().uuidString)", isDirectory: true)
         let store = try ClipStore(storageDirectory: directory)
-        model = try makeTestAppModel(store: store, pasteboard: ShareFakePasteboard())
+        model = try makeTestAppModel(store: store, pasteboard: ShareFakePasteboard(), transport: transport)
         outbox = directory.appendingPathComponent("ShareOutbox", isDirectory: true)
         try FileManager.default.createDirectory(at: outbox, withIntermediateDirectories: true)
         for (index, id) in deviceIds.enumerated() {
@@ -151,11 +234,20 @@ private struct ShareFixture {
         (try? FileManager.default.contentsOfDirectory(atPath: model.shareStagingDirectory.path)) ?? []
     }
 
-    func makeDrop() throws -> URL {
+    func waitForTransfersToSettle() async throws {
+        for _ in 0..<400 where model.transfers.contains(where: { $0.isActive }) {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(!model.transfers.contains { $0.isActive })
+    }
+
+    func makeDrop(names: [String] = ["photo.png"]) throws -> URL {
         let drop = outbox.appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: true)
         try FileManager.default.createDirectory(at: drop, withIntermediateDirectories: true)
-        try Data("png".utf8).write(to: drop.appendingPathComponent("photo.png"))
-        let manifest = ShareManifest(id: drop.lastPathComponent, fileNames: ["photo.png"])
+        for name in names {
+            try Data("png".utf8).write(to: drop.appendingPathComponent(name))
+        }
+        let manifest = ShareManifest(id: drop.lastPathComponent, fileNames: names)
         try JSONEncoder().encode(manifest).write(to: drop.appendingPathComponent("manifest.json"))
         return drop
     }
@@ -167,4 +259,32 @@ private final class ShareFakePasteboard: PasteboardClient {
     func clearContents() {}
     func writeText(_ text: String) {}
     func writeImageData(_ data: Data) {}
+}
+
+/// Fails every request after `delay`, recording how many sends overlap and which
+/// file-transfer paths were offered.
+private final class CountingTransport: PeerTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let delay: Duration
+    private var inFlight = 0
+    private var _max = 0
+    private var _offered: [String] = []
+
+    init(delay: Duration = .milliseconds(5)) { self.delay = delay }
+
+    var maxConcurrentSends: Int { lock.withLock { _max } }
+    var offeredPaths: [String] { lock.withLock { _offered } }
+
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
+        let line = String(decoding: data.prefix(64), as: UTF8.self).split(separator: " ")
+        let path = line.count > 1 ? String(line[1]) : ""
+        lock.withLock {
+            inFlight += 1
+            _max = max(_max, inFlight)
+            if path == "/v1/file/offer" { _offered.append(path) }
+        }
+        defer { lock.withLock { inFlight -= 1 } }
+        try await Task.sleep(for: delay)
+        throw URLError(.cannotConnectToHost)
+    }
 }

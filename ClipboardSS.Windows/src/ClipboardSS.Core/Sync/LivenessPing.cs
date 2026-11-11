@@ -13,7 +13,7 @@ public enum PingOutcome
     Unverified,
     /// <summary>A valid pong from the expected device: it is online at the pinged host and speaks v2.</summary>
     Alive,
-    /// <summary>The host answered 426: it speaks another protocol version.</summary>
+    /// <summary>The host answered 426 (or 404, a v1 server without the ping route): it speaks another protocol version.</summary>
     UpgradeRequired,
     /// <summary>
     /// The host answered <c>400 {"status":"stale"}</c>: its clock disagrees with ours by more than the
@@ -76,7 +76,8 @@ public static class LivenessPing
         byte[] pairKey,
         DateTimeOffset? now = null)
     {
-        if (statusCode == 426) return PingOutcome.UpgradeRequired;
+        // 404: a v1 server has no ping route, so it is an older protocol, not "offline".
+        if (statusCode is 426 or 404) return PingOutcome.UpgradeRequired;
         if (statusCode == 400 && ResponseStatus(body) == "stale") return PingOutcome.ClockSkew;
         if (statusCode != 200) return PingOutcome.Unverified;
         try

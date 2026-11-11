@@ -82,6 +82,27 @@ public sealed class LivenessTests
     }
 
     [Fact]
+    public void HostUpdateThatThrowsIsReportedAndOthersStillApply()
+    {
+        var other = Guid.NewGuid();
+        var stored = new List<Guid>();
+        var error = DeviceLiveness.StoreHostUpdates(
+            new Dictionary<Guid, string> { [Device] = "10.0.0.66", [other] = "10.0.0.67" },
+            (id, _) =>
+            {
+                if (id == Device) throw new IOException("disk full");
+                stored.Add(id);
+            });
+
+        Assert.Equal("disk full", error);
+        Assert.Equal([other], stored);
+    }
+
+    [Fact]
+    public void HostUpdatesThatSucceedReportNoError() =>
+        Assert.Null(DeviceLiveness.StoreHostUpdates(new Dictionary<Guid, string> { [Device] = "10.0.0.66" }, (_, _) => { }));
+
+    [Fact]
     public async Task UpgradeRequiredEverywhereIsOutdatedNotOnline()
     {
         var report = await DeviceLiveness.ResolveAsync(
@@ -220,6 +241,11 @@ public sealed class LivenessTests
         Assert.Equal(PingOutcome.Unverified, LivenessPing.EvaluatePong(
             400, "Bad Request"u8.ToArray(), "AAAAAAAAAAAAAAAB", Device, Local, Key));
     }
+
+    [Fact]
+    public void NotFoundOnPingIsAV1ServerSoUpgradeRequired() =>
+        Assert.Equal(PingOutcome.UpgradeRequired, LivenessPing.EvaluatePong(
+            404, "Not Found"u8.ToArray(), "AAAAAAAAAAAAAAAB", Device, Local, Key));
 
     [Fact]
     public async Task ResponderAnswers401StaleAndReplayed()

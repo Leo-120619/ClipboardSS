@@ -387,21 +387,24 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
                 report.UpgradeRequired.Add(deviceId);
         }
 
-        ApplyLiveness(report, [device], rebuildAll: false);
+        var stored = ApplyLiveness(report, [device], rebuildAll: false);
         if (!report.VerifiedHosts.ContainsKey(deviceId))
         {
             if (reportError) LastError = UnreachableMessage(deviceId);
             StateChanged?.Invoke(this, EventArgs.Empty);
             return false;
         }
-        LastError = null;
+        if (stored) LastError = null;
         return true;
     }
 
     /// <summary>Pings one paired device at one host over <c>POST /v1/ping</c>.</summary>
     private Task<PingOutcome> PingDeviceAsync(PairedDevice device, string host, CancellationToken cancellationToken)
     {
-        var key = PairingCoordinator.PairedStore.GetKey(device.Id);
+        byte[]? key;
+        // A key-storage read failure is no evidence for this device; the others proceed.
+        try { key = PairingCoordinator.PairedStore.GetKey(device.Id); }
+        catch (Exception) { return Task.FromResult(PingOutcome.Unverified); }
         return key is null
             ? Task.FromResult(PingOutcome.Unverified)
             : _sweeper.PingHostAsync(host, device.Id, PairingCoordinator.Identity.Id, key, cancellationToken);
@@ -411,12 +414,15 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     /// The only place a paired device becomes online, has its stored host changed, or has its outdated
     /// flag changed, and only from ping results: <c>/v1/id</c> and mDNS nominate hosts but never prove
     /// identity. With <paramref name="rebuildAll"/> the online set is rebuilt from the report (so unpaired
-    /// devices drop out); otherwise only <paramref name="devices"/> are updated.
+    /// devices drop out); otherwise only <paramref name="devices"/> are updated. A stored-host update
+    /// that fails is reported in <see cref="LastError"/> and returns false; storage errors never escape the
+    /// liveness timer.
     /// </summary>
-    private void ApplyLiveness(LivenessReport report, IReadOnlyCollection<PairedDevice> devices, bool rebuildAll)
+    private bool ApplyLiveness(LivenessReport report, IReadOnlyCollection<PairedDevice> devices, bool rebuildAll)
     {
         var hostUpdates = DeviceLiveness.HostUpdates(devices, report);
-        foreach (var (id, host) in hostUpdates) PairingCoordinator.PairedStore.UpdateHost(id, host);
+        var storeError = DeviceLiveness.StoreHostUpdates(hostUpdates, PairingCoordinator.PairedStore.UpdateHost);
+        if (storeError is not null) LastError = storeError;
 
         lock (_outdatedDevices)
         {
@@ -445,6 +451,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         }
         if (hostUpdates.Count > 0) OnPropertyChanged(nameof(PairedDevices));
         if (changed) StateChanged?.Invoke(this, EventArgs.Empty);
+        return storeError is null;
     }
 
     /// <summary>True when the device advertises an older wire protocol: listed, but nothing is sent to it.</summary>

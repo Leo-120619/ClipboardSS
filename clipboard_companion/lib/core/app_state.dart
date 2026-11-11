@@ -198,7 +198,9 @@ List<String> candidateHosts(PairedDevice device, List<Peer> mdnsPeers) {
   return hosts;
 }
 
-/// Pings [hosts] in order and stops at the first valid pong.
+/// Pings [hosts] in order and stops at the first valid pong. A ping that throws
+/// (for example a secure-storage read of the pair key) is no evidence for this
+/// device and never fails the other devices' checks.
 Future<LivenessReport> verifyDevice(
   PairedDevice device,
   List<String> hosts,
@@ -207,7 +209,13 @@ Future<LivenessReport> verifyDevice(
   final id = canonicalDeviceId(device.id);
   final report = LivenessReport();
   for (final host in hosts) {
-    switch (await ping(device, host)) {
+    PingOutcome outcome;
+    try {
+      outcome = await ping(device, host);
+    } catch (_) {
+      outcome = PingOutcome.unverified;
+    }
+    switch (outcome) {
       case PingOutcome.alive:
         report.verifiedHosts[id] = host;
         report.upgradeRequired.remove(id);
@@ -825,7 +833,10 @@ class AppState extends ChangeNotifier {
 
   /// Pings one paired device at one host over `POST /v1/ping` on [client].
   DevicePing _devicePing(http.Client client) => (device, host) async {
-    final key = await pairedStore.getKey(device.id);
+    // A secure-storage read failure is no evidence; other devices proceed.
+    final key = await pairedStore
+        .getKey(device.id)
+        .catchError((Object _) => null);
     if (key == null) return PingOutcome.unverified;
     return LivenessPing.ping(
       deviceId: device.id,

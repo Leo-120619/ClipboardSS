@@ -13,14 +13,14 @@ func makeTestAppModel(
     snippetStore: TextSnippetStore = TextSnippetStore(
         defaults: UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)") ?? .standard
     ),
-    clipboardMonitor: ClipboardMonitor? = nil
+    clipboardMonitor: ClipboardMonitor? = nil,
+    transport: PeerTransport = TestPeerTransport()
 ) throws -> AppModel {
     let identity = DeviceIdentity(id: UUID(), name: "Test Mac")
     let pairedStore = try PairedDeviceStore(
         storageURL: store.storageDirectory.appendingPathComponent("paired-devices.json"),
         keyStorage: TestPairKeyStorage()
     )
-    let transport = TestPeerTransport()
     let pairingCoordinator = PairingCoordinator(
         identity: identity,
         pairedStore: pairedStore,
@@ -87,7 +87,7 @@ private final class TestPairKeyStorage: PairKeyStorage, @unchecked Sendable {
     }
 }
 
-private struct TestPeerTransport: PeerTransport {
+struct TestPeerTransport: PeerTransport {
     func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         Data()
     }

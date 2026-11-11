@@ -58,6 +58,25 @@ void main() {
       },
     );
 
+    test(
+      'a ping that throws (e.g. a secure-storage read) leaves other devices online',
+      () async {
+        final report = await computeDeviceLiveness(
+          devices: [
+            PairedDevice(id: 'a', name: 'Broken', host: '10.0.0.9'),
+            PairedDevice(id: 'b', name: 'Mac', host: '10.0.0.10'),
+          ],
+          mdnsPeers: const [],
+          ping: (device, _) async => device.id == 'a'
+              ? throw StateError('secure storage unavailable')
+              : PingOutcome.alive,
+        );
+
+        expect(report.onlineIds, {'b'});
+        expect(report.upgradeRequired, isEmpty);
+      },
+    );
+
     test('hostIsNotUpdatedWithoutValidPong', () async {
       final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
       final report = await computeDeviceLiveness(
@@ -387,6 +406,13 @@ void main() {
         );
       },
     );
+
+    test('a 404 on /v1/ping is a v1 server: upgradeRequired', () async {
+      expect(
+        await ping((_) async => (404, 'Not Found')),
+        PingOutcome.upgradeRequired,
+      );
+    });
 
     test(
       'the responder answers 426, 401, 400 stale and 409 replayed',

@@ -13,7 +13,8 @@ enum PingOutcome {
   /// speaks v2.
   alive,
 
-  /// The host answered 426: it speaks another protocol version.
+  /// The host answered 426 (or 404, a v1 server without the ping route): it speaks
+  /// another protocol version.
   upgradeRequired,
 
   /// The host answered `400 {"status":"stale"}`: its clock disagrees with ours by
@@ -90,7 +91,10 @@ class LivenessPing {
     required SecretKey pairKey,
     DateTime? now,
   }) async {
-    if (statusCode == 426) return PingOutcome.upgradeRequired;
+    // 404: a v1 server has no ping route, so it is an older protocol, not "offline".
+    if (statusCode == 426 || statusCode == 404) {
+      return PingOutcome.upgradeRequired;
+    }
     if (statusCode == 400 && _status(body) == 'stale') {
       return PingOutcome.clockSkew;
     }

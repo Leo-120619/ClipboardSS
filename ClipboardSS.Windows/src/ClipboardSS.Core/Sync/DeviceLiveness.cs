@@ -96,4 +96,20 @@ public static class DeviceLiveness
                 updates[device.Id] = host;
         return updates;
     }
+
+    /// <summary>
+    /// Applies <paramref name="updates"/> through <paramref name="updateHost"/>. A storage error on one
+    /// device never stops the others or escapes (the liveness timer calls this); the last error's message
+    /// is returned, or null when every update was stored.
+    /// </summary>
+    public static string? StoreHostUpdates(IReadOnlyDictionary<Guid, string> updates, Action<Guid, string> updateHost)
+    {
+        string? error = null;
+        foreach (var (id, host) in updates)
+        {
+            try { updateHost(id, host); }
+            catch (Exception exception) { error = exception.Message; }
+        }
+        return error;
+    }
 }

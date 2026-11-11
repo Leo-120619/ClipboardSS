@@ -36,6 +36,26 @@ struct ShareInboxTests {
         #expect(drops.first?.directory.standardizedFileURL == drop.standardizedFileURL)
     }
 
+    @Test("a rejected or incomplete drop older than 24 hours is removed; a fresh one is kept")
+    func staleRejectedDropIsRemoved() throws {
+        let staleIncomplete = outbox.appendingPathComponent("stale-incomplete", isDirectory: true)
+        try FileManager.default.createDirectory(at: staleIncomplete, withIntermediateDirectories: true)
+        try Data("png".utf8).write(to: staleIncomplete.appendingPathComponent("photo.png"))
+        let staleRejected = try makeDrop(names: ["missing.png"]) { _ in }
+        let fresh = outbox.appendingPathComponent("fresh-incomplete", isDirectory: true)
+        try FileManager.default.createDirectory(at: fresh, withIntermediateDirectories: true)
+        let old = Date().addingTimeInterval(-25 * 60 * 60)
+        for dir in [staleIncomplete, staleRejected] {
+            try FileManager.default.setAttributes([.creationDate: old, .modificationDate: old], ofItemAtPath: dir.path)
+        }
+
+        #expect(ShareInbox.pendingDrops(in: outbox).isEmpty)
+
+        #expect(!FileManager.default.fileExists(atPath: staleIncomplete.path))
+        #expect(!FileManager.default.fileExists(atPath: staleRejected.path))
+        #expect(FileManager.default.fileExists(atPath: fresh.path))
+    }
+
     @Test("a manifest name that climbs out of the drop is rejected")
     func manifestNameWithParentTraversalIsRejected() throws {
         try Data("secret".utf8).write(to: root.appendingPathComponent("secret.txt"))

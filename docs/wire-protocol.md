@@ -206,7 +206,9 @@ Outcomes:
   one, the stored host is updated; the device leaves the outdated set (a pong proves v2).
   While it keeps ponging, an mDNS advertisement of an older `v` for its id is ignored (that
   would otherwise let anyone on the LAN block traffic to a live device).
-- `426` → the device is marked outdated ("update the other device"); not online, host unchanged.
+- `426`, or `404` (a v1 server has no `/v1/ping` route) → the device is marked outdated
+  ("update the other device"); not online, host unchanged. This lets a v1 peer seen only at
+  its stored host show "update the other device" from the liveness timer.
 - `400 {"status":"stale"}` → **clock skew**: the device shows "Clock out of sync", and
   reconnect / file-send errors read "Clock out of sync with <device>." (the same text as a
   stale clip). This answer is unauthenticated, so the device is not online and its host is
@@ -217,7 +219,7 @@ Outcomes:
 **Liveness rule.** A paired device is online only after a valid pong. Callers try the
 device's mDNS address(es) first, then its stored host. Reconnecting may also sweep the subnet
 with `GET /v1/id`; hosts claiming the device's id are pinged like any other candidate. A v1
-peer cannot answer a ping, so a sweep result advertising `v < 2` (with no valid pong
+peer cannot answer a ping (it answers `404`, treated as outdated above), so a sweep result advertising `v < 2` (with no valid pong
 anywhere) marks the device outdated; a later valid pong clears that.
 
 **Ping/pong test vector** (all three suites assert it): the Envelope v2 vector above with

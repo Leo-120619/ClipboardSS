@@ -5,7 +5,8 @@ import CryptoKit
 public enum PingOutcome: Sendable, Equatable {
     /// A valid pong from the expected device: it is online at the pinged host and speaks v2.
     case alive
-    /// The host answered 426: it speaks another protocol version.
+    /// The host answered 426 (or 404, a v1 server without the ping route): it speaks
+    /// another protocol version.
     case upgradeRequired
     /// The host answered `400 {"status":"stale"}`: its clock disagrees with ours by more
     /// than the freshness window. Unauthenticated, so it never proves liveness.
@@ -77,7 +78,8 @@ public enum LivenessPing {
         pairKey: SymmetricKey,
         now: Date = Date()
     ) -> PingOutcome {
-        if statusCode == 426 { return .upgradeRequired }
+        // 404: a v1 server has no ping route, so it is an older protocol, not "offline".
+        if statusCode == 426 || statusCode == 404 { return .upgradeRequired }
         if statusCode == 400, ProtocolMismatch.responseStatus(body) == "stale" { return .clockSkew }
         guard
             statusCode == 200,
