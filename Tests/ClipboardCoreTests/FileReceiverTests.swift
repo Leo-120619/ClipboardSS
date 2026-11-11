@@ -102,6 +102,38 @@ struct FileReceiverTests {
         #expect(try Data(contentsOf: dest) == data)
     }
 
+    @Test("received files carry a com.apple.quarantine attribute naming ClipboardSS")
+    func receivedFileIsQuarantined() async throws {
+        let fixture = try await makeFixture()
+        let data = Data((0..<6).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4, fileName: "payload.command")
+
+        #expect(await fixture.receiver.handleOffer(envelope: offer).statusCode == 200)
+        for (i, chunk) in chunks.enumerated() {
+            #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: i, body: chunk).statusCode == 200)
+        }
+        let finish = try sealedEnvelope(FileFinishPayload(transferId: id), purpose: .fileFinish, sourceDeviceId: fixture.peerId, recipientDeviceId: fixture.localId, key: fixture.key)
+        #expect(await fixture.receiver.handleFinish(envelope: finish).statusCode == 200)
+
+        let dest = fixture.destinationDir.appendingPathComponent("payload.command")
+        let value = try #require(quarantineAttribute(of: dest), "received file has no com.apple.quarantine attribute")
+        let fields = value.split(separator: ";", omittingEmptySubsequences: false)
+        #expect(fields.count == 4)
+        #expect(fields.first == "0081")
+        #expect(fields.count > 1 && UInt64(fields[1], radix: 16) != nil)
+        #expect(fields.count > 2 && fields[2] == "ClipboardSS")
+        #expect(fields.count > 3 && UUID(uuidString: String(fields[3])) != nil)
+    }
+
+    private func quarantineAttribute(of url: URL) -> String? {
+        let name = "com.apple.quarantine"
+        let size = getxattr(url.path, name, nil, 0, 0, 0)
+        guard size > 0 else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard getxattr(url.path, name, &buffer, size, 0, 0) == size else { return nil }
+        return String(decoding: buffer, as: UTF8.self)
+    }
+
     @Test("out-of-order chunks still complete")
     func outOfOrder() async throws {
         let fixture = try await makeFixture()

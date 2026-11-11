@@ -78,7 +78,7 @@ struct ClipboardRootView: View {
             ScreenshotReviewView(review: review, model: model)
         }
         .sheet(item: Binding(
-            get: { model.editingImage.map { IdentifiableImage(image: $0) } },
+            get: { model.editingImage.map { IdentifiableImage(image: $0, clipID: model.editingClipID) } },
             set: { model.editingImage = $0?.image }
         )) { identifiableImage in
             PhotoEditorView(image: identifiableImage.image, model: model)
@@ -220,9 +220,17 @@ private struct EmptyStateView: View {
     }
 }
 
+/// Sheet item for the photo editor. The id must stay the same across view updates,
+/// or SwiftUI tears the sheet down and loses the edits: it is the clip being edited,
+/// or the image object itself for a clipboard image that has no clip.
 struct IdentifiableImage: Identifiable {
-    let id = UUID()
+    let id: AnyHashable
     let image: NSImage
+
+    init(image: NSImage, clipID: UUID?) {
+        self.image = image
+        self.id = clipID.map { AnyHashable($0) } ?? AnyHashable(ObjectIdentifier(image))
+    }
 }
 
 /// Thread-safe accumulator for file URLs resolved from dropped `NSItemProvider`s

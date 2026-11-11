@@ -9,6 +9,7 @@ func makeTestAppModel(
     pasteboard: PasteboardClient,
     launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
     screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
+    screenshotCaptureService: any ScreenshotCapturing = ScreenshotCaptureService(),
     snippetStore: TextSnippetStore = TextSnippetStore(
         defaults: UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)") ?? .standard
     ),
@@ -54,7 +55,7 @@ func makeTestAppModel(
     return AppModel(
         store: store,
         writer: ClipboardWriter(pasteboard: pasteboard, store: store),
-        screenshotCaptureService: ScreenshotCaptureService(),
+        screenshotCaptureService: screenshotCaptureService,
         ocrService: OCRService(),
         screenTextCaptureService: screenTextCaptureService,
         launchAtLogin: launchAtLogin,

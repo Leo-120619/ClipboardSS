@@ -208,12 +208,45 @@ private struct ImagePreview: View {
     let baseDirectory: URL
 
     var body: some View {
-        if let image = NSImage(contentsOf: clip.resolvedImageURL(baseDirectory: baseDirectory)) {
+        if let image = ThumbnailCache.shared.image(at: clip.resolvedImageURL(baseDirectory: baseDirectory)) {
             Image(nsImage: image)
                 .resizable()
                 .scaledToFit()
                 .frame(maxHeight: 140)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+    }
+}
+
+/// Decoded clip images by file path. The history view re-renders on every 0.75 s poll;
+/// without this each render decoded every visible image from disk again. Image files
+/// are written once under a fresh UUID name and never modified, so the path is a safe key.
+@MainActor
+final class ThumbnailCache {
+    static let shared = ThumbnailCache()
+    private let cache = NSCache<NSString, NSImage>()
+
+    /// Bounded by decoded pixel bytes (default 128 MB) as well as count, since a few
+    /// Retina screenshots alone can be tens of MB each.
+    init(countLimit: Int = 200, totalCostLimit: Int = 128 * 1024 * 1024) {
+        cache.countLimit = countLimit
+        cache.totalCostLimit = totalCostLimit
+    }
+
+    func image(at url: URL) -> NSImage? {
+        let key = url.path as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        cache.setObject(image, forKey: key, cost: Self.decodedByteCost(of: image))
+        return image
+    }
+
+    /// Approximate decoded size: 4 bytes per pixel of the largest representation.
+    static func decodedByteCost(of image: NSImage) -> Int {
+        let pixels = image.representations.map { $0.pixelsWide * $0.pixelsHigh }.max() ?? 0
+        let fallback = Int(image.size.width * image.size.height)
+        return max(pixels, fallback, 1) * 4
     }
 }

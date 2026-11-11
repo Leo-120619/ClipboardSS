@@ -51,6 +51,21 @@ struct PreferencesView: View {
                 Text("Click a shortcut field, then press the keys to use. Shortcut changes apply immediately.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let message = model.shortcutMessage {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if !model.hotKeyRegistrationFailures.isEmpty {
+                    Label(
+                        "macOS did not accept "
+                            + model.hotKeyRegistrationFailures.map(\.displayName).joined(separator: ", ")
+                            + ". Another app may already use it; choose a different shortcut.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {

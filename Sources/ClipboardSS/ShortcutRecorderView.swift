@@ -98,7 +98,13 @@ final class ShortcutRecorderButton: NSButton {
             return
         }
 
-        onShortcutChanged?(KeyboardShortcut(keyCode: event.keyCode, modifiers: modifiers))
+        let recorded = KeyboardShortcut(keyCode: event.keyCode, modifiers: modifiers)
+        // Command-V is the system Paste; keep recording so the user can pick another.
+        guard !recorded.isReservedSystemShortcut else {
+            NSSound.beep()
+            return
+        }
+        onShortcutChanged?(recorded)
         isRecording = false
     }
 

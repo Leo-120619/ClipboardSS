@@ -350,12 +350,32 @@ public actor FileReceiver {
         let destinationDir = destinationProvider()
         try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
         let safeName = (session.offer.fileName as NSString).lastPathComponent
-        let destination = uniqueDestination(directory: destinationDir, fileName: safeName.isEmpty ? "download" : safeName)
+        let destination = Self.uniqueDestination(directory: destinationDir, fileName: safeName.isEmpty ? "download" : safeName)
+        // Quarantined before the move, so the file is never visible at its destination without it.
+        do {
+            try Self.applyQuarantine(to: session.tempURL, now: now())
+        } catch {
+            logToFile("Could not set the quarantine attribute on a received file: \(error)")
+        }
         try FileManager.default.moveItem(at: session.tempURL, to: destination)
         return destination
     }
 
-    private func uniqueDestination(directory: URL, fileName: String) -> URL {
+    /// Marks a received file the way browsers mark downloads, so Gatekeeper checks it
+    /// before it is opened or run.
+    public static func applyQuarantine(to url: URL, now: Date) throws {
+        let timestamp = String(UInt64(max(0, now.timeIntervalSince1970)), radix: 16)
+        let value = "0081;\(timestamp);ClipboardSS;\(UUID().uuidString)"
+        let failureCode: Int32? = value.withCString { bytes in
+            setxattr(url.path, "com.apple.quarantine", bytes, strlen(bytes), 0, 0) == 0 ? nil : errno
+        }
+        if let failureCode {
+            throw POSIXError(POSIXErrorCode(rawValue: failureCode) ?? .EIO)
+        }
+    }
+
+    /// `fileName` in `directory`, or "name (1).ext", "name (2).ext", … if it is taken.
+    public static func uniqueDestination(directory: URL, fileName: String) -> URL {
         let candidate = directory.appendingPathComponent(fileName)
         if !FileManager.default.fileExists(atPath: candidate.path) {
             return candidate
