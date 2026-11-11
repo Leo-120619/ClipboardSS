@@ -87,7 +87,8 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
 
         ConfirmComparisonButton.IsEnabled = false;
         var success = await _model.ConfirmJoinAsync();
-        ErrorText.Text = success ? string.Empty : _model.LastError ?? "Pairing failed.";
+        // A cancel while waiting leaves LastError empty.
+        ErrorText.Text = success ? string.Empty : _model.LastError ?? string.Empty;
         Refresh();
         RefreshPairing();
     }

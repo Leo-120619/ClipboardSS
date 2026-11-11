@@ -23,6 +23,9 @@ public sealed class PairingNotAcceptedException(int statusCode)
     public int StatusCode { get; } = statusCode;
 }
 
+/// <summary>This device's user cancelled while the confirm was in flight; nothing was stored.</summary>
+public sealed class PairingCancelledException() : OperationCanceledException("Pairing was cancelled on this device.");
+
 /// <summary>The other device's user did not confirm the number within 60 s (408).</summary>
 public sealed class PairingTimedOutException()
     : InvalidOperationException("The other device did not confirm in time. Show a new code and try again.");
@@ -55,8 +58,8 @@ public sealed class PairingCoordinator(
 
     // Hosting state, guarded by _gate. All pairing rules on the target side are enforced in
     // HandlePairStartAsync / HandlePairRevealAsync / HandlePairConfirmAsync below:
-    // - one pending initiator per code (the same deviceId may restart until it has revealed;
-    //   any other start is refused with 403);
+    // - a code hands out at most one target key: any second start (same deviceId or not)
+    //   ends the code with 403;
     // - reveal and confirm are refused (401) unless the code is active and unexpired;
     // - any failure (bad reveal or commitment, bad proof, cancel here, 60 s confirm timeout)
     //   ends the code and clears pending state; so do stop, expiry and start;
@@ -178,19 +181,24 @@ public sealed class PairingCoordinator(
         var session = new PairingSession();
         bool ended;
         string? code;
+        var secondStart = false;
         lock (_gate)
         {
             code = ActiveHostCode(out ended);
-            if (code is not null)
+            if (code is not null && _pending is not null)
             {
-                if (_pending is not null && (_pending.Id != request.DeviceId || _pending.PairKey is not null))
-                {
-                    throw new PairingRejectedException("Another device is already pairing with this code.");
-                }
+                // This code already handed out a key; a second one would let a code holder
+                // re-roll the comparison number. The user must generate a new code.
+                EndHosting();
+                secondStart = true;
+            }
+            else if (code is not null)
+            {
                 _pending = new PendingInitiator(request.DeviceId, request.DeviceName, remoteHost, commitment, session);
             }
         }
-        if (ended) RaiseHostingChanged();
+        if (ended || secondStart) RaiseHostingChanged();
+        if (secondStart) throw new PairingRejectedException("This pairing code was already used; show a new code.");
         if (code is null) throw new PairingRejectedException("This device is not hosting a pairing code.");
 
         return Task.FromResult(new PairStartResponse(
@@ -261,6 +269,12 @@ public sealed class PairingCoordinator(
         lock (_gate)
         {
             active = ActiveHostCode(out ended) is not null;
+            if (!active && _held is { } held && held.InitiatorId == request.DeviceId)
+            {
+                // The initiator that is being held cancelled (it sends a bad proof).
+                EndHosting();
+                ended = true;
+            }
             if (active)
             {
                 // Every confirm spends the code; the comparison stays on screen until it is resolved.
@@ -291,7 +305,7 @@ public sealed class PairingCoordinator(
 
         if (!localConfirmed)
         {
-            var decision = await HoldForLocalDecisionAsync(generation).ConfigureAwait(false);
+            var decision = await HoldForLocalDecisionAsync(generation, request.DeviceId).ConfigureAwait(false);
             if (decision != HostDecision.Confirmed)
             {
                 EndHostingIfCurrent(generation);
@@ -305,14 +319,16 @@ public sealed class PairingCoordinator(
         return PairConfirmOutcome.Paired;
     }
 
-    private async Task<HostDecision> HoldForLocalDecisionAsync(int generation)
+    private async Task<HostDecision> HoldForLocalDecisionAsync(int generation, Guid initiatorId)
     {
         var decision = new TaskCompletionSource<HostDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var timeout = new CancellationTokenSource();
-        var held = new HeldConfirm(decision);
+        var held = new HeldConfirm(initiatorId, decision);
         lock (_gate)
         {
             if (generation != _generation) return HostDecision.Cancelled;
+            // This device's user may have pressed Confirm while the proof was being checked.
+            if (_hostComparison?.LocalConfirmed == true) return HostDecision.Confirmed;
             _held = held;
         }
         using var registration = timeout.Token.Register(() =>
@@ -360,7 +376,7 @@ public sealed class PairingCoordinator(
             throw new ArgumentException("Enter a 6-digit pairing code.", nameof(code));
         }
 
-        CancelPairing();
+        _ = CancelPairingAsync();
         IsPairing = true;
         try
         {
@@ -394,7 +410,7 @@ public sealed class PairingCoordinator(
             var comparison = new PairingComparison(response.DeviceName, result.ConfirmCode);
             lock (_gate)
             {
-                _pendingJoin = new PendingJoin(peer, response.DeviceId, response.DeviceName, result.PairKey);
+                _pendingJoin = new PendingJoin(peer, response.DeviceId, response.DeviceName, result.PairKey, new CancellationTokenSource());
                 _joinComparison = comparison;
             }
             RaiseHostingChanged();
@@ -419,15 +435,29 @@ public sealed class PairingCoordinator(
             _joinComparison = _joinComparison is null ? null : _joinComparison with { LocalConfirmed = true };
         }
         RaiseHostingChanged();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, join.Cancellation.Token);
         try
         {
             var proof = PairingSession.GenerateConfirmationProof(join.PairKey, Identity.Id, join.TargetId);
-            var response = await PostAsync(
-                join.Peer,
-                "/v1/pair/confirm",
-                new PairConfirmRequest(Identity.Id, Convert.ToBase64String(proof)),
-                _confirmTransport,
-                cancellationToken);
+            HttpResponse response;
+            try
+            {
+                response = await PostAsync(
+                    join.Peer,
+                    "/v1/pair/confirm",
+                    new PairConfirmRequest(Identity.Id, Convert.ToBase64String(proof)),
+                    _confirmTransport,
+                    linked.Token);
+            }
+            catch (OperationCanceledException) when (join.Cancellation.IsCancellationRequested)
+            {
+                throw new PairingCancelledException();
+            }
+            // The user cancelled while waiting: store nothing, whatever the answer.
+            lock (_gate)
+            {
+                if (!ReferenceEquals(_pendingJoin, join)) throw new PairingCancelledException();
+            }
             switch (response.StatusCode)
             {
                 case 200:
@@ -456,16 +486,37 @@ public sealed class PairingCoordinator(
         }
     }
 
-    /// <summary>This device's user cancelled (or the numbers differ). Nothing was stored.</summary>
-    public void CancelPairing()
+    /// <summary>
+    /// This device's user cancelled (or the numbers differ). Nothing is stored, even if a confirm
+    /// is in flight (it is aborted), and the target is told with a confirm carrying an invalid
+    /// proof, which it answers 401 after ending its code and comparison.
+    /// </summary>
+    public async Task CancelPairingAsync()
     {
+        PendingJoin? join;
         lock (_gate)
         {
             if (_pendingJoin is null && _joinComparison is null) return;
+            join = _pendingJoin;
             _pendingJoin = null;
             _joinComparison = null;
         }
+        join?.Cancellation.Cancel();
         RaiseHostingChanged();
+        if (join is null) return;
+        try
+        {
+            await PostAsync(
+                join.Peer,
+                "/v1/pair/confirm",
+                new PairConfirmRequest(Identity.Id, Convert.ToBase64String(new byte[32])),
+                transport,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Best effort: the target's code also expires on its own.
+        }
     }
 
     /// <summary>The hosted code while it is unexpired; an expired code ends hosting. Call under _gate.</summary>
@@ -545,10 +596,12 @@ public sealed class PairingCoordinator(
     }
 
     /// <summary>A valid <c>/v1/pair/confirm</c> waiting for this device's user.</summary>
-    private sealed class HeldConfirm(TaskCompletionSource<HostDecision> decision)
+    private sealed class HeldConfirm(Guid initiatorId, TaskCompletionSource<HostDecision> decision)
     {
+        public Guid InitiatorId { get; } = initiatorId;
         public TaskCompletionSource<HostDecision> Decision { get; } = decision;
     }
 
-    private sealed record PendingJoin(Peer Peer, Guid TargetId, string TargetName, byte[] PairKey);
+    /// <param name="Cancellation">Cancelled by <see cref="CancelPairingAsync"/> to abort an in-flight confirm.</param>
+    private sealed record PendingJoin(Peer Peer, Guid TargetId, string TargetName, byte[] PairKey, CancellationTokenSource Cancellation);
 }

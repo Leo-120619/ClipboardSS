@@ -279,6 +279,11 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
             StateChanged?.Invoke(this, EventArgs.Empty);
             return true;
         }
+        catch (PairingCancelledException)
+        {
+            // The user cancelled here; nothing to report.
+            return false;
+        }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
             LastError = JoinErrorMessage(exception);
@@ -286,7 +291,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         }
     }
 
-    public void CancelJoin() => PairingCoordinator.CancelPairing();
+    public void CancelJoin() => _ = PairingCoordinator.CancelPairingAsync();
     public void ConfirmHostedPairing() => PairingCoordinator.ConfirmHostedPairing();
     public void CancelHostedPairing() => PairingCoordinator.CancelHostedPairing();
 

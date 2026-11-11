@@ -74,29 +74,32 @@ public sealed class PairingCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task SecondInitiatorWhilePendingIsRejected()
+    public async Task SecondInitiatorWhilePendingEndsCode()
     {
         var code = _coordinator.StartHosting();
         var first = await StartAsync(InitiatorA, code);
 
-        await Assert.ThrowsAsync<PairingRejectedException>(() => StartAsync(InitiatorB, code));
+        await Assert.ThrowsAsync<PairingRejectedException>(() => StartWithoutRevealAsync(InitiatorB));
+        Assert.Null(_coordinator.HostCode);
+        Assert.Null(_coordinator.HostComparison);
 
-        // The refused start did not displace the pending initiator.
         _coordinator.ConfirmHostedPairing();
-        Assert.Equal(PairConfirmOutcome.Paired, await ConfirmAsync(InitiatorA, first.Proof));
-        Assert.Equal(first.PairKey, _store.GetKey(InitiatorA));
+        Assert.Equal(PairConfirmOutcome.Rejected, await ConfirmAsync(InitiatorA, first.Proof));
+        Assert.Null(_store.GetKey(InitiatorA));
     }
 
     [Fact]
-    public async Task SecondStartFromSameInitiatorReplacesPending()
+    public async Task SecondStartFromSameInitiatorEndsCode()
     {
-        var code = _coordinator.StartHosting();
-        await StartWithoutRevealAsync(InitiatorA);
-        var second = await StartAsync(InitiatorA, code);
+        _coordinator.StartHosting();
+        var started = await StartWithoutRevealAsync(InitiatorA);
 
-        _coordinator.ConfirmHostedPairing();
-        Assert.Equal(PairConfirmOutcome.Paired, await ConfirmAsync(InitiatorA, second.Proof));
-        Assert.Equal(second.PairKey, _store.GetKey(InitiatorA));
+        await Assert.ThrowsAsync<PairingRejectedException>(() => StartWithoutRevealAsync(InitiatorA));
+        Assert.Null(_coordinator.HostCode);
+        var reveal = await _coordinator.HandlePairRevealAsync(
+            new PairRevealRequest(InitiatorA, Convert.ToBase64String(started.Session.EphemeralPublicKey), Convert.ToBase64String(started.Salt)),
+            Token);
+        Assert.Equal(PairRevealOutcome.Rejected, reveal);
     }
 
     [Fact]
@@ -201,6 +204,44 @@ public sealed class PairingCoordinatorTests : IDisposable
         Assert.Null(_coordinator.HostCode);
         Assert.Null(_coordinator.HostComparison);
         Assert.Null(initiator.JoinComparison);
+    }
+
+    [Fact]
+    public async Task InitiatorCancelAfterConfirmStoresNothing()
+    {
+        var (initiator, initiatorStore, _) = NewInitiator();
+        var code = _coordinator.StartHosting();
+
+        await initiator.StartPairingAsync(TargetPeer, code, Token);
+        var confirming = initiator.ConfirmPairingAsync(Token);
+        await WaitUntilConfirmIsHeldAsync();
+        await initiator.CancelPairingAsync();
+        _coordinator.ConfirmHostedPairing();
+
+        await Assert.ThrowsAsync<PairingCancelledException>(() => confirming);
+        // Let the aborted confirm's hold resolve on the target before checking its store.
+        for (var i = 0; i < 100 && _coordinator.IsHoldingConfirm; i++) await Task.Delay(5, Token);
+        Assert.Empty(initiatorStore.Devices);
+        Assert.Empty(_store.Devices);
+        Assert.Null(_coordinator.HostCode);
+        Assert.Null(_coordinator.HostComparison);
+        Assert.Null(initiator.JoinComparison);
+    }
+
+    [Fact]
+    public async Task TargetConfirmsFirstThenInitiatorConfirms()
+    {
+        var (initiator, initiatorStore, _) = NewInitiator();
+        var code = _coordinator.StartHosting();
+
+        await initiator.StartPairingAsync(TargetPeer, code, Token);
+        _coordinator.ConfirmHostedPairing();
+        Assert.True(_coordinator.HostComparison?.LocalConfirmed);
+        await initiator.ConfirmPairingAsync(Token);
+
+        var initiatorKey = Assert.IsType<byte[]>(initiatorStore.GetKey(_identity.Id));
+        Assert.Equal(initiatorKey, _store.GetKey(InitiatorA));
+        Assert.False(_coordinator.IsHoldingConfirm);
     }
 
     [Fact]
