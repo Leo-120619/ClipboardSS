@@ -118,7 +118,7 @@ final class AppModel: ObservableObject {
     nonisolated static let coachMarkStepCount = CoachMarkStep.steps.count
     private let writer: ClipboardWriter
     private let screenshotCaptureService: any ScreenshotCapturing
-    private let ocrService: OCRService
+    private let ocrService: any ScreenshotTextRecognizing
     private let screenTextCaptureService: any ScreenTextCapturing
     private let launchAtLogin: LaunchAtLoginControlling
     private let pasteboard: PasteboardClient
@@ -147,7 +147,7 @@ final class AppModel: ObservableObject {
         store: ClipStore,
         writer: ClipboardWriter,
         screenshotCaptureService: any ScreenshotCapturing,
-        ocrService: OCRService,
+        ocrService: any ScreenshotTextRecognizing,
         screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
         pasteboard: PasteboardClient,

@@ -10,6 +10,7 @@ func makeTestAppModel(
     launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
     screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
     screenshotCaptureService: any ScreenshotCapturing = ScreenshotCaptureService(),
+    ocrService: any ScreenshotTextRecognizing = StubTextRecognizer(),
     snippetStore: TextSnippetStore = TextSnippetStore(
         defaults: UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)") ?? .standard
     ),
@@ -56,7 +57,7 @@ func makeTestAppModel(
         store: store,
         writer: ClipboardWriter(pasteboard: pasteboard, store: store),
         screenshotCaptureService: screenshotCaptureService,
-        ocrService: OCRService(),
+        ocrService: ocrService,
         screenTextCaptureService: screenTextCaptureService,
         launchAtLogin: launchAtLogin,
         pasteboard: pasteboard,
@@ -85,6 +86,14 @@ private final class TestPairKeyStorage: PairKeyStorage, @unchecked Sendable {
     func deleteKey(for deviceId: UUID) throws {
         keys[deviceId] = nil
     }
+}
+
+/// Returns no text immediately. The real `OCRService` runs Vision, which can stall for
+/// seconds to minutes while the Neural Engine model compiles, so AppModel tests that wait
+/// for a capture to finish must not depend on it.
+@MainActor
+struct StubTextRecognizer: ScreenshotTextRecognizing {
+    func recognizeText(in imageURL: URL) async throws -> [OCRTextBlock] { [] }
 }
 
 struct TestPeerTransport: PeerTransport {
