@@ -704,6 +704,8 @@ class AppState extends ChangeNotifier {
     try {
       await pairingCoordinator.confirmPairing();
       unawaited(refreshDeviceLiveness());
+    } on PairingCancelledException {
+      // The user cancelled here; nothing to report.
     } catch (e) {
       lastError = joinErrorMessage(e);
     } finally {
@@ -712,7 +714,7 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void cancelJoin() => pairingCoordinator.cancelPairing();
+  void cancelJoin() => unawaited(pairingCoordinator.cancelPairing());
 
   void confirmHostedPairing() => pairingCoordinator.confirmHostedPairing();
 

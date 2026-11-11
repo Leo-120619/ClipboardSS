@@ -189,6 +189,9 @@ class ClipServer {
     } on PairingRejectedException catch (e) {
       developer.log('Pair start rejected: ${e.reason}', name: 'ClipServer');
       return Response.forbidden('Rejected');
+    } on TypeError {
+      // Missing or mistyped fields, e.g. a v1 start without `commitment`.
+      return Response.forbidden('Rejected');
     } on BodyTooLargeException {
       return _payloadTooLarge();
     } catch (e) {

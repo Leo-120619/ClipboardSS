@@ -77,6 +77,12 @@ class PairingNotAcceptedException implements Exception {
   String toString() => 'PairingNotAcceptedException: $statusCode';
 }
 
+/// This device's user cancelled while the confirm was in flight; nothing was stored.
+class PairingCancelledException implements Exception {
+  @override
+  String toString() => 'PairingCancelledException';
+}
+
 /// The other device's user did not confirm the number within 60 s (408).
 class PairingTimedOutException implements Exception {
   @override
@@ -118,8 +124,8 @@ class PairingCoordinator {
 
   // Hosting state. All pairing rules on the target side are enforced in
   // [handlePairStart] / [handlePairReveal] / [handlePairConfirmRequest]:
-  // - one pending initiator per code (the same deviceId may restart until it
-  //   has revealed; any other start is refused with 403);
+  // - a code hands out at most one target key: any second start (same deviceId
+  //   or not) ends the code with 403;
   // - reveal and confirm are refused (401) unless the code is active and unexpired;
   // - any failure (bad reveal or commitment, bad proof, cancel here, 60 s confirm
   //   timeout) ends the code and clears pending state; so do stop, expiry and start;
@@ -196,6 +202,10 @@ class PairingCoordinator {
     if (notify) onHostingChanged?.call();
   }
 
+  void _endHostingIfCurrent(int generation) {
+    if (generation == _generation) _endHosting();
+  }
+
   void _resolveHeld(_HeldConfirm held, _HostDecision decision) {
     _held = null;
     held.timeout.cancel();
@@ -256,10 +266,11 @@ class PairingCoordinator {
     if (_activeHostCode() == null) {
       throw PairingRejectedException('not hosting');
     }
-    final pending = _pending;
-    if (pending != null &&
-        (pending.id != initiatorId || pending.pairKey != null)) {
-      throw PairingRejectedException('another initiator is pending');
+    if (_pending != null) {
+      // This code already handed out a key; a second one would let a code
+      // holder re-roll the comparison number. The user must generate a new code.
+      _endHosting();
+      throw PairingRejectedException('second start for this code');
     }
   }
 
@@ -324,7 +335,14 @@ class PairingCoordinator {
     String initiatorId,
     String proofBase64,
   ) async {
-    if (_activeHostCode() == null) return PairConfirmOutcome.rejected;
+    if (_activeHostCode() == null) {
+      // The initiator that is being held cancelled (it sends a bad proof).
+      final held = _held;
+      if (held != null && held.initiatorId == canonicalDeviceId(initiatorId)) {
+        _endHosting();
+      }
+      return PairConfirmOutcome.rejected;
+    }
     // Every confirm spends the code; the comparison stays on screen until it
     // is resolved. Taking the pending initiator before any await keeps
     // concurrent confirms from racing.
@@ -364,9 +382,11 @@ class PairingCoordinator {
       return PairConfirmOutcome.alreadyPaired;
     }
 
-    if (!localConfirmed) {
+    // This device's user may have pressed Confirm while the proof was checked.
+    if (!localConfirmed && !(_hostComparison?.localConfirmed ?? false)) {
       final completer = Completer<_HostDecision>();
       _held = _HeldConfirm(
+        canonicalInitiatorId,
         completer,
         Timer(confirmHoldTimeout, () {
           final current = _held;
@@ -378,12 +398,13 @@ class PairingCoordinator {
       onHostingChanged?.call();
       final decision = await completer.future;
       if (decision != _HostDecision.confirmed) {
-        _endHosting();
+        _endHostingIfCurrent(generation);
         return decision == _HostDecision.timedOut
             ? PairConfirmOutcome.timedOut
             : PairConfirmOutcome.rejected;
       }
     }
+    if (generation != _generation) return PairConfirmOutcome.rejected;
     _endHosting();
 
     await pairedStore.addDevice(
@@ -403,7 +424,7 @@ class PairingCoordinator {
   /// user chose and returns the number to compare. Nothing is stored until
   /// [confirmPairing] succeeds.
   Future<PairingComparison> startPairing(Peer peer, String code) async {
-    cancelPairing();
+    unawaited(cancelPairing());
     final session = PairingSession();
     await session.init();
     final salt = PairingSession.randomSalt();
@@ -473,6 +494,8 @@ class PairingCoordinator {
         'proof': base64Encode(proof),
       }, confirmRequestTimeout);
 
+      // The user cancelled while waiting: store nothing, whatever the answer.
+      if (!identical(_pendingJoin, join)) throw PairingCancelledException();
       switch (response.statusCode) {
         case 200:
           await pairedStore.addDevice(
@@ -499,12 +522,24 @@ class PairingCoordinator {
     }
   }
 
-  /// This device's user cancelled (or the numbers differ). Nothing was stored.
-  void cancelPairing() {
-    if (_pendingJoin == null && _joinComparison == null) return;
+  /// This device's user cancelled (or the numbers differ). Nothing is stored,
+  /// even if a confirm is in flight, and the target is told with a confirm
+  /// carrying an invalid proof, which it answers 401 after ending its code.
+  Future<void> cancelPairing() async {
+    final join = _pendingJoin;
+    if (join == null && _joinComparison == null) return;
     _pendingJoin = null;
     _joinComparison = null;
     onHostingChanged?.call();
+    if (join == null) return;
+    try {
+      await _post(join.peer, '/v1/pair/confirm', {
+        'deviceId': identity.id,
+        'proof': base64Encode(List<int>.filled(32, 0)),
+      }, requestTimeout);
+    } catch (_) {
+      // Best effort: the target's code also expires on its own.
+    }
   }
 
   Future<http.Response> _post(
@@ -543,9 +578,10 @@ class _PendingInitiator {
 
 /// A valid `/v1/pair/confirm` waiting for this device's user.
 class _HeldConfirm {
+  final String initiatorId;
   final Completer<_HostDecision> completer;
   final Timer timeout;
-  _HeldConfirm(this.completer, this.timeout);
+  _HeldConfirm(this.initiatorId, this.completer, this.timeout);
 }
 
 class _PendingJoin {

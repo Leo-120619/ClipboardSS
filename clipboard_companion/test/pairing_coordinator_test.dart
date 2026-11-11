@@ -250,39 +250,43 @@ void main() {
     expect(await h.storedKey(_initiatorA), isNull);
   });
 
-  test('secondInitiatorWhilePendingIsRejected', () async {
+  test('secondInitiatorWhilePendingEndsCode', () async {
     final h = await _Harness.create();
     final code = h.coordinator.startHosting();
     final first = await h.start(_initiatorA, code);
 
     await expectLater(
-      h.start(_initiatorB, code),
+      h.startWithoutReveal(_initiatorB),
       throwsA(isA<PairingRejectedException>()),
     );
+    expect(h.coordinator.hostCode, isNull);
+    expect(h.coordinator.hostComparison, isNull);
 
-    // The refused start did not displace the pending initiator.
     h.coordinator.confirmHostedPairing();
     final outcome = await h.coordinator.handlePairConfirmRequest(
       _initiatorA,
       first.proofBase64,
     );
-    expect(outcome, PairConfirmOutcome.paired);
-    expect(await h.storedKey(_initiatorA), first.pairKey);
+    expect(outcome, PairConfirmOutcome.rejected);
+    expect(await h.storedKey(_initiatorA), isNull);
   });
 
-  test('secondStartFromSameInitiatorReplacesPending', () async {
+  test('secondStartFromSameInitiatorEndsCode', () async {
     final h = await _Harness.create();
-    final code = h.coordinator.startHosting();
-    await h.startWithoutReveal(_initiatorA);
-    final second = await h.start(_initiatorA, code);
+    h.coordinator.startHosting();
+    final started = await h.startWithoutReveal(_initiatorA);
 
-    h.coordinator.confirmHostedPairing();
-    final outcome = await h.coordinator.handlePairConfirmRequest(
-      _initiatorA,
-      second.proofBase64,
+    await expectLater(
+      h.startWithoutReveal(_initiatorA),
+      throwsA(isA<PairingRejectedException>()),
     );
-    expect(outcome, PairConfirmOutcome.paired);
-    expect(await h.storedKey(_initiatorA), second.pairKey);
+    expect(h.coordinator.hostCode, isNull);
+    final reveal = await h.coordinator.handlePairReveal(
+      _initiatorA,
+      base64Encode(started.session.ephemeralPublicKey),
+      base64Encode(started.salt),
+    );
+    expect(reveal, PairRevealOutcome.rejected);
   });
 
   test('confirmForAlreadyPairedDeviceIdIsRejected', () async {
@@ -403,6 +407,66 @@ void main() {
     expect(target.coordinator.hostCode, isNull);
     expect(target.coordinator.hostComparison, isNull);
     expect(initiator.coordinator.joinComparison, isNull);
+  });
+
+  test('initiatorCancelAfterConfirmStoresNothing', () async {
+    final (target, initiator, _) = await _pair();
+    final code = target.coordinator.startHosting();
+
+    await initiator.coordinator.startPairing(_targetPeer, code);
+    final confirming = expectLater(
+      initiator.coordinator.confirmPairing(),
+      throwsA(isA<PairingCancelledException>()),
+    );
+    await target.waitUntilConfirmIsHeld();
+    await initiator.coordinator.cancelPairing();
+    target.coordinator.confirmHostedPairing();
+
+    await confirming;
+    expect(initiator.pairedStore.devices, isEmpty);
+    expect(target.pairedStore.devices, isEmpty);
+    expect(target.coordinator.hostCode, isNull);
+    expect(target.coordinator.hostComparison, isNull);
+    expect(initiator.coordinator.joinComparison, isNull);
+  });
+
+  test('targetConfirmsFirstThenInitiatorConfirms', () async {
+    final (target, initiator, _) = await _pair();
+    final code = target.coordinator.startHosting();
+
+    await initiator.coordinator.startPairing(_targetPeer, code);
+    target.coordinator.confirmHostedPairing();
+    expect(target.coordinator.hostComparison?.localConfirmed, isTrue);
+    await initiator.coordinator.confirmPairing();
+
+    final initiatorKey = await initiator.storedKey(_targetId);
+    expect(initiatorKey, isNotNull);
+    expect(await target.storedKey(_initiatorA), initiatorKey);
+    expect(target.coordinator.isHoldingConfirm, isFalse);
+  });
+
+  test('v1StartWithoutCommitmentGets403', () async {
+    final h = await _Harness.create();
+    h.coordinator.startHosting();
+    final handler = ClipServer(
+      identity: h.coordinator.identity,
+      pairingCoordinator: h.coordinator,
+      pairedStore: h.pairedStore,
+      onClipReceived: (_) {},
+    ).buildHandler();
+
+    final response = await handler(
+      shelf.Request(
+        'POST',
+        Uri.parse('http://10.0.0.2:51888/v1/pair/start'),
+        body: jsonEncode({
+          'deviceId': _initiatorA,
+          'deviceName': 'Old phone',
+          'ephemeralPublicKey': base64Encode(List<int>.filled(32, 9)),
+        }),
+      ),
+    );
+    expect(response.statusCode, 403);
   });
 
   test('initiatorOnlyContactsSelectedPeer', () async {

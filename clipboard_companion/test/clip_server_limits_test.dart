@@ -150,7 +150,7 @@ void main() {
 
   group('error bodies do not echo exception text', () {
     for (final (path, status) in [
-      ('/v1/pair/start', 500),
+      ('/v1/pair/start', 403),
       ('/v1/pair/confirm', 400),
       ('/v1/clip', 400),
     ]) {
