@@ -21,7 +21,8 @@ public sealed class TcpPeerTransport(TimeSpan? timeout = null) : IPeerTransport
         using var client = new TcpClient { NoDelay = true };
         try
         {
-            await client.ConnectAsync(peer.Host, peer.Port, timeoutSource.Token);
+            var addresses = await HostResolver.Shared.ResolveAsync(peer.Host, timeoutSource.Token);
+            await client.ConnectAsync(addresses, peer.Port, timeoutSource.Token);
             await using var stream = client.GetStream();
             await stream.WriteAsync(data, timeoutSource.Token);
             await stream.FlushAsync(timeoutSource.Token);

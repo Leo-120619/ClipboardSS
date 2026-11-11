@@ -21,6 +21,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private bool _initialized;
     private IntPtr _windowHandle;
     private string? _projectionKey;
+    private long _metadataMinute;
+    private string? _scrollAnchor;
 
     public MainWindow(AppModel model, SettingsStore settings)
     {
@@ -93,18 +95,41 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         if (_projectionKey != projectionKey)
         {
             _projectionKey = projectionKey;
+            _metadataMinute = DateTimeOffset.UtcNow.Ticks / TimeSpan.TicksPerMinute;
             var entries = clips.Select((clip, index) => new ClipListEntry(
                 index == 0 ? "LATEST" : "HISTORY",
                 clip,
                 index == 0)).ToArray();
             var view = new ListCollectionView(entries);
             view.GroupDescriptions.Add(new PropertyGroupDescription(nameof(ClipListEntry.Section)));
+            // Pinning or deleting a clip rebuilds the list; keep the reader where they were unless
+            // the search, the filter or the latest clip changed.
+            var scrollAnchor = $"{(clips.Count > 0 ? clips[0].Id : Guid.Empty):N}|{SearchBox.Text}|{_filter}";
+            var scrollViewer = VisualChildren<ScrollViewer>(ClipList).FirstOrDefault();
+            var offset = scrollAnchor == _scrollAnchor ? scrollViewer?.VerticalOffset ?? 0 : 0;
+            _scrollAnchor = scrollAnchor;
             ClipList.ItemsSource = view;
+            if (offset > 0 && scrollViewer is not null)
+            {
+                ClipList.UpdateLayout();
+                scrollViewer.ScrollToVerticalOffset(offset);
+            }
             ClipList.Visibility = entries.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
             EmptyState.Visibility = entries.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
-        StatusText.Text = $"{_model.Clips.Count} clips · {_model.PairedDevices.Count} paired"
-            + (_model.IsSyncPaused ? " · sync paused" : string.Empty);
+        else
+        {
+            // The list is unchanged, but "5 min. ago" still has to keep counting.
+            var minute = DateTimeOffset.UtcNow.Ticks / TimeSpan.TicksPerMinute;
+            if (minute != _metadataMinute)
+            {
+                _metadataMinute = minute;
+                foreach (var card in VisualChildren<ClipCardControl>(ClipList)) card.RefreshMetadata();
+            }
+        }
+        StatusText.Text = _model.IsSyncPaused ? "Sync paused" : string.Empty;
+        StatusText.ToolTip = $"{_model.Clips.Count} clips · {_model.PairedDevices.Count} paired";
+        SearchPlaceholder.Visibility = string.IsNullOrEmpty(SearchBox.Text) ? Visibility.Visible : Visibility.Collapsed;
         RefreshError();
     }
 
@@ -124,6 +149,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             _windowHandle,
             NativeMethods.GwlExStyle,
             style | NativeMethods.WsExToolWindow | NativeMethods.WsExNoActivate);
+        // Follow Windows when the user switches between light and dark while the app is running.
+        Wpf.Ui.Appearance.SystemThemeWatcher.Watch(this);
     }
 
     private void SetNoActivate(bool noActivate)
@@ -202,6 +229,26 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             MainWindowFrame = new WindowFrame(bounds.Left, bounds.Top, bounds.Width, bounds.Height),
         });
+    }
+
+    private void Header_OnMouseLeftButtonDown(object sender, MouseButtonEventArgs args)
+    {
+        if (args.ButtonState != MouseButtonState.Pressed) return;
+        try { DragMove(); }
+        catch (InvalidOperationException) { /* the button was released before the drag began */ }
+    }
+
+    private void Close_OnClick(object sender, RoutedEventArgs args) => HideToTray();
+    private void DismissError_OnClick(object sender, RoutedEventArgs args) => _model.ClearError();
+
+    private static IEnumerable<T> VisualChildren<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var index = 0; index < System.Windows.Media.VisualTreeHelper.GetChildrenCount(root); index++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(root, index);
+            if (child is T match) yield return match;
+            else foreach (var nested in VisualChildren<T>(child)) yield return nested;
+        }
     }
 
     private void Devices_OnClick(object sender, RoutedEventArgs args) => DevicesRequested?.Invoke(this, EventArgs.Empty);

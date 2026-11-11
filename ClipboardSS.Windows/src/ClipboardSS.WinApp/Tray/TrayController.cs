@@ -43,7 +43,11 @@ public sealed class TrayController : IDisposable
             ContextMenuStrip = _menu,
             Visible = true,
         };
-        _icon.DoubleClick += (_, _) => _open();
+        // A single left click opens the window, like the Mac menu bar item.
+        _icon.MouseClick += (_, args) =>
+        {
+            if (args.Button == Forms.MouseButtons.Left) _open();
+        };
     }
 
     public void Dispose()

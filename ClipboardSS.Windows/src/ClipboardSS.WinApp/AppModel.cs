@@ -45,6 +45,8 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private readonly System.Threading.Timer _livenessTimer;
     private readonly SemaphoreSlim _livenessRefreshLock = new(1, 1);
     private CancellationTokenSource? _clipboardDebounce;
+    /// <summary>Cancels in-flight clip sends only when the app shuts down.</summary>
+    private readonly CancellationTokenSource _lifetime = new();
     private string? _lastWrittenHash;
     private Guid? _lastBroadcastClipId;
     private string? _lastError;
@@ -196,6 +198,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     }
 
     public void ReportError(string message) => LastError = message;
+    public void ClearError() => LastError = null;
 
     public void Delete(ClipItem clip)
     {
@@ -674,6 +677,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         _clipboard.Changed -= ClipboardChanged;
         _clipboardDebounce?.Cancel();
         _clipboardDebounce?.Dispose();
+        _lifetime.Cancel();
         _livenessTimer.Dispose();
         _mdns.Dispose();
         _fileReceiver.Dispose();
@@ -693,7 +697,10 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         try
         {
             await Task.Delay(TimeSpan.FromMilliseconds(300), cancellationToken);
-            await await Application.Current.Dispatcher.InvokeAsync(() => ProcessClipboardChangeAsync(cancellationToken));
+            // The debounce token only covers the wait above. Windows often raises a second clipboard
+            // update for one copy; that must not cancel the send the first one started, because the
+            // second read is then suppressed as a duplicate and the clip would never be sent.
+            await await Application.Current.Dispatcher.InvokeAsync(() => ProcessClipboardChangeAsync(_lifetime.Token));
         }
         catch (OperationCanceledException)
         {
@@ -742,14 +749,35 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
                 clip,
                 ComposeSendTargets(VisiblePeers, PairedDevices, OutdatedDeviceSnapshot(), OnlineDeviceSnapshot()),
                 cancellationToken);
+            SyncLog.Write(_settings.StorageDirectory,
+                $"clip {clip.Type} sent: targets={result.PairedPeerCount} ok={result.SuccessCount} failed={result.FailureCount}"
+                + string.Concat(result.Failures.Select(failure => $" [{failure.PeerName}: {failure.Reason}]")));
             if (result.NeedsUpdateCount > 0) LastError = WireProtocol.UpdateOtherDeviceMessage;
             else if (result.ClockOutOfSyncPeerNames.Count > 0)
                 LastError = WireProtocol.ClockOutOfSyncMessage(result.ClockOutOfSyncPeerNames);
+            else if (UnexpectedSendFailureMessage(result.Failures, OnlineDeviceSnapshot()) is { } failureMessage)
+                LastError = failureMessage;
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
+            SyncLog.Write(_settings.StorageDirectory, $"clip {clip.Type} send error: {exception.Message}");
             LastError = exception.Message;
         }
+    }
+
+    /// <summary>
+    /// A failed send is worth a banner only for a device that just answered a ping: a device that is
+    /// simply off or asleep fails every copy and must not nag.
+    /// </summary>
+    public static string? UnexpectedSendFailureMessage(
+        IReadOnlyList<ClipSendFailure> failures,
+        IReadOnlySet<Guid> onlineDeviceIds)
+    {
+        var names = failures
+            .Where(failure => onlineDeviceIds.Contains(failure.PeerId))
+            .Select(failure => failure.PeerName)
+            .ToArray();
+        return names.Length == 0 ? null : $"The last copy did not reach {string.Join(", ", names)}.";
     }
 
     private bool ShouldSuppress(string hash) =>

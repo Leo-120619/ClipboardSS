@@ -4,29 +4,38 @@
              xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
              xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore"
              Focusable="False">
-    <ui:Card x:Name="CardBorder" Margin="0,0,0,10" Padding="12"
-             Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
-             BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
-             BorderThickness="1">
+    <UserControl.Resources>
+        <Style x:Key="CardActionButton" TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+            <Setter Property="Width" Value="32" />
+            <Setter Property="Height" Value="32" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="2,0,0,0" />
+            <Setter Property="Appearance" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+        </Style>
+    </UserControl.Resources>
+    <Border x:Name="CardBorder" Margin="0,0,14,10" Padding="12" CornerRadius="8">
         <Grid>
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="42" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            
-            <Border Width="34" Height="34" CornerRadius="7" VerticalAlignment="Top"
-                    Background="{DynamicResource ControlFillColorDefaultBrush}"
-                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1">
-                <ui:SymbolIcon x:Name="TypeGlyph" Symbol="Clipboard24" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+
+            <Border Width="32" Height="32" CornerRadius="6" VerticalAlignment="Top"
+                    Background="{DynamicResource ControlFillColorSecondaryBrush}">
+                <ui:SymbolIcon x:Name="TypeGlyph" Symbol="TextAlignLeft24" HorizontalAlignment="Center"
+                               VerticalAlignment="Center" FontSize="16"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
             </Border>
 
-            <Grid x:Name="ContentHitArea" Grid.Column="1" Margin="8,0,12,0"
+            <Grid x:Name="ContentHitArea" Grid.Column="1" Margin="12,0,12,0"
                   Focusable="True" Cursor="Hand"
+                  MouseLeftButtonDown="Content_OnMouseLeftButtonDown"
                   MouseLeftButtonUp="Content_OnMouseLeftButtonUp"
                   KeyDown="Content_OnKeyDown"
-                  automation:AutomationProperties.HelpText="Press Enter to copy this clip">
+                  automation:AutomationProperties.HelpText="Press Enter to paste this clip">
                 <Grid.Style>
                     <Style TargetType="Grid">
                         <Setter Property="Background" Value="Transparent" />
@@ -39,36 +48,46 @@
                 </Grid.Style>
                 <StackPanel>
                     <DockPanel LastChildFill="True">
-                        <Border x:Name="PinnedBadge" DockPanel.Dock="Right" Margin="8,0,0,0"
-                                Padding="8,4" CornerRadius="4" Background="{DynamicResource SystemFillColorCautionBackgroundBrush}" Visibility="Collapsed">
-                            <TextBlock Text="Pinned" FontSize="11" FontWeight="SemiBold"
-                                       Foreground="{DynamicResource SystemFillColorCautionBrush}" />
-                        </Border>
-                        <TextBlock x:Name="PreviewText" TextWrapping="Wrap" ClipToBounds="True"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" LineHeight="20" FontSize="14" />
+                        <ui:SymbolIcon x:Name="PinnedBadge" DockPanel.Dock="Right" Margin="8,2,0,0"
+                                       Symbol="Pin24" Filled="True" FontSize="14" VerticalAlignment="Top"
+                                       Foreground="{DynamicResource PinnedBrush}" Visibility="Collapsed"
+                                       automation:AutomationProperties.Name="Pinned" />
+                        <TextBlock x:Name="PreviewText" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                   LineStackingStrategy="BlockLineHeight" />
                     </DockPanel>
-                    <Border x:Name="ImageContainer" Margin="0,10,0,0" MaxHeight="150"
-                            CornerRadius="7" ClipToBounds="True" Visibility="Collapsed"
-                            Background="{DynamicResource ControlFillColorDefaultBrush}">
-                        <Image x:Name="ThumbnailImage" Stretch="Uniform" MaxHeight="150"
+                    <Border x:Name="ImageContainer" Margin="0,6,0,0" HorizontalAlignment="Left"
+                            Visibility="Collapsed">
+                        <Image x:Name="ThumbnailImage" Stretch="Uniform" MaxHeight="140" StretchDirection="DownOnly"
                                automation:AutomationProperties.Name="Clipboard image preview" />
                     </Border>
-                    <TextBlock x:Name="MetadataText" Margin="0,8,0,0" FontSize="12"
+                    <TextBlock x:Name="MetadataText" Margin="0,6,0,0" FontSize="12"
                                Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Grid>
 
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top">
-                <ui:Button Width="48" Height="40" Margin="0,0,6,0" Content="Copy" Appearance="Secondary"
-                        ToolTip="Copy clip" Click="Copy_OnClick"
-                        automation:AutomationProperties.Name="Copy clip" />
-                <ui:Button x:Name="PinButton" Width="48" Height="40" Margin="0,0,6,0" Content="Pin" Appearance="Secondary"
-                        ToolTip="Pin clip" Click="Pin_OnClick"
-                        automation:AutomationProperties.Name="Pin clip" />
-                <ui:Button Width="56" Height="40" Content="Delete" Appearance="Danger"
-                        ToolTip="Delete clip" Click="Delete_OnClick"
-                        automation:AutomationProperties.Name="Delete clip" />
+                <ui:Button Style="{StaticResource CardActionButton}" Margin="0"
+                           ToolTip="Paste and keep ClipboardSS open" Click="Paste_OnClick"
+                           automation:AutomationProperties.Name="Paste clip">
+                    <ui:SymbolIcon Symbol="ArrowEnterLeft24" FontSize="18" />
+                </ui:Button>
+                <ui:Button Style="{StaticResource CardActionButton}"
+                           ToolTip="Copy clip" Click="Copy_OnClick"
+                           automation:AutomationProperties.Name="Copy clip">
+                    <ui:SymbolIcon Symbol="Copy24" FontSize="18" />
+                </ui:Button>
+                <ui:Button x:Name="PinButton" Style="{StaticResource CardActionButton}"
+                           ToolTip="Pin clip" Click="Pin_OnClick"
+                           automation:AutomationProperties.Name="Pin clip">
+                    <ui:SymbolIcon x:Name="PinGlyph" Symbol="Pin24" FontSize="18" />
+                </ui:Button>
+                <ui:Button Style="{StaticResource CardActionButton}"
+                           ToolTip="Delete clip" Click="Delete_OnClick"
+                           automation:AutomationProperties.Name="Delete clip">
+                    <ui:SymbolIcon Symbol="Delete24" FontSize="18" />
+                </ui:Button>
             </StackPanel>
         </Grid>
-    </ui:Card>
+    </Border>
 </UserControl>
