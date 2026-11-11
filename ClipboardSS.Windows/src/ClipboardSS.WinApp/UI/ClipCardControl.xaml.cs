@@ -32,6 +32,7 @@ public partial class ClipCardControl : UserControl
 
     private readonly DispatcherTimer _clickTimer;
     private bool _waitingForSecondClick;
+    private bool _pressed;
 
     public ClipCardControl()
     {
@@ -41,6 +42,7 @@ public partial class ClipCardControl : UserControl
             Interval = TimeSpan.FromMilliseconds(Math.Max(NativeMethods.GetDoubleClickTime(), 200)),
         };
         _clickTimer.Tick += (_, _) => CompleteSingleClick();
+        Loaded += (_, _) => RefreshMetadata();
     }
 
     public ClipItem? Item
@@ -72,18 +74,31 @@ public partial class ClipCardControl : UserControl
 
     private void UpdateDisplay()
     {
+        // A recycled container must not carry a half-finished click over to another clip.
+        _clickTimer.Stop();
+        _waitingForSecondClick = false;
+        _pressed = false;
         if (Item is null) return;
-        CardBorder.Background = (Brush)FindResource(
-            IsProminent ? "ControlFillColorSecondaryBrush" : "CardBackgroundFillColorDefaultBrush");
+        // Resource references, not one-off lookups, so the card follows a light/dark theme change.
+        CardBorder.SetResourceReference(
+            Border.BackgroundProperty,
+            IsProminent ? "ProminentClipCardBrush" : "ClipCardBrush");
         PreviewText.Text = Item.PreviewText;
         PreviewText.FontSize = IsProminent ? 16 : 14;
         PreviewText.FontWeight = IsProminent ? FontWeights.SemiBold : FontWeights.Normal;
-        PreviewText.MaxHeight = IsProminent ? 80 : 42;
-        TypeGlyph.Symbol = Item.Type == ClipType.Text ? Wpf.Ui.Controls.SymbolRegular.TextT24 : Wpf.Ui.Controls.SymbolRegular.Image24;
+        // Four lines for the latest clip, two for history, like the Mac cards.
+        PreviewText.LineHeight = IsProminent ? 22 : 20;
+        PreviewText.MaxHeight = IsProminent ? 88 : 40;
+        TypeGlyph.Symbol = Item.Type == ClipType.Text
+            ? Wpf.Ui.Controls.SymbolRegular.TextAlignLeft24
+            : Wpf.Ui.Controls.SymbolRegular.Image24;
         PinnedBadge.Visibility = Item.IsPinned ? Visibility.Visible : Visibility.Collapsed;
-        PinButton.Content = Item.IsPinned ? "Unpin" : "Pin";
+        PinGlyph.Symbol = Item.IsPinned
+            ? Wpf.Ui.Controls.SymbolRegular.PinOff24
+            : Wpf.Ui.Controls.SymbolRegular.Pin24;
         PinButton.ToolTip = Item.IsPinned ? "Unpin clip" : "Pin clip";
-        MetadataText.Text = $"{(Item.Type == ClipType.Text ? "Text" : "Image")} · {RelativeTime(Item.CreatedAt)}";
+        AutomationProperties.SetName(PinButton, Item.IsPinned ? "Unpin clip" : "Pin clip");
+        RefreshMetadata();
         AutomationProperties.SetName(ContentHitArea, $"{Item.Type} clip: {Item.PreviewText}");
 
         if (Item.Type == ClipType.Image && Store is not null)
@@ -98,10 +113,21 @@ public partial class ClipCardControl : UserControl
         }
     }
 
+    /// <summary>Re-renders the relative time, which goes stale while the list itself is unchanged.</summary>
+    public void RefreshMetadata()
+    {
+        if (Item is null) return;
+        MetadataText.Text = $"{(Item.Type == ClipType.Text ? "Text" : "Image")} • {RelativeTime(Item.CreatedAt, DateTimeOffset.UtcNow)}";
+    }
+
+    private void Content_OnMouseLeftButtonDown(object sender, MouseButtonEventArgs args) => _pressed = true;
+
     private void Content_OnMouseLeftButtonUp(object sender, MouseButtonEventArgs args)
     {
         args.Handled = true;
-        if (Item is null) return;
+        // Only a press that started on this card counts, not a drag released over it.
+        if (!_pressed || Item is null) return;
+        _pressed = false;
         if (_waitingForSecondClick)
         {
             _clickTimer.Stop();
@@ -129,6 +155,12 @@ public partial class ClipCardControl : UserControl
         SinglePasteRequested?.Invoke(Item);
     }
 
+    private void Paste_OnClick(object sender, RoutedEventArgs args)
+    {
+        args.Handled = true;
+        if (Item is not null) SinglePasteRequested?.Invoke(Item);
+    }
+
     private void Copy_OnClick(object sender, RoutedEventArgs args)
     {
         args.Handled = true;
@@ -147,14 +179,18 @@ public partial class ClipCardControl : UserControl
         if (Item is not null) DeleteRequested?.Invoke(Item);
     }
 
-    private static string RelativeTime(DateTimeOffset date)
+    /// <summary>Short relative time in the Mac card's style: "20 min. ago", "3 hr. ago".</summary>
+    public static string RelativeTime(DateTimeOffset date, DateTimeOffset now)
     {
-        var elapsed = DateTimeOffset.UtcNow - date.ToUniversalTime();
-        if (elapsed < TimeSpan.Zero) return "just now";
+        var elapsed = now.ToUniversalTime() - date.ToUniversalTime();
         if (elapsed < TimeSpan.FromMinutes(1)) return "just now";
-        if (elapsed < TimeSpan.FromHours(1)) return $"{(int)elapsed.TotalMinutes}m ago";
-        if (elapsed < TimeSpan.FromDays(1)) return $"{(int)elapsed.TotalHours}h ago";
-        if (elapsed < TimeSpan.FromDays(7)) return $"{(int)elapsed.TotalDays}d ago";
+        if (elapsed < TimeSpan.FromHours(1)) return $"{(int)elapsed.TotalMinutes} min. ago";
+        if (elapsed < TimeSpan.FromDays(1)) return $"{(int)elapsed.TotalHours} hr. ago";
+        if (elapsed < TimeSpan.FromDays(7))
+        {
+            var days = (int)elapsed.TotalDays;
+            return days == 1 ? "1 day ago" : $"{days} days ago";
+        }
         return date.ToLocalTime().ToString("d");
     }
 }

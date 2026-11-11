@@ -8,6 +8,9 @@ using ClipboardSS.Core.Storage;
 
 namespace ClipboardSS.Core.Sync;
 
+/// <summary>One peer a clip could not be delivered to, and why (an exception message, never clip content).</summary>
+public sealed record ClipSendFailure(Guid PeerId, string PeerName, string Reason);
+
 public sealed record ClipSendResult(
     int VisiblePeerCount,
     int PairedPeerCount,
@@ -17,6 +20,9 @@ public sealed record ClipSendResult(
 {
     /// <summary>Names of peers that refused the clip as stale: their clock disagrees with ours.</summary>
     public IReadOnlyList<string> ClockOutOfSyncPeerNames { get; init; } = [];
+
+    /// <summary>Every peer the clip did not reach, whatever the reason.</summary>
+    public IReadOnlyList<ClipSendFailure> Failures { get; init; } = [];
 
     public bool HasVisiblePeers => VisiblePeerCount > 0;
     public bool HasPairedTargets => PairedPeerCount > 0;
@@ -75,6 +81,7 @@ public sealed class ClipSender(
         };
 
         var failures = new ConcurrentBag<Exception>();
+        var failedPeers = new ConcurrentBag<ClipSendFailure>();
         await Task.WhenAll(pairedTargets.Select(async target =>
         {
             try
@@ -105,6 +112,7 @@ public sealed class ClipSender(
             catch (Exception exception)
             {
                 failures.Add(exception);
+                failedPeers.Add(new ClipSendFailure(target.Peer.Id, target.Peer.Name, exception.Message));
             }
         }));
 
@@ -115,6 +123,7 @@ public sealed class ClipSender(
             failures.Count,
             outdatedCount + failures.Count(failure => failure is PeerNeedsUpdateException))
         {
+            Failures = failedPeers.OrderBy(failure => failure.PeerName, StringComparer.Ordinal).ToArray(),
             ClockOutOfSyncPeerNames = failures
                 .OfType<PeerClockOutOfSyncException>()
                 .Select(failure => failure.DeviceName)

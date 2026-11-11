@@ -17,6 +17,9 @@
     <PackageReference Include="WPF-UI" Version="3.0.4" />
   </ItemGroup>
   <ItemGroup>
+    <Resource Include="..\..\Packaging\Assets\Square44x44Logo.scale-200.png" Link="Assets\Logo.png" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../ClipboardSS.Core/ClipboardSS.Core.csproj" />
   </ItemGroup>
 </Project>

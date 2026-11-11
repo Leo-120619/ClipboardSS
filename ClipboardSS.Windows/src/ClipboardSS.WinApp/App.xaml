@@ -11,7 +11,11 @@
             </ResourceDictionary.MergedDictionaries>
             
             <SolidColorBrush x:Key="DangerBrush" Color="#FFB42318" />
-            <SolidColorBrush x:Key="PinnedBrush" Color="#FF9A5700" />
+            <SolidColorBrush x:Key="PinnedBrush" Color="#FFF08C00" />
+            <!-- Translucent fills that read correctly on both the light and dark themes. -->
+            <SolidColorBrush x:Key="ClipCardBrush" Color="#808080" Opacity="0.12" />
+            <SolidColorBrush x:Key="ProminentClipCardBrush" Color="{DynamicResource SystemAccentColorPrimary}" Opacity="0.16" />
+            <SolidColorBrush x:Key="SegmentSelectedBrush" Color="#808080" Opacity="0.38" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>
