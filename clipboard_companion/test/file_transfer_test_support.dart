@@ -9,7 +9,11 @@ import 'package:clipboard_companion/core/models.dart';
 import 'package:clipboard_companion/core/paired_device_store.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'fake_pair_key_storage.dart';
 import 'package:uuid/uuid.dart';
+
+/// Device id of the receiving side in file-transfer tests (envelope recipient).
+const receiverId = 'cccccccc-0000-0000-0000-000000000000';
 
 /// Mutable clock for idle-GC tests.
 class MutableClock {
@@ -22,7 +26,7 @@ class MutableClock {
 Future<PairedDeviceStore> makePairedStore(String peerId, SecretKey key) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
-  final store = PairedDeviceStore(prefs);
+  final store = PairedDeviceStore(prefs, keyStorage: FakePairKeyStorage());
   await store.addDevice(PairedDevice(id: peerId, name: 'Peer'), key);
   return store;
 }
@@ -43,15 +47,25 @@ Future<PreparedTransfer> prepareTransfer({
   required int chunkSize,
   required String peerId,
   required SecretKey key,
+  String recipientId = receiverId,
   String fileName = 'file.bin',
   String? overrideHash,
+  DateTime? sentAt,
 }) async {
   final transferId = const Uuid().v4().toLowerCase();
   final fileKey = await FileTransferCrypto.deriveFileKey(key, transferId);
   final chunks = <List<int>>[];
   for (var offset = 0; offset < data.length; offset += chunkSize) {
-    final end = (offset + chunkSize) < data.length ? offset + chunkSize : data.length;
-    chunks.add(await FileTransferCrypto.sealChunk(data.sublist(offset, end), fileKey, chunks.length));
+    final end = (offset + chunkSize) < data.length
+        ? offset + chunkSize
+        : data.length;
+    chunks.add(
+      await FileTransferCrypto.sealChunk(
+        data.sublist(offset, end),
+        fileKey,
+        chunks.length,
+      ),
+    );
   }
   final payload = FileOfferPayload(
     transferId: transferId,
@@ -64,13 +78,34 @@ Future<PreparedTransfer> prepareTransfer({
     createdAt: DateTime.now(),
     sourceDeviceName: 'Peer',
   );
-  final offer = await CryptoEnvelopeUtils.sealJson(payload.toJson(), peerId, key);
+  final offer = await CryptoEnvelopeUtils.sealJson(
+    payload.toJson(),
+    purpose: EnvelopePurpose.fileOffer,
+    sourceDeviceId: peerId,
+    recipientDeviceId: recipientId,
+    pairKey: key,
+    sentAt: sentAt,
+  );
   return PreparedTransfer(offer, chunks, transferId);
 }
 
-Future<ClipEnvelope> sealControl(Map<String, dynamic> json, String peerId, SecretKey key) =>
-    CryptoEnvelopeUtils.sealJson(json, peerId, key);
+Future<ClipEnvelope> sealControl(
+  Map<String, dynamic> json,
+  String peerId,
+  SecretKey key, {
+  required EnvelopePurpose purpose,
+  String recipientId = receiverId,
+  DateTime? sentAt,
+}) => CryptoEnvelopeUtils.sealJson(
+  json,
+  purpose: purpose,
+  sourceDeviceId: peerId,
+  recipientDeviceId: recipientId,
+  pairKey: key,
+  sentAt: sentAt,
+);
 
-String statusOf(FileTransferResponse response) => response.body['status'] as String? ?? '';
+String statusOf(FileTransferResponse response) =>
+    response.body['status'] as String? ?? '';
 
 String jsonBody(FileTransferResponse response) => jsonEncode(response.body);

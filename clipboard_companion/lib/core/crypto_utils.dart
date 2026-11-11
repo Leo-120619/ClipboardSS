@@ -1,15 +1,22 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'models.dart';
+import 'replay_guard.dart';
 
 class PairingSession {
+  /// Length of the random salt the initiator commits with (pairing v2).
+  static const saltLength = 16;
+
   late SimpleKeyPair _privateKey;
   late List<int> _ephemeralPublicKey;
 
   List<int> get ephemeralPublicKey => _ephemeralPublicKey;
 
   static final _x25519 = X25519();
+  static final _sha256 = Sha256();
   static final _hkdfPairKey = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   static final _hkdfCodeKey = Hkdf(hmac: Hmac.sha256(), outputLength: 4);
 
@@ -19,13 +26,46 @@ class PairingSession {
     _ephemeralPublicKey = pk.bytes;
   }
 
+  /// A session from a fixed X25519 private key; used to reproduce the pinned vector.
+  @visibleForTesting
+  Future<void> initFromPrivateKey(List<int> privateKey) async {
+    _privateKey = await _x25519.newKeyPairFromSeed(privateKey);
+    final pk = await _privateKey.extractPublicKey();
+    _ephemeralPublicKey = pk.bytes;
+  }
+
+  static List<int> randomSalt() {
+    final random = Random.secure();
+    return List<int>.generate(saltLength, (_) => random.nextInt(256));
+  }
+
+  /// `SHA256(initiatorPublicKey || salt)`: sent in `/v1/pair/start` so the initiator's
+  /// key stays hidden until the target has answered with its own.
+  static Future<List<int>> commitment(
+    List<int> publicKey,
+    List<int> salt,
+  ) async => (await _sha256.hash([...publicKey, ...salt])).bytes;
+
+  /// Constant-time check that [publicKey] and [salt] open [commitment].
+  static Future<bool> commitmentMatches(
+    List<int> commitment,
+    List<int> publicKey,
+    List<int> salt,
+  ) async => constantTimeEquals(
+    commitment,
+    await PairingSession.commitment(publicKey, salt),
+  );
+
+  /// Derives `pairKey` and the 6-digit `confirmCode` both screens show. HKDF `info`
+  /// is the transcript `code || initiatorPublicKey || targetPublicKey`.
   Future<PairingResult> completePairing({
     required List<int> remotePublicKeyBytes,
-    required String initiatorId,
-    required String targetId,
     required bool isInitiator,
     required String code,
   }) async {
+    if (remotePublicKeyBytes.length != 32) {
+      throw ArgumentError('An X25519 public key must be 32 bytes.');
+    }
     final remotePublicKey = SimplePublicKey(
       remotePublicKeyBytes,
       type: KeyPairType.x25519,
@@ -34,7 +74,17 @@ class PairingSession {
       keyPair: _privateKey,
       remotePublicKey: remotePublicKey,
     );
-    final info = utf8.encode(code);
+    final initiatorPublicKey = isInitiator
+        ? _ephemeralPublicKey
+        : remotePublicKeyBytes;
+    final targetPublicKey = isInitiator
+        ? remotePublicKeyBytes
+        : _ephemeralPublicKey;
+    final info = [
+      ...utf8.encode(code),
+      ...initiatorPublicKey,
+      ...targetPublicKey,
+    ];
 
     final pairKey = await _hkdfPairKey.deriveKey(
       secretKey: sharedSecret,
@@ -80,12 +130,18 @@ class PairingSession {
       initiatorId,
       targetId,
     );
-    if (proof.length != expectedProof.length) return false;
-    for (int i = 0; i < proof.length; i++) {
-      if (proof[i] != expectedProof[i]) return false;
-    }
-    return true;
+    return constantTimeEquals(proof, expectedProof);
   }
+}
+
+/// Compares two byte lists, inspecting every byte regardless of where a mismatch occurs.
+bool constantTimeEquals(List<int> left, List<int> right) {
+  if (left.length != right.length) return false;
+  var diff = 0;
+  for (int i = 0; i < left.length; i++) {
+    diff |= left[i] ^ right[i];
+  }
+  return diff == 0;
 }
 
 class PairingResult {
@@ -95,57 +151,161 @@ class PairingResult {
   PairingResult({required this.pairKey, required this.confirmCode});
 }
 
+/// What an envelope is for. Bound into the AEAD associated data so an envelope sealed
+/// for one endpoint cannot be replayed against another.
+enum EnvelopePurpose {
+  clip('clip'),
+  fileOffer('file-offer'),
+  fileFinish('file-finish'),
+  fileCancel('file-cancel'),
+  ping('ping'),
+  pong('pong');
+
+  const EnvelopePurpose(this.wire);
+
+  /// Value used in the associated data.
+  final String wire;
+}
+
+/// The envelope's `v` is not [wireProtocolVersion]; servers answer 426.
+class UnsupportedEnvelopeVersionException implements Exception {
+  final int version;
+  const UnsupportedEnvelopeVersionException(this.version);
+
+  @override
+  String toString() => 'Unsupported envelope version $version';
+}
+
+/// Wire envelope v2: ChaCha20-Poly1305 over the inner JSON with associated data
+/// `ClipboardSS/2|<purpose>|<source lowercase>|<recipient lowercase>`, binding sender,
+/// recipient and purpose. See docs/wire-protocol.md.
 class CryptoEnvelopeUtils {
   static final _chacha = Chacha20.poly1305Aead();
 
-  static Future<ClipEnvelope> seal(
-    ClipPayload payload,
+  static List<int> associatedData(
+    EnvelopePurpose purpose,
     String sourceDeviceId,
-    SecretKey pairKey,
-  ) async {
-    return sealJson(payload.toJson(), sourceDeviceId, pairKey);
-  }
+    String recipientDeviceId,
+  ) => utf8.encode(
+    'ClipboardSS/$wireProtocolVersion|${purpose.wire}|'
+    '${canonicalDeviceId(sourceDeviceId)}|${canonicalDeviceId(recipientDeviceId)}',
+  );
+
+  static Future<ClipEnvelope> seal(
+    ClipPayload payload, {
+    required EnvelopePurpose purpose,
+    required String sourceDeviceId,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+    DateTime? sentAt,
+  }) => sealJson(
+    payload.toJson(),
+    purpose: purpose,
+    sourceDeviceId: sourceDeviceId,
+    recipientDeviceId: recipientDeviceId,
+    pairKey: pairKey,
+    sentAt: sentAt,
+  );
 
   static Future<ClipPayload> open(
-    ClipEnvelope envelope,
-    SecretKey pairKey,
-  ) async {
-    return ClipPayload.fromJson(await openJson(envelope, pairKey));
-  }
+    ClipEnvelope envelope, {
+    required EnvelopePurpose purpose,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+  }) async => ClipPayload.fromJson(
+    await openJson(
+      envelope,
+      purpose: purpose,
+      recipientDeviceId: recipientDeviceId,
+      pairKey: pairKey,
+    ),
+  );
 
-  /// Seals an arbitrary JSON map into an envelope — used by the file-transfer control
-  /// messages (offer / finish / cancel). Same construction as [seal].
+  /// Seals an arbitrary JSON map (file-transfer control messages use this directly),
+  /// stamping `sentAt` (default: now) into the inner JSON so the receiver's
+  /// [ReplayGuard] checks freshness on an authenticated value.
   static Future<ClipEnvelope> sealJson(
-    Map<String, dynamic> json,
-    String sourceDeviceId,
-    SecretKey pairKey,
-  ) async {
-    final plaintext = utf8.encode(jsonEncode(json));
-    final secretBox = await _chacha.encrypt(plaintext, secretKey: pairKey);
-    final combinedCiphertext = Uint8List.fromList([
-      ...secretBox.cipherText,
-      ...secretBox.mac.bytes,
-    ]);
+    Map<String, dynamic> json, {
+    required EnvelopePurpose purpose,
+    required String sourceDeviceId,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+    DateTime? sentAt,
+  }) => sealBytes(
+    utf8.encode(
+      jsonEncode({...json, 'sentAt': wireTimestamp(sentAt ?? DateTime.now())}),
+    ),
+    purpose: purpose,
+    sourceDeviceId: sourceDeviceId,
+    recipientDeviceId: recipientDeviceId,
+    pairKey: pairKey,
+  );
+
+  /// Seals raw inner bytes. [nonce] is injectable only so the pinned vector can be
+  /// reproduced; production callers leave it null (random).
+  @visibleForTesting
+  static Future<ClipEnvelope> sealBytes(
+    List<int> plaintext, {
+    required EnvelopePurpose purpose,
+    required String sourceDeviceId,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+    List<int>? nonce,
+  }) async {
+    final secretBox = await _chacha.encrypt(
+      plaintext,
+      secretKey: pairKey,
+      nonce: nonce,
+      aad: associatedData(purpose, sourceDeviceId, recipientDeviceId),
+    );
     return ClipEnvelope(
-      v: 1,
+      v: wireProtocolVersion,
       sourceDeviceId: canonicalDeviceId(sourceDeviceId),
       nonce: base64Encode(secretBox.nonce),
-      ciphertext: base64Encode(combinedCiphertext),
+      ciphertext: base64Encode([
+        ...secretBox.cipherText,
+        ...secretBox.mac.bytes,
+      ]),
     );
   }
 
-  /// Opens an envelope into an arbitrary JSON map.
+  /// Opens an envelope addressed to [recipientDeviceId] (the local device) for [purpose].
   static Future<Map<String, dynamic>> openJson(
-    ClipEnvelope envelope,
-    SecretKey pairKey,
-  ) async {
+    ClipEnvelope envelope, {
+    required EnvelopePurpose purpose,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+  }) async {
+    final plaintext = await openBytes(
+      envelope,
+      purpose: purpose,
+      recipientDeviceId: recipientDeviceId,
+      pairKey: pairKey,
+    );
+    return jsonDecode(utf8.decode(plaintext)) as Map<String, dynamic>;
+  }
+
+  static Future<List<int>> openBytes(
+    ClipEnvelope envelope, {
+    required EnvelopePurpose purpose,
+    required String recipientDeviceId,
+    required SecretKey pairKey,
+  }) async {
+    if (envelope.v != wireProtocolVersion) {
+      throw UnsupportedEnvelopeVersionException(envelope.v);
+    }
     final nonce = base64Decode(envelope.nonce);
     final combinedData = base64Decode(envelope.ciphertext);
-    if (combinedData.length < 16) throw Exception('Invalid ciphertext length');
+    if (nonce.length != 12 || combinedData.length < 16) {
+      throw Exception('Invalid envelope nonce or ciphertext');
+    }
     final ciphertext = combinedData.sublist(0, combinedData.length - 16);
     final macBytes = combinedData.sublist(combinedData.length - 16);
     final secretBox = SecretBox(ciphertext, nonce: nonce, mac: Mac(macBytes));
-    final plaintext = await _chacha.decrypt(secretBox, secretKey: pairKey);
-    return jsonDecode(utf8.decode(plaintext)) as Map<String, dynamic>;
+    return _chacha.decrypt(
+      secretBox,
+      secretKey: pairKey,
+      aad: associatedData(purpose, envelope.sourceDeviceId, recipientDeviceId),
+    );
   }
 }

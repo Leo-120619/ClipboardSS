@@ -26,8 +26,22 @@ func makePairedStore(peerId: UUID, key: SymmetricKey) async throws -> PairedDevi
     return store
 }
 
-func sealedEnvelope<T: Encodable>(_ payload: T, sourceDeviceId: UUID, key: SymmetricKey) throws -> ClipEnvelope {
-    try ClipEnvelope.seal(payload: payload, sourceDeviceId: sourceDeviceId, pairKey: key)
+func sealedEnvelope<T: Encodable>(
+    _ payload: T,
+    purpose: EnvelopePurpose,
+    sourceDeviceId: UUID,
+    recipientDeviceId: UUID,
+    key: SymmetricKey,
+    sentAt: Date = Date()
+) throws -> ClipEnvelope {
+    try ClipEnvelope.seal(
+        payload: payload,
+        purpose: purpose,
+        sourceDeviceId: sourceDeviceId,
+        recipientDeviceId: recipientDeviceId,
+        pairKey: key,
+        sentAt: sentAt
+    )
 }
 
 /// Records outgoing requests and returns configurable responses keyed by path.
@@ -36,27 +50,39 @@ final class RecordingTransport: PeerTransport, @unchecked Sendable {
     struct Recorded: Sendable {
         let request: HTTPRequest
         let peer: Peer
+        let timeout: TimeInterval
     }
 
     private let lock = NSLock()
     private(set) var recorded: [Recorded] = []
     /// Path -> status code override. Missing paths default to 200.
     var statusForPath: [String: Int] = [:]
+    /// Path -> response body override. Missing paths default to `{}`.
+    var bodyForPath: [String: Data] = [:]
     /// If set, the Nth call (0-indexed) fails with this status regardless of path.
     var failAtCallIndex: (index: Int, status: Int)?
+    /// Path -> error thrown instead of answering (after the request is recorded).
+    var errorForPath: [String: Error] = [:]
 
     var requests: [HTTPRequest] { lock.lock(); defer { lock.unlock() }; return recorded.map(\.request) }
-
-    func send(_ data: Data, to peer: Peer) async throws -> Data {
-        let request = try HTTPCodec.parseRequest(data)
-        let status = record(request: request, peer: peer)
-        return HTTPCodec.encodeResponse(HTTPResponse(statusCode: status, headers: [:], body: Data("{}".utf8)))
+    /// The per-request timeout each call to `path` asked for.
+    func timeouts(for path: String) -> [TimeInterval] {
+        lock.lock(); defer { lock.unlock() }
+        return recorded.filter { $0.request.path == path }.map(\.timeout)
     }
 
-    private func record(request: HTTPRequest, peer: Peer) -> Int {
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
+        let request = try HTTPCodec.parseRequest(data)
+        let status = record(request: request, peer: peer, timeout: timeout)
+        if let error = lock.withLock({ errorForPath[request.path] }) { throw error }
+        let body = lock.withLock { bodyForPath[request.path] } ?? Data("{}".utf8)
+        return HTTPCodec.encodeResponse(HTTPResponse(statusCode: status, headers: [:], body: body))
+    }
+
+    private func record(request: HTTPRequest, peer: Peer, timeout: TimeInterval) -> Int {
         lock.lock(); defer { lock.unlock() }
         let callIndex = recorded.count
-        recorded.append(Recorded(request: request, peer: peer))
+        recorded.append(Recorded(request: request, peer: peer, timeout: timeout))
         var status = statusForPath[request.path] ?? 200
         if let failure = failAtCallIndex, failure.index == callIndex { status = failure.status }
         return status
@@ -68,7 +94,7 @@ final class LoopbackTransport: PeerTransport, @unchecked Sendable {
     private let receiver: FileReceiver
     init(receiver: FileReceiver) { self.receiver = receiver }
 
-    func send(_ data: Data, to peer: Peer) async throws -> Data {
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         let request = try HTTPCodec.parseRequest(data)
         let response: FileTransferResponse
         switch request.path {

@@ -30,6 +30,10 @@ public enum ShareInbox {
 
     private static let manifestName = "manifest.json"
 
+    /// A drop that never became valid (no manifest, or one naming files that are not there)
+    /// is removed once its folder is this old, so the poll stops re-parsing it.
+    public static let rejectedDropMaxAge: TimeInterval = 24 * 60 * 60
+
     // MARK: - Extension side
 
     /// Creates an empty outbox drop. Call `finalizeDrop` only after all files have been
@@ -87,12 +91,26 @@ public enum ShareInbox {
     public struct PendingDrop {
         public let directory: URL
         public let fileURLs: [URL]
+        /// When the extension finalized the drop (its manifest's modification date).
+        public let createdAt: Date
+
+        public init(directory: URL, fileURLs: [URL], createdAt: Date) {
+            self.directory = directory
+            self.fileURLs = fileURLs
+            self.createdAt = createdAt
+        }
     }
 
     /// Returns every complete drop currently sitting in the outbox.
     public static func pendingDrops() -> [PendingDrop] {
-        guard let outbox = outboxDirectory(),
-              let entries = try? FileManager.default.contentsOfDirectory(
+        guard let outbox = outboxDirectory() else { return [] }
+        return pendingDrops(in: outbox)
+    }
+
+    /// Returns every complete drop in `outbox`. Rejected or incomplete drops whose folder is
+    /// older than `rejectedDropMaxAge` are removed.
+    public static func pendingDrops(in outbox: URL, now: Date = Date()) -> [PendingDrop] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
                 at: outbox,
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
@@ -100,18 +118,35 @@ public enum ShareInbox {
             return []
         }
         var drops: [PendingDrop] = []
-        for dir in entries where (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+        for dir in entries where isRegularDirectory(dir) {
             let manifestURL = dir.appendingPathComponent(manifestName)
             guard let data = try? Data(contentsOf: manifestURL),
                   let manifest = try? JSONDecoder().decode(ShareManifest.self, from: data) else {
+                discardIfStale(dir, now: now)
                 continue
             }
-            let urls = manifest.fileNames.map { dir.appendingPathComponent($0) }
-                .filter { FileManager.default.fileExists(atPath: $0.path) }
-            guard !urls.isEmpty else { continue }
-            drops.append(PendingDrop(directory: dir, fileURLs: urls))
+            // A manifest naming anything but plain files inside the drop is not ours: skip it.
+            let urls = manifest.fileNames.map { resolveFile(named: $0, in: dir) }
+            guard !urls.isEmpty, !urls.contains(nil) else {
+                discardIfStale(dir, now: now)
+                continue
+            }
+            let createdAt = (try? FileManager.default.attributesOfItem(atPath: manifestURL.path))?[.modificationDate]
+                as? Date ?? Date()
+            drops.append(PendingDrop(directory: dir, fileURLs: urls.compactMap { $0 }, createdAt: createdAt))
         }
         return drops
+    }
+
+    /// Rewrites a partly sent drop's manifest to list only `fileURLs` (the files still to send),
+    /// keeping its date, so a later re-read finds a complete drop of just those files.
+    public static func retain(_ fileURLs: [URL], in drop: PendingDrop) -> PendingDrop {
+        let manifestURL = drop.directory.appendingPathComponent(manifestName)
+        let manifest = ShareManifest(id: drop.directory.lastPathComponent, fileNames: fileURLs.map(\.lastPathComponent))
+        if let data = try? JSONEncoder().encode(manifest), (try? data.write(to: manifestURL, options: .atomic)) != nil {
+            try? FileManager.default.setAttributes([.modificationDate: drop.createdAt], ofItemAtPath: manifestURL.path)
+        }
+        return PendingDrop(directory: drop.directory, fileURLs: fileURLs, createdAt: drop.createdAt)
     }
 
     /// Removes a consumed drop folder from the outbox.
@@ -120,6 +155,42 @@ public enum ShareInbox {
     }
 
     // MARK: - Helpers
+
+    /// Removes a drop folder that is still not valid after `rejectedDropMaxAge`. Its age is
+    /// the newer of the folder's creation and modification dates, so a drop the extension
+    /// is still writing is never touched.
+    private static func discardIfStale(_ dir: URL, now: Date) {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: dir.path) else { return }
+        let dates = [attributes[.creationDate], attributes[.modificationDate]].compactMap { $0 as? Date }
+        guard let newest = dates.max(), now.timeIntervalSince(newest) > rejectedDropMaxAge else { return }
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// True when `url` itself (not a symlink target) is a regular file.
+    public static func isRegularFile(_ url: URL) -> Bool {
+        let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
+        return type == .typeRegular
+    }
+
+    private static func isRegularDirectory(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        return values?.isDirectory == true && values?.isSymbolicLink != true
+    }
+
+    /// Accepts only a single path component that names a regular file (not a symlink)
+    /// directly inside `dir`.
+    private static func resolveFile(named name: String, in dir: URL) -> URL? {
+        guard !name.isEmpty, name != ".", name != "..",
+              !name.contains("/"), !name.contains("\0") else {
+            return nil
+        }
+        let url = dir.appendingPathComponent(name, isDirectory: false)
+        guard url.deletingLastPathComponent().standardizedFileURL.path == dir.standardizedFileURL.path,
+              isRegularFile(url) else {
+            return nil
+        }
+        return url
+    }
 
     private static func uniqueName(_ name: String, existing: [String]) -> String {
         let base = name.isEmpty ? "file" : name

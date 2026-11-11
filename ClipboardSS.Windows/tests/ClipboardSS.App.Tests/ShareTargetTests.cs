@@ -47,10 +47,24 @@ public sealed class ShareTargetTests
         var paused = Guid.NewGuid();
         var targets = AppModel.ComposeSendTargets(
             [new Peer(connected, "Phone", "10.0.0.2", 51888), new Peer(paused, "Tablet", "10.0.0.3", 51888)],
-            [new PairedDevice(connected, "Phone"), new PairedDevice(paused, "Tablet", Connected: false)]);
+            [new PairedDevice(connected, "Phone", "10.0.0.2"), new PairedDevice(paused, "Tablet", "10.0.0.3", Connected: false)]);
 
         Assert.Single(targets);
         Assert.Equal(connected, targets[0].Id);
+    }
+
+    [Fact]
+    public void ComposeSendTargetsStampsOutdatedStoredHostPeers()
+    {
+        var oldId = Guid.NewGuid();
+        var newId = Guid.NewGuid();
+        var targets = AppModel.ComposeSendTargets(
+            [],
+            [new PairedDevice(oldId, "Old", "10.0.0.30"), new PairedDevice(newId, "New", "10.0.0.31")],
+            new HashSet<Guid> { oldId });
+
+        Assert.True(targets.Single(peer => peer.Id == oldId).NeedsUpdate);
+        Assert.False(targets.Single(peer => peer.Id == newId).NeedsUpdate);
     }
 
     private static string FindRepositoryRoot()

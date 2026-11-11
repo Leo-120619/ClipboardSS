@@ -1,9 +1,12 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:clipboard_companion/core/clip_server.dart';
+import 'package:clipboard_companion/core/crypto_utils.dart';
 import 'package:clipboard_companion/core/file_receiver.dart';
 import 'package:clipboard_companion/core/models.dart';
 import 'package:clipboard_companion/core/pairing_coordinator.dart';
+import 'package:clipboard_companion/core/replay_guard.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shelf/shelf.dart';
@@ -36,6 +39,7 @@ void main() {
     if (withReceiver) {
       receiver = FileReceiver(
         pairedStore: store,
+        localDeviceId: identity.id,
         transfersDirectory: makeTempDir('transfers'),
         destinationProvider: () => makeTempDir('dest'),
       );
@@ -133,5 +137,140 @@ void main() {
       ),
     );
     expect(response.statusCode, 404);
+  });
+
+  for (final path in [
+    '/v1/clip',
+    '/v1/file/offer',
+    '/v1/file/finish',
+    '/v1/file/cancel',
+    '/v1/ping',
+  ]) {
+    test('v1EnvelopeGetsUpgradeRequired on $path', () async {
+      final handler = (await makeServer(withReceiver: true)).buildHandler();
+      // A real v1 envelope from a paired peer: it must not be reported as unauthorized.
+      final response = await handler(
+        Request(
+          'POST',
+          uri(path),
+          body:
+              '{"v":1,"sourceDeviceId":"$peerId",'
+              '"nonce":"AAAAAAAAAAAAAAAB","ciphertext":"AAAAAAAAAAAAAAAAAAAAAA=="}',
+        ),
+      );
+      expect(response.statusCode, 426);
+      expect(jsonDecode(await response.readAsString()), {
+        'status': 'upgradeRequired',
+        'minVersion': 2,
+      });
+    });
+  }
+
+  group('clip replay protection', () {
+    Future<(Handler, List<ClipPayload>)> makeClipServer() async {
+      final store = await makePairedStore(peerId, key);
+      final identity = DeviceIdentity(id: receiverId, name: 'Companion');
+      final received = <ClipPayload>[];
+      final server = ClipServer(
+        identity: identity,
+        pairingCoordinator: PairingCoordinator(
+          identity: identity,
+          pairedStore: store,
+        ),
+        pairedStore: store,
+        onClipReceived: received.add,
+      );
+      return (server.buildHandler(), received);
+    }
+
+    Future<String> clipBody(String text, {DateTime? sentAt}) async {
+      final envelope = await CryptoEnvelopeUtils.seal(
+        ClipPayload(
+          id: 'clip-$text',
+          type: ClipType.text,
+          createdAt: DateTime.now(),
+          text: text,
+          contentHash: 'hash-$text',
+          sourceDeviceName: 'Mac',
+        ),
+        purpose: EnvelopePurpose.clip,
+        sourceDeviceId: peerId,
+        recipientDeviceId: receiverId,
+        pairKey: key,
+        sentAt: sentAt,
+      );
+      return jsonEncode(envelope.toJson());
+    }
+
+    test('replayedClipDoesNotTouchPasteboard', () async {
+      final (handler, received) = await makeClipServer();
+      final body = await clipBody('secret');
+
+      final first = await handler(Request('POST', uri('/v1/clip'), body: body));
+      expect(first.statusCode, 200);
+      expect(received, hasLength(1));
+
+      final replayed = await handler(
+        Request('POST', uri('/v1/clip'), body: body),
+      );
+      expect(replayed.statusCode, 409);
+      expect(jsonDecode(await replayed.readAsString())['status'], 'replayed');
+      expect(received, hasLength(1));
+    });
+
+    test('a clip sent 20 minutes ago is stale; 4 minutes ago syncs', () async {
+      final (handler, received) = await makeClipServer();
+      final stale = await handler(
+        Request(
+          'POST',
+          uri('/v1/clip'),
+          body: await clipBody(
+            'old',
+            sentAt: DateTime.now().subtract(const Duration(minutes: 20)),
+          ),
+        ),
+      );
+      expect(stale.statusCode, 400);
+      expect(jsonDecode(await stale.readAsString())['status'], 'stale');
+      expect(received, isEmpty);
+
+      final skewed = await handler(
+        Request(
+          'POST',
+          uri('/v1/clip'),
+          body: await clipBody(
+            'skewed',
+            sentAt: DateTime.now().add(const Duration(minutes: 4)),
+          ),
+        ),
+      );
+      expect(skewed.statusCode, 200);
+      expect(received, hasLength(1));
+    });
+
+    test('clip and file endpoints share one guard per server', () async {
+      final store = await makePairedStore(peerId, key);
+      final identity = DeviceIdentity(id: receiverId, name: 'Companion');
+      final guard = ReplayGuard();
+      final receiver = FileReceiver(
+        pairedStore: store,
+        localDeviceId: identity.id,
+        transfersDirectory: makeTempDir('transfers'),
+        destinationProvider: () => makeTempDir('dest'),
+        replayGuard: guard,
+      );
+      final server = ClipServer(
+        identity: identity,
+        pairingCoordinator: PairingCoordinator(
+          identity: identity,
+          pairedStore: store,
+        ),
+        pairedStore: store,
+        onClipReceived: (_) {},
+        fileReceiver: receiver,
+        replayGuard: guard,
+      );
+      expect(identical(server.replayGuard, receiver.replayGuard), isTrue);
+    });
   });
 }

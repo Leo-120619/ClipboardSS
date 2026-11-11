@@ -14,7 +14,10 @@
     <ProjectReference Include="../../src/ClipboardSS.Core/ClipboardSS.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../../src/ClipboardSS.App/Settings/AppSettings.cs" Link="AppSettings.cs" />
-    <Compile Include="../../src/ClipboardSS.App/Settings/SettingsStore.cs" Link="SettingsStore.cs" />
+    <Compile Include="../../src/ClipboardSS.WinApp/Settings/AppSettings.cs" Link="AppSettings.cs" />
+    <Compile Include="../../src/ClipboardSS.WinApp/Settings/SettingsStore.cs" Link="SettingsStore.cs" />
+    <Compile Include="../../src/ClipboardSS.WinApp/Pairing/PairingCoordinator.cs" Link="PairingCoordinator.cs" />
+    <Compile Include="../../src/ClipboardSS.WinApp/Win32/NativeInput.cs" Link="NativeInput.cs" />
+    <Compile Include="../../src/ClipboardSS.WinApp/Win32/ClipboardReadOrder.cs" Link="ClipboardReadOrder.cs" />
   </ItemGroup>
 </Project>

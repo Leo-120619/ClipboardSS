@@ -1,3 +1,6 @@
+using System.Text.Json;
+using ClipboardSS.Core.Crypto;
+using ClipboardSS.Core.Json;
 using System.Text;
 using ClipboardSS.Core.Models;
 using ClipboardSS.Core.Protocol;
@@ -70,6 +73,84 @@ public sealed class SyncCoreTests
     }
 
     [Fact]
+    public void Receive_UndecodableImage_IsRejectedAndNotStored()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new ClipStore(directory.Path);
+        var pasteboard = new FakePasteboard();
+        var receiver = new ClipReceiver(store, pasteboard);
+        var garbage = new byte[32];
+        new Random(20261110).NextBytes(garbage);
+        byte[] imageData = [0x89, 0x50, 0x4e, 0x47, .. garbage];
+        var payload = new ClipPayload
+        {
+            Id = Guid.NewGuid(),
+            Type = ClipType.Image,
+            CreatedAt = DateTimeOffset.UtcNow,
+            ImageBase64 = Convert.ToBase64String(imageData),
+            ImageExtension = "png",
+            PreviewText = "Image",
+            ContentHash = "ignored-by-receiver",
+            SourceDeviceName = "Phone",
+        };
+
+        Assert.Throws<InvalidDataException>(() => receiver.Receive(payload));
+
+        Assert.Empty(store.Items);
+        Assert.Empty(Directory.GetFiles(System.IO.Path.Combine(directory.Path, "Images")));
+        Assert.Equal(0, pasteboard.ClearCount);
+        Assert.Null(pasteboard.LastImageData);
+    }
+
+    [Fact]
+    public void Receive_ValidPngImage_IsStoredAndWrittenToPasteboard()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new ClipStore(directory.Path);
+        var pasteboard = new FakePasteboard();
+        var receiver = new ClipReceiver(store, pasteboard);
+        var payload = new ClipPayload
+        {
+            Id = Guid.NewGuid(),
+            Type = ClipType.Image,
+            CreatedAt = DateTimeOffset.UtcNow,
+            ImageBase64 = Convert.ToBase64String(OnePixelPng),
+            ImageExtension = "PNG",
+            PreviewText = "Image",
+            ContentHash = "ignored-by-receiver",
+            SourceDeviceName = "Phone",
+        };
+
+        var result = receiver.Receive(payload);
+
+        Assert.Equal(ReceiveStatus.Added, result.Status);
+        Assert.EndsWith(".png", store.Items[0].ImagePath);
+        Assert.Equal(OnePixelPng, pasteboard.LastImageData);
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10 })]
+    [InlineData(new byte[] { 0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0 })]
+    [InlineData(new byte[] { 0x42, 0x4D, 0, 0, 0, 0 })]
+    [InlineData(new byte[] { 0x49, 0x49, 0x2A, 0x00, 8, 0 })]
+    [InlineData(new byte[] { 0x4D, 0x4D, 0x00, 0x2A, 0, 8 })]
+    [InlineData(new byte[] { 0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50 })]
+    public void MagicNumberImageValidator_AcceptsKnownSignatures(byte[] data)
+    {
+        Assert.True(new MagicNumberImageValidator().IsValidImage(data));
+    }
+
+    [Theory]
+    [InlineData(new byte[] { })]
+    [InlineData(new byte[] { 0x89, 0x50, 0x4E, 0x47 })]
+    [InlineData(new byte[] { 0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45 })]
+    [InlineData(new byte[] { 0x4D, 0x5A, 0x90, 0x00 })]
+    public void MagicNumberImageValidator_RejectsUnknownOrTruncatedData(byte[] data)
+    {
+        Assert.False(new MagicNumberImageValidator().IsValidImage(data));
+    }
+
+    [Fact]
     public void PairedDeviceStorePersistsOptionalHostAndLegacyRecord()
     {
         using var directory = new TemporaryDirectory();
@@ -133,6 +214,161 @@ public sealed class SyncCoreTests
         Assert.Equal(0, result.SuccessCount);
     }
 
+    [Fact]
+    public async Task SenderSealsForRecipientAndSkipsPeersThatNeedAnUpdate()
+    {
+        using var directory = new TemporaryDirectory();
+        var myId = Guid.NewGuid();
+        var currentId = Guid.NewGuid();
+        var outdatedId = Guid.NewGuid();
+        var key = Enumerable.Repeat((byte)9, 32).ToArray();
+        var pairedStore = new PairedDeviceStore(
+            System.IO.Path.Combine(directory.Path, "paired.json"),
+            new InMemoryPairKeyStorage());
+        pairedStore.AddDevice(new PairedDevice(currentId, "Phone"), key);
+        pairedStore.AddDevice(new PairedDevice(outdatedId, "Old"), key);
+        var transport = new FakePeerTransport();
+        var sender = new ClipSender(new DeviceIdentity(myId, "Windows"), pairedStore, transport, directory.Path);
+        var clip = new ClipStore(directory.Path).AddText("hi");
+
+        var result = await sender.BroadcastAsync(clip, [
+            new Peer(currentId, "Phone", "10.0.0.3", 51888),
+            new Peer(outdatedId, "Old", "10.0.0.4", 51888, ProtocolVersion: 1),
+        ], TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, result.SuccessCount);
+        Assert.Equal(1, result.NeedsUpdateCount);
+        var request = HttpCodec.ParseRequest(Assert.Single(transport.Requests).Data);
+        var envelope = JsonSerializer.Deserialize<ClipEnvelope>(request.Body, WireJson.Options)!;
+        Assert.Equal(2, envelope.V);
+        Assert.Equal("hi", EnvelopeCrypto.Open(envelope, EnvelopePurpose.Clip, currentId, key).Text);
+
+        transport.Response = HttpCodec.EncodeResponse(new HttpResponse(426, new Dictionary<string, string>(), []));
+        result = await sender.BroadcastAsync(
+            clip, [new Peer(currentId, "Phone", "10.0.0.3", 51888)], TestContext.Current.CancellationToken);
+        Assert.Equal(1, result.FailureCount);
+        Assert.Equal(1, result.NeedsUpdateCount);
+    }
+
+    [Fact]
+    public async Task FileSenderRefusesOutdatedPeersAndMaps426ToNeedsUpdate()
+    {
+        using var directory = new TemporaryDirectory();
+        var peerId = Guid.NewGuid();
+        var pairedStore = new PairedDeviceStore(
+            System.IO.Path.Combine(directory.Path, "paired.json"),
+            new InMemoryPairKeyStorage());
+        pairedStore.AddDevice(new PairedDevice(peerId, "Phone"), Enumerable.Repeat((byte)9, 32).ToArray());
+        var file = System.IO.Path.Combine(directory.Path, "payload.bin");
+        await File.WriteAllBytesAsync(file, [1, 2, 3], TestContext.Current.CancellationToken);
+        var transport = new FakePeerTransport();
+        var sender = new FileSender(new DeviceIdentity(Guid.NewGuid(), "Windows"), pairedStore, transport);
+
+        var outdated = await Assert.ThrowsAsync<PeerNeedsUpdateException>(() => sender.SendAsync(
+            file, new Peer(peerId, "Phone", "10.0.0.3", 51888, ProtocolVersion: 1),
+            cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(WireProtocol.UpdateOtherDeviceMessage, outdated.Message);
+        Assert.Empty(transport.Requests);
+
+        transport.Response = HttpCodec.EncodeResponse(new HttpResponse(426, new Dictionary<string, string>(), []));
+        await Assert.ThrowsAsync<PeerNeedsUpdateException>(() => sender.SendAsync(
+            file, new Peer(peerId, "Phone", "10.0.0.3", 51888),
+            cancellationToken: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task FinishUsesExtendedTimeoutForLargeFile()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(205), FileTransferConstants.FinishTimeout(4L * 1024 * 1024 * 1024));
+        Assert.Equal(TimeSpan.FromSeconds(30), FileTransferConstants.FinishTimeout(0));
+        Assert.Equal(TimeSpan.FromSeconds(31), FileTransferConstants.FinishTimeout(30L * 20 * 1024 * 1024 + 1));
+        Assert.Equal(TimeSpan.FromSeconds(600), FileTransferConstants.FinishTimeout(1L << 40));
+
+        using var directory = new TemporaryDirectory();
+        var (sender, peer, transport) = FileSenderFixture(directory);
+        var file = System.IO.Path.Combine(directory.Path, "payload.bin");
+        await File.WriteAllBytesAsync(file, new byte[FileTransferConstants.ChunkSize + 3], TestContext.Current.CancellationToken);
+
+        Assert.Equal(FileSendOutcome.Delivered, await sender.SendAsync(file, peer, cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            [("/v1/file/offer", null), ("/v1/file/chunk", null), ("/v1/file/chunk", null),
+             ("/v1/file/finish", FileTransferConstants.FinishTimeout(FileTransferConstants.ChunkSize + 3))],
+            transport.Calls);
+    }
+
+    [Fact]
+    public async Task SenderDoesNotCancelAfterFinishTimeout()
+    {
+        using var directory = new TemporaryDirectory();
+        var (sender, peer, transport) = FileSenderFixture(directory);
+        transport.TimeOutPaths.Add("/v1/file/finish");
+        var file = System.IO.Path.Combine(directory.Path, "payload.bin");
+        await File.WriteAllBytesAsync(file, [1, 2, 3], TestContext.Current.CancellationToken);
+        var reports = new List<FileTransferStatus>();
+
+        // A saved file must not be reported failed or deleted (Review Focus 4).
+        var outcome = await sender.SendAsync(file, peer, new InlineProgress(p => reports.Add(p.Status)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(FileSendOutcome.Unconfirmed, outcome);
+        Assert.Equal(["/v1/file/offer", "/v1/file/chunk", "/v1/file/finish"], transport.Calls.Select(call => call.Path));
+        Assert.Equal(FileTransferStatus.Unconfirmed, reports[^1]);
+    }
+
+    private static (FileSender Sender, Peer Peer, FakePeerTransport Transport) FileSenderFixture(TemporaryDirectory directory)
+    {
+        var peerId = Guid.NewGuid();
+        var pairedStore = new PairedDeviceStore(System.IO.Path.Combine(directory.Path, "paired.json"), new InMemoryPairKeyStorage());
+        pairedStore.AddDevice(new PairedDevice(peerId, "Phone"), Enumerable.Repeat((byte)9, 32).ToArray());
+        var transport = new FakePeerTransport();
+        return (new FileSender(new DeviceIdentity(Guid.NewGuid(), "Windows"), pairedStore, transport),
+            new Peer(peerId, "Phone", "10.0.0.3", 51888), transport);
+    }
+
+    /// <summary>Reports synchronously (<see cref="Progress{T}"/> posts to the thread pool).</summary>
+    private sealed class InlineProgress(Action<FileTransferProgress> report) : IProgress<FileTransferProgress>
+    {
+        public void Report(FileTransferProgress value) => report(value);
+    }
+
+    [Fact]
+    public async Task SendersReportStaleAnswersAsClockOutOfSyncWithThatDevice()
+    {
+        using var directory = new TemporaryDirectory();
+        var peerId = Guid.NewGuid();
+        var pairedStore = new PairedDeviceStore(
+            System.IO.Path.Combine(directory.Path, "paired.json"),
+            new InMemoryPairKeyStorage());
+        pairedStore.AddDevice(new PairedDevice(peerId, "Phone"), Enumerable.Repeat((byte)9, 32).ToArray());
+        var transport = new FakePeerTransport
+        {
+            Response = HttpCodec.EncodeResponse(new HttpResponse(400,
+                new Dictionary<string, string> { ["Content-Type"] = "application/json" },
+                Encoding.UTF8.GetBytes("{\"status\":\"stale\"}"))),
+        };
+        var peer = new Peer(peerId, "Phone", "10.0.0.3", 51888);
+
+        var clipSender = new ClipSender(new DeviceIdentity(Guid.NewGuid(), "Windows"), pairedStore, transport, directory.Path);
+        var clip = new ClipStore(directory.Path).AddText("hi");
+        var result = await clipSender.BroadcastAsync(clip, [peer], TestContext.Current.CancellationToken);
+        Assert.Equal(1, result.FailureCount);
+        Assert.Equal(0, result.NeedsUpdateCount);
+        Assert.Equal(["Phone"], result.ClockOutOfSyncPeerNames);
+        Assert.Equal("Clock out of sync with Phone.", WireProtocol.ClockOutOfSyncMessage(result.ClockOutOfSyncPeerNames));
+
+        var file = System.IO.Path.Combine(directory.Path, "payload.bin");
+        await File.WriteAllBytesAsync(file, [1, 2, 3], TestContext.Current.CancellationToken);
+        var fileSender = new FileSender(new DeviceIdentity(Guid.NewGuid(), "Windows"), pairedStore, transport);
+        var error = await Assert.ThrowsAsync<PeerClockOutOfSyncException>(() => fileSender.SendAsync(
+            file, peer, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal("Phone", error.DeviceName);
+        Assert.Equal("Clock out of sync with Phone.", error.Message);
+    }
+
+    private static readonly byte[] OnePixelPng = Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+
     private static ClipPayload TextPayload(string text) => new()
     {
         Id = Guid.NewGuid(),
@@ -176,15 +412,23 @@ public sealed class SyncCoreTests
     private sealed class FakePeerTransport : IPeerTransport
     {
         public List<(byte[] Data, Peer Peer)> Requests { get; } = [];
+        /// <summary>Path and per-request timeout of each call (null: the transport default).</summary>
+        public List<(string Path, TimeSpan? Timeout)> Calls { get; } = [];
+        /// <summary>Paths whose request times out instead of being answered.</summary>
+        public HashSet<string> TimeOutPaths { get; } = [];
         public byte[] Response { get; set; } = HttpCodec.EncodeResponse(
             new HttpResponse(200, new Dictionary<string, string>(), Encoding.UTF8.GetBytes("OK")));
 
         public Task<byte[]> SendAsync(
             byte[] data,
             Peer peer,
+            TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
             Requests.Add((data, peer));
+            var path = HttpCodec.ParseRequest(data).Path;
+            Calls.Add((path, timeout));
+            if (TimeOutPaths.Contains(path)) throw new TimeoutException("timed out");
             return Task.FromResult(Response);
         }
     }

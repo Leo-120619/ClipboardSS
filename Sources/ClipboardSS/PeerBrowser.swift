@@ -4,24 +4,6 @@ import Combine
 import ClipboardCore
 import OSLog
 
-func logToFile(_ message: String) {
-    guard ProcessInfo.processInfo.environment["CLIPBOARDSS_DEBUG_LOG"] == "1" else { return }
-
-    let logMessage = "[\(Date())] \(message)\n"
-    if let data = logMessage.data(using: .utf8) {
-        let fileURL = URL(fileURLWithPath: "/tmp/clipboardss_debug.log")
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            if let fileHandle = try? FileHandle(forWritingTo: fileURL) {
-                fileHandle.seekToEndOfFile()
-                fileHandle.write(data)
-                fileHandle.closeFile()
-            }
-        } else {
-            try? data.write(to: fileURL)
-        }
-    }
-}
-
 @MainActor
 public final class PeerBrowser: ObservableObject {
     @Published public private(set) var peers: [Peer] = []
@@ -139,7 +121,8 @@ public final class PeerBrowser: ObservableObject {
     }
 
     static func peer(serviceName: String, txt: [String: String], identityId: UUID) -> Peer? {
-        guard let vStr = txtValue("v", in: txt), vStr == "1",
+        // Older peers are still listed (marked "needs update"), never hidden.
+        guard let vStr = txtValue("v", in: txt), let version = Int(vStr), version >= 1,
               let deviceIdStr = txtValue("deviceId", in: txt),
               let deviceId = UUID(uuidString: deviceIdStr) else {
             return nil
@@ -150,7 +133,7 @@ public final class PeerBrowser: ObservableObject {
         }
 
         let deviceName = txtValue("deviceName", in: txt).flatMap { $0.isEmpty ? nil : $0 } ?? serviceName
-        return Peer(id: deviceId, name: deviceName, host: serviceName, port: 0)
+        return Peer(id: deviceId, name: deviceName, host: serviceName, port: 0, protocolVersion: version)
     }
 
     private static func isSelfService(txt: [String: String], identityId: UUID) -> Bool {

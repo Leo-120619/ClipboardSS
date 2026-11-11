@@ -3,10 +3,15 @@ import Foundation
 public struct ClipboardSnapshot: Equatable, Sendable {
     public var text: String?
     public var imageData: Data?
+    /// True when the source app marked the item as concealed, transient or
+    /// auto-generated (nspasteboard.org markers), e.g. a copied password.
+    /// Such items must never be stored or synced.
+    public var isSensitive: Bool
 
-    public init(text: String?, imageData: Data?) {
+    public init(text: String?, imageData: Data?, isSensitive: Bool = false) {
         self.text = text
         self.imageData = imageData
+        self.isSensitive = isSensitive
     }
 }
 
@@ -53,28 +58,57 @@ public final class ClipboardMonitor {
     private let pasteboard: PasteboardClient
     private let store: ClipStore
     private var lastChangeCount: Int?
+    /// The change count whose capture already failed once; its next failure is final.
+    private var retriedChangeCount: Int?
 
     public init(pasteboard: PasteboardClient, store: ClipStore) {
         self.pasteboard = pasteboard
         self.store = store
     }
 
-    public func poll() throws {
+    /// Treats the pasteboard's current contents as already seen, so the next
+    /// `poll()` does not record them. Used when the app itself writes to the
+    /// pasteboard (a received clip, a copy from history, a snippet paste).
+    public func ignoreCurrentChange() {
+        lastChangeCount = pasteboard.currentChangeCount()
+    }
+
+    /// Records a new local copy and returns its clip, or nil when the
+    /// pasteboard has not changed, the change was the app's own write, or the
+    /// item is sensitive or empty. Only the returned clip should be broadcast.
+    /// A change whose capture throws is retried once on the next poll, then dropped.
+    @discardableResult
+    public func poll() throws -> ClipItem? {
         let currentChangeCount = pasteboard.currentChangeCount()
         guard currentChangeCount != lastChangeCount else {
-            return
+            return nil
         }
 
+        let previousChangeCount = lastChangeCount
         lastChangeCount = currentChangeCount
-        let snapshot = pasteboard.readSnapshot()
+        do {
+            return try capture(pasteboard.readSnapshot())
+        } catch {
+            if retriedChangeCount != currentChangeCount {
+                retriedChangeCount = currentChangeCount
+                lastChangeCount = previousChangeCount
+            }
+            throw error
+        }
+    }
+
+    private func capture(_ snapshot: ClipboardSnapshot) throws -> ClipItem? {
+        guard !snapshot.isSensitive else {
+            return nil
+        }
 
         if let imageData = snapshot.imageData, !imageData.isEmpty {
-            try store.addImageData(imageData, fileExtension: "png", previewText: "Image")
-            return
+            return try store.addImageData(imageData, fileExtension: "png", previewText: "Image")
         }
 
         if let text = snapshot.text, !text.isEmpty {
-            try store.addText(text)
+            return try store.addText(text)
         }
+        return nil
     }
 }

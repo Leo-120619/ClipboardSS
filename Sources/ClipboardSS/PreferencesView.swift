@@ -6,7 +6,7 @@ struct PreferencesView: View {
     @State private var permissionRefreshID = UUID()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Preferences")
                     .font(.title3.weight(.semibold))
@@ -15,6 +15,20 @@ struct PreferencesView: View {
                     dismiss()
                 }
             }
+            .padding([.horizontal, .top], 22)
+            .padding(.bottom, 12)
+
+            ScrollView {
+                settingsSections
+                    .padding([.horizontal, .bottom], 22)
+            }
+        }
+        .frame(width: 520)
+        .frame(maxHeight: 720)
+    }
+
+    private var settingsSections: some View {
+        VStack(alignment: .leading, spacing: 18) {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Keyboard Shortcuts")
@@ -35,6 +49,44 @@ struct PreferencesView: View {
                     allowClear: true
                 )
                 Text("Click a shortcut field, then press the keys to use. Shortcut changes apply immediately.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let message = model.shortcutMessage {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if !model.hotKeyRegistrationFailures.isEmpty {
+                    Label(
+                        "macOS did not accept "
+                            + model.hotKeyRegistrationFailures.map(\.displayName).joined(separator: ", ")
+                            + ". Another app may already use it; choose a different shortcut.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Text Snippets")
+                        .font(.headline)
+                    Spacer()
+                    Button {
+                        model.addSnippet()
+                    } label: {
+                        Label("Add Snippet", systemImage: "plus")
+                    }
+                }
+                ForEach(model.snippets) { snippet in
+                    SnippetRow(
+                        snippet: snippet,
+                        onChange: { model.updateSnippet($0) },
+                        onDelete: { model.deleteSnippet(snippet.id) }
+                    )
+                }
+                Text("Press a snippet's shortcut in any app to paste its text. Your clipboard is restored right after.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -103,8 +155,6 @@ struct PreferencesView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(22)
-        .frame(width: 520)
     }
 
     private var clipboardShortcutBinding: Binding<KeyboardShortcut?> {
@@ -170,5 +220,65 @@ private struct PermissionRow: View {
         .padding(10)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct SnippetRow: View {
+    let snippet: TextSnippet
+    let onChange: (TextSnippet) -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("Name (e.g. My name)", text: binding(\.name))
+                    .textFieldStyle(.roundedBorder)
+                ShortcutRecorderField(shortcut: shortcutBinding)
+                    .frame(width: 170, height: 28)
+                Button {
+                    var updated = snippet
+                    updated.shortcut = nil
+                    onChange(updated)
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.borderless)
+                .disabled(snippet.shortcut == nil)
+                .help("Clear shortcut")
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("Delete snippet")
+            }
+            TextField("Text to paste", text: binding(\.text), axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...5)
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func binding(_ keyPath: WritableKeyPath<TextSnippet, String>) -> Binding<String> {
+        Binding(
+            get: { snippet[keyPath: keyPath] },
+            set: { value in
+                var updated = snippet
+                updated[keyPath: keyPath] = value
+                onChange(updated)
+            }
+        )
+    }
+
+    private var shortcutBinding: Binding<KeyboardShortcut?> {
+        Binding(
+            get: { snippet.shortcut },
+            set: { shortcut in
+                var updated = snippet
+                updated.shortcut = shortcut
+                onChange(updated)
+            }
+        )
     }
 }

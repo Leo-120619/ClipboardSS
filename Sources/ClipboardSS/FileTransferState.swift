@@ -11,6 +11,8 @@ struct FileTransferState: Identifiable, Equatable {
     enum Status: Equatable {
         case inProgress
         case completed
+        /// Sent, but the receiver did not confirm in time; it may still have saved the file.
+        case unconfirmed
         case failed(String)
         case cancelled
     }
@@ -25,6 +27,8 @@ struct FileTransferState: Identifiable, Equatable {
     var destinationURL: URL?
 
     var isActive: Bool { status == .inProgress }
+
+    static let unconfirmedMessage = "The other device did not confirm in time. Check whether the file arrived there."
 }
 
 /// Files dropped onto the window that need a destination device chosen (more than one
@@ -32,6 +36,11 @@ struct FileTransferState: Identifiable, Equatable {
 struct PendingSend: Identifiable, Equatable {
     let id = UUID()
     let files: [URL]
+    /// Outbox drops (`AppModel.shareKey`) this picker offers. Only these are sent or discarded when it
+    /// closes; drops that arrive while it is open wait for the next offer.
+    var shareDrops: [String] = []
+
+    var isShare: Bool { !shareDrops.isEmpty }
 }
 
 /// Thread-safe cancellation flag polled by `FileSender.sendFile(isCancelled:)`.

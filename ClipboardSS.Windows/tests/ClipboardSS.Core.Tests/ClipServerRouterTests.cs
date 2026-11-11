@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using ClipboardSS.Core.Crypto;
 using ClipboardSS.Core.Json;
@@ -25,7 +26,7 @@ public sealed class ClipServerRouterTests
 
         Assert.Equal(200, response.StatusCode);
         Assert.Equal(
-            "{\"deviceId\":\"8fb5790c-4533-47bb-90af-827291247fe1\",\"deviceName\":\"Windows\",\"v\":1}",
+            "{\"deviceId\":\"8fb5790c-4533-47bb-90af-827291247fe1\",\"deviceName\":\"Windows\",\"v\":2}",
             System.Text.Encoding.UTF8.GetString(response.Body));
     }
 
@@ -37,7 +38,7 @@ public sealed class ClipServerRouterTests
         var sourceId = Guid.NewGuid();
         var payload = TextPayload("hello");
         var key = Enumerable.Repeat((byte)7, 32).ToArray();
-        var envelope = EnvelopeCrypto.Seal(payload, sourceId, key);
+        var envelope = EnvelopeCrypto.Seal(payload, EnvelopePurpose.Clip, sourceId, Identity.Id, key);
         var request = Request(
             "POST",
             "/v1/clip",
@@ -51,8 +52,14 @@ public sealed class ClipServerRouterTests
         var added = await router.RouteAsync(request, "host", TestContext.Current.CancellationToken);
         Assert.Equal("{\"status\":\"ok\"}", System.Text.Encoding.UTF8.GetString(added.Body));
 
+        // Same clip under a fresh nonce (resending the same envelope would be a replay).
         backend.ReceiveStatus = ReceiveStatus.Duplicate;
-        var duplicate = await router.RouteAsync(request, "host", TestContext.Current.CancellationToken);
+        var resealed = Request(
+            "POST",
+            "/v1/clip",
+            JsonSerializer.SerializeToUtf8Bytes(
+                EnvelopeCrypto.Seal(payload, EnvelopePurpose.Clip, sourceId, Identity.Id, key), WireJson.Options));
+        var duplicate = await router.RouteAsync(resealed, "host", TestContext.Current.CancellationToken);
         Assert.Equal("{\"status\":\"duplicate\"}", System.Text.Encoding.UTF8.GetString(duplicate.Body));
     }
 
@@ -67,12 +74,14 @@ public sealed class ClipServerRouterTests
         var key = Enumerable.Repeat((byte)7, 32).ToArray();
         backend.Keys[sourceId] = key;
         var payload = path == "/v1/clip"
-            ? EnvelopeCrypto.Seal(TextPayload("hello"), sourceId, key)
+            ? EnvelopeCrypto.Seal(TextPayload("hello"), EnvelopePurpose.Clip, sourceId, Identity.Id, key)
             : EnvelopeCrypto.SealJson(
                 new FileOfferPayload(
                     "transfer", "test.txt", 4, "text/plain", "hash", 4, 1,
                     DateTimeOffset.FromUnixTimeSeconds(1_700_000_000), "Mac"),
+                EnvelopePurpose.FileOffer,
                 sourceId,
+                Identity.Id,
                 key);
 
         var response = await router.RouteAsync(
@@ -97,13 +106,40 @@ public sealed class ClipServerRouterTests
         Assert.Equal(200, response.StatusCode);
         Assert.Equal("192.168.0.9", backend.RemoteHost);
 
-        backend.ConfirmResult = false;
+        backend.ConfirmResult = PairConfirmOutcome.Rejected;
         var confirm = new PairConfirmRequest(start.DeviceId, Convert.ToBase64String(new byte[32]));
         response = await router.RouteAsync(
             Request("POST", "/v1/pair/confirm", JsonSerializer.SerializeToUtf8Bytes(confirm, WireJson.Options)),
             "192.168.0.9",
             TestContext.Current.CancellationToken);
         Assert.Equal(401, response.StatusCode);
+
+        backend.ConfirmResult = PairConfirmOutcome.AlreadyPaired;
+        response = await router.RouteAsync(
+            Request("POST", "/v1/pair/confirm", JsonSerializer.SerializeToUtf8Bytes(confirm, WireJson.Options)),
+            "192.168.0.9",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(409, response.StatusCode);
+        Assert.Equal("{\"status\":\"alreadyPaired\"}", Encoding.UTF8.GetString(response.Body));
+
+        backend.ConfirmResult = PairConfirmOutcome.TimedOut;
+        response = await router.RouteAsync(
+            Request("POST", "/v1/pair/confirm", JsonSerializer.SerializeToUtf8Bytes(confirm, WireJson.Options)),
+            "192.168.0.9",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(408, response.StatusCode);
+        Assert.Equal("{\"status\":\"timeout\"}", Encoding.UTF8.GetString(response.Body));
+
+        var reveal = new PairRevealRequest(start.DeviceId, Convert.ToBase64String(new byte[32]), Convert.ToBase64String(new byte[16]));
+        foreach (var (outcome, status) in new[] { (PairRevealOutcome.Ok, 200), (PairRevealOutcome.Rejected, 401), (PairRevealOutcome.Invalid, 400) })
+        {
+            backend.RevealResult = outcome;
+            response = await router.RouteAsync(
+                Request("POST", "/v1/pair/reveal", JsonSerializer.SerializeToUtf8Bytes(reveal, WireJson.Options)),
+                "192.168.0.9",
+                TestContext.Current.CancellationToken);
+            Assert.Equal(status, response.StatusCode);
+        }
 
         backend.RejectPairStart = true;
         response = await router.RouteAsync(
@@ -139,7 +175,8 @@ public sealed class ClipServerRouterTests
         public Dictionary<Guid, byte[]> Keys { get; } = [];
         public ReceiveStatus ReceiveStatus { get; set; } = ReceiveStatus.Added;
         public string? RemoteHost { get; private set; }
-        public bool ConfirmResult { get; set; } = true;
+        public PairConfirmOutcome ConfirmResult { get; set; } = PairConfirmOutcome.Paired;
+        public PairRevealOutcome RevealResult { get; set; } = PairRevealOutcome.Ok;
         public bool RejectPairStart { get; set; }
         public bool Connected { get; set; } = true;
         public byte[]? GetPairKey(Guid deviceId) => Keys.GetValueOrDefault(deviceId);
@@ -159,7 +196,11 @@ public sealed class ClipServerRouterTests
                 Convert.ToBase64String(new byte[32])));
         }
 
-        public Task<bool> HandlePairConfirmAsync(
+        public Task<PairRevealOutcome> HandlePairRevealAsync(
+            PairRevealRequest request,
+            CancellationToken cancellationToken) => Task.FromResult(RevealResult);
+
+        public Task<PairConfirmOutcome> HandlePairConfirmAsync(
             PairConfirmRequest request,
             CancellationToken cancellationToken) => Task.FromResult(ConfirmResult);
     }

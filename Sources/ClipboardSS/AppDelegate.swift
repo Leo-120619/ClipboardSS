@@ -9,15 +9,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var screenTextOverlayController: ScreenTextOverlayController?
     private var model: AppModel?
     private var hotKeyManager: HotKeyManager?
+    private var snippetPaster: SnippetPaster?
     private var monitorTimer: Timer?
     private var clipboardMonitor: ClipboardMonitor?
-    private var shareStagingDirectory: URL?
     private var receivedFileNotifications: ReceivedFileNotificationService?
+    private var lastCleanupError: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.applicationIconImage = ClipboardSSLogo.image(size: NSSize(width: 128, height: 128))
-        VisionTextRecognition.warmUp()
         let receivedFileNotifications = ReceivedFileNotificationService()
         receivedFileNotifications.initialize()
         self.receivedFileNotifications = receivedFileNotifications
@@ -50,13 +50,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 pairedStore: pairedStore,
                 transport: transport
             )
-            let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard)
+            let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+            let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard, monitor: monitor)
 
             let transferEventSink = FileTransferEventSink()
+            // One guard for every envelope endpoint, so a nonce is single-use process-wide.
+            let replayGuard = ReplayGuard()
             let fileReceiver = FileReceiver(
                 pairedStore: pairedStore,
+                localDeviceId: identity.id,
                 transfersDirectory: store.storageDirectory.appendingPathComponent("Transfers", isDirectory: true),
                 destinationProvider: { ReceiveSettings.resolvedDirectory() },
+                replayGuard: replayGuard,
                 onEvent: { [transferEventSink] event in transferEventSink.emit(event) }
             )
 
@@ -64,7 +69,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 identity: identity,
                 receiver: clipReceiver,
                 pairingCoordinator: pairingCoordinator,
-                fileReceiver: fileReceiver
+                fileReceiver: fileReceiver,
+                replayGuard: replayGuard
             )
             let peerBrowser = PeerBrowser(identityId: identity.id)
             let clipSender = ClipSender(
@@ -91,14 +97,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 clipSender: clipSender,
                 clipServer: clipServer,
                 fileSender: fileSender,
-                fileReceiver: fileReceiver
+                fileReceiver: fileReceiver,
+                clipboardMonitor: monitor
             )
             transferEventSink.setHandler { [weak model] event in
                 Task { @MainActor in model?.handleReceiveEvent(event) }
             }
-            let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
             let windowController = ClipboardWindowController(model: model)
             let hotKeyManager = HotKeyManager()
+            hotKeyManager.onRegistrationFailuresChanged = { [weak model] failures in
+                model?.hotKeyRegistrationFailures = failures
+            }
 
             self.model = model
             self.screenTextOverlayController = screenTextOverlayController
@@ -114,6 +123,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             model.onScreenTextShortcutChanged = { [weak hotKeyManager] shortcut in
                 hotKeyManager?.screenTextShortcut = shortcut
+            }
+            let snippetPaster = SnippetPaster()
+            self.snippetPaster = snippetPaster
+            snippetPaster.onPasteboardWritten = { [weak monitor] in
+                monitor?.ignoreCurrentChange()
+            }
+            hotKeyManager.snippetShortcuts = TextSnippet.hotKeys(for: model.snippets)
+            model.onSnippetsChanged = { [weak hotKeyManager] snippets in
+                hotKeyManager?.snippetShortcuts = TextSnippet.hotKeys(for: snippets)
+            }
+            model.onSnippetPasteRequested = { [weak snippetPaster] text in
+                snippetPaster?.paste(text)
             }
             model.onPasteRequested = { [weak windowController] request in
                 windowController?.performPaste(request)
@@ -133,10 +154,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            let stagingDir = store.storageDirectory.appendingPathComponent("ShareStaging", isDirectory: true)
-            try? FileManager.default.removeItem(at: stagingDir)
-            try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
-            self.shareStagingDirectory = stagingDir
+            model.onShareNeedsAttention = { [weak windowController] in
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                windowController?.show()
+            }
+
+            // Leftovers from a previous run; their sends cannot resume.
+            try? FileManager.default.removeItem(at: model.shareStagingDirectory)
 
             configureStatusItem()
             model.startNetworking()
@@ -146,6 +170,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.captureScreenshot()
             } screenTextCallback: {
                 model.startScreenTextSelection()
+            } snippetCallback: { snippetID in
+                // The hot key fires while another app is frontmost, so a
+                // failure (missing Accessibility access) has to bring the
+                // window forward for its alert to be seen.
+                guard !model.pasteSnippet(snippetID) else { return }
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                windowController.show()
             }
 
             monitorTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
@@ -159,6 +190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if model.showCoachMarks {
                 windowController.show()
             }
+
+            Self.showCorruptStateNotice(
+                for: [store.quarantinedFileURL, pairedStore.quarantinedFileURL],
+                pairingLost: pairedStore.quarantinedFileURL != nil
+            )
         } catch {
             NSAlert(error: error).runModal()
             NSApplication.shared.terminate(nil)
@@ -170,59 +206,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitorTimer?.invalidate()
     }
 
+    /// One timer tick. A failed capture (retried once by the monitor on the next tick)
+    /// must not skip the rest of the tick's housekeeping.
     private func pollClipboard() {
         do {
-            try clipboardMonitor?.poll()
-            try model?.cleanupExpiredClips()
-            model?.collectTransferGarbage()
-            model?.refresh()
-            processShareOutbox()
+            if let clip = try clipboardMonitor?.poll() {
+                model?.broadcastCaptured(clip)
+            }
         } catch {
-            print("Background clipboard polling failed: \(error.localizedDescription)")
+            print("Clipboard capture failed: \(error.localizedDescription)")
         }
+        do {
+            try model?.cleanupExpiredClips()
+            lastCleanupError = nil
+        } catch {
+            // A file that cannot be deleted fails every tick; report it once, not every 0.75 s.
+            let message = error.localizedDescription
+            if message != lastCleanupError {
+                lastCleanupError = message
+                print("Clip cleanup failed: \(message)")
+            }
+        }
+        model?.collectTransferGarbage()
+        model?.refresh()
+        processShareOutbox()
     }
 
     /// Handles a `clipboardss://` open triggered by the share extension. The payload is
-    /// irrelevant — any activation means "drain the share outbox".
+    /// irrelevant — any activation means "check the share outbox".
     @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent: NSAppleEventDescriptor) {
         processShareOutbox()
     }
 
-    /// Drains complete drops written by the share extension: stages each file locally,
-    /// removes the app-group drop folder, and hands the files to the normal send flow.
+    /// Queues complete drops written by the share extension. The model sends them once a
+    /// paired device is reachable; the drop stays in the outbox until then.
     private func processShareOutbox() {
-        guard let model else { return }
-        let drops = ShareInbox.pendingDrops()
-        guard !drops.isEmpty else { return }
-
-        let staging = shareStagingDirectory ?? FileManager.default.temporaryDirectory
-        var stagedURLs: [URL] = []
-        for drop in drops {
-            for source in drop.fileURLs {
-                let destDir = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
-                try? FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
-                let dest = destDir.appendingPathComponent(source.lastPathComponent)
-                do {
-                    do {
-                        try FileManager.default.moveItem(at: source, to: dest)
-                    } catch {
-                        try FileManager.default.copyItem(at: source, to: dest)
-                    }
-                    stagedURLs.append(dest)
-                } catch {
-                    // Skip files we can't stage; keep going with the rest.
-                }
-            }
-            ShareInbox.remove(drop)
-        }
-        guard !stagedURLs.isEmpty else { return }
-
-        model.handleDroppedFiles(stagedURLs)
-        // Surface the window when the user must choose a device or when nothing is reachable.
-        if model.pendingSend != nil || model.lastError != nil {
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            windowController?.show()
-        }
+        model?.enqueueShares(ShareInbox.pendingDrops())
     }
 
     private func configureStatusItem() {
@@ -259,6 +278,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    /// One-time notice for state files that were unreadable at launch and moved aside.
+    private static func showCorruptStateNotice(for quarantined: [URL?], pairingLost: Bool) {
+        let names = quarantined.compactMap { $0?.lastPathComponent }
+        guard !names.isEmpty else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Some saved ClipboardSS data could not be read"
+        alert.informativeText = "ClipboardSS started with empty data instead. The unreadable files were kept as:\n\n"
+            + names.joined(separator: "\n")
+            + (pairingLost ? "\n\nPair your devices again." : "")
+        alert.runModal()
     }
 
     /// Loads the persistent device identity UUID, regenerating (and persisting) a

@@ -21,7 +21,7 @@ public final class NWPeerTransport: PeerTransport, @unchecked Sendable {
         return .hostPort(host: NWEndpoint.Host(peer.host), port: port)
     }
     
-    public func send(_ data: Data, to peer: Peer) async throws -> Data {
+    public func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         let ep = Self.endpoint(for: peer)
         logToFile("NWPeerTransport: send initiated to peer \(peer.name), resolved endpoint: \(ep)")
         
@@ -57,13 +57,13 @@ public final class NWPeerTransport: PeerTransport, @unchecked Sendable {
             
             let timeoutTask = Task {
                 do {
-                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 } catch {
                     // Cancelled because a response (or other failure) already arrived.
                     // This is NOT a timeout, so do not report one.
                     return
                 }
-                logToFile("NWPeerTransport: send request timed out (10s)")
+                logToFile("NWPeerTransport: send request timed out (\(Int(timeout))s)")
                 respond(.failure(URLError(.timedOut)))
             }
             
@@ -95,6 +95,13 @@ public final class NWPeerTransport: PeerTransport, @unchecked Sendable {
 
                                     if let responseData {
                                         buffer.data.append(responseData)
+                                    }
+
+                                    if buffer.data.count > HTTPCodec.maxBodySize + HTTPCodec.maxHeaderSize {
+                                        timeoutTask.cancel()
+                                        logToFile("NWPeerTransport: response exceeded \(buffer.data.count) bytes; aborting")
+                                        respond(.failure(URLError(.dataLengthExceedsMaximum)))
+                                        return
                                     }
 
                                     do {

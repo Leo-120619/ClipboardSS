@@ -1,27 +1,24 @@
+import 'dart:convert';
+
 import 'package:clipboard_companion/core/app_state.dart';
+import 'package:clipboard_companion/core/clip_server.dart';
+import 'package:clipboard_companion/core/crypto_utils.dart';
+import 'package:clipboard_companion/core/liveness_ping.dart';
 import 'package:clipboard_companion/core/models.dart';
+import 'package:clipboard_companion/core/pairing_coordinator.dart';
+import 'package:clipboard_companion/core/replay_guard.dart';
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shelf/shelf.dart';
 import 'dart:async';
+
+import 'file_transfer_test_support.dart';
 
 void main() {
   test('disconnect is shown only for an enabled device that is online', () {
     expect(isDeviceConnectionActive(enabled: true, online: true), isTrue);
     expect(isDeviceConnectionActive(enabled: true, online: false), isFalse);
     expect(isDeviceConnectionActive(enabled: false, online: true), isFalse);
-  });
-
-  test('reconnection prefers a live address and ignores another device', () {
-    final peer = matchingReconnectPeer(
-      deviceId: 'target',
-      mdnsPeers: [
-        Peer(id: 'other', name: 'Other', host: '10.0.0.8', port: 51888),
-      ],
-      sweptPeers: [
-        Peer(id: 'target', name: 'Target', host: '10.0.0.42', port: 51888),
-      ],
-    );
-
-    expect(peer?.host, '10.0.0.42');
   });
 
   test('network lifecycle transitions run in request order', () async {
@@ -45,140 +42,490 @@ void main() {
     expect(events, ['pause-start', 'pause-end', 'resume']);
   });
 
-  test(
-    'a device visible over mDNS is online only after its address responds',
-    () async {
-      final probed = <String>[];
+  group('liveness decisions', () {
+    test(
+      'impostorAnsweringIdIsNotMarkedOnline: an mDNS or /v1/id claim without a valid pong is offline',
+      () async {
+        final report = await computeDeviceLiveness(
+          devices: [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
+          mdnsPeers: [
+            Peer(id: 'a', name: 'Mac', host: '10.0.0.66', port: 51888),
+          ],
+          ping: (_, _) async => PingOutcome.unverified,
+        );
 
-      final online = await computeDeviceLiveness(
-        devices: [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
+        expect(report.onlineIds, isEmpty);
+      },
+    );
+
+    test(
+      'a ping that throws (e.g. a secure-storage read) leaves other devices online',
+      () async {
+        final report = await computeDeviceLiveness(
+          devices: [
+            PairedDevice(id: 'a', name: 'Broken', host: '10.0.0.9'),
+            PairedDevice(id: 'b', name: 'Mac', host: '10.0.0.10'),
+          ],
+          mdnsPeers: const [],
+          ping: (device, _) async => device.id == 'a'
+              ? throw StateError('secure storage unavailable')
+              : PingOutcome.alive,
+        );
+
+        expect(report.onlineIds, {'b'});
+        expect(report.upgradeRequired, isEmpty);
+      },
+    );
+
+    test('hostIsNotUpdatedWithoutValidPong', () async {
+      final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
+      final report = await computeDeviceLiveness(
+        devices: [device],
+        mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.66', port: 51888)],
+        ping: (_, host) async => host == '10.0.0.66'
+            ? PingOutcome.upgradeRequired
+            : PingOutcome.unverified,
+      );
+
+      expect(hostUpdates([device], report), isEmpty);
+      expect(report.onlineIds, isEmpty);
+    });
+
+    test('validPongMarksOnlineAndUpdatesHost', () async {
+      final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
+      final pinged = <String>[];
+      final report = await computeDeviceLiveness(
+        devices: [device],
         mdnsPeers: [
           Peer(id: 'a', name: 'Mac', host: '192.168.0.4', port: 51888),
         ],
-        probe: (host) async {
-          probed.add(host);
-          return Peer(id: 'a', name: 'Mac', host: host, port: 51888);
+        ping: (_, host) async {
+          pinged.add(host);
+          return host == '192.168.0.4'
+              ? PingOutcome.alive
+              : PingOutcome.unverified;
         },
       );
 
-      expect(online, {'a': true});
-      expect(probed, ['192.168.0.4']);
-    },
-  );
+      expect(report.onlineIds, {'a'});
+      expect(hostUpdates([device], report), {'a': '192.168.0.4'});
+      expect(pinged, ['192.168.0.4']);
+    });
 
-  test('a stale mDNS address falls back to the stored address', () async {
-    final probed = <String>[];
-
-    final online = await computeDeviceLiveness(
-      devices: [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
-      mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.8', port: 51888)],
-      probe: (host) async {
-        probed.add(host);
-        return host == '10.0.0.9'
-            ? Peer(id: 'a', name: 'Mac', host: host, port: 51888)
-            : null;
-      },
-    );
-
-    expect(online, {'a': true});
-    expect(probed, ['10.0.0.8', '10.0.0.9']);
-  });
-
-  test('a probe returning the matching device id marks it online', () async {
-    final online = await computeDeviceLiveness(
-      devices: [PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20')],
-      mdnsPeers: [],
-      probe: (host) async => Peer(id: 'b', name: 'PC', host: host, port: 51888),
-    );
-
-    expect(online, {'b': true});
-  });
-
-  test('a probe that fails or times out marks the device offline', () async {
-    final online = await computeDeviceLiveness(
-      devices: [PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20')],
-      mdnsPeers: [],
-      probe: (host) async =>
-          Peer(id: ' A-B ', name: 'Mac', host: host, port: 51888),
-    );
-
-    expect(online, {'b': false});
-  });
-
-  test('a host answering with a different device id is offline', () async {
-    final online = await computeDeviceLiveness(
-      devices: [PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20')],
-      mdnsPeers: [],
-      probe: (host) async =>
-          Peer(id: 'someone-else', name: 'Other', host: host, port: 51888),
-    );
-
-    expect(online, {'b': false});
-  });
-
-  test('a device with no stored host is offline and is not probed', () async {
-    final probed = <String>[];
-
-    final online = await computeDeviceLiveness(
-      devices: [PairedDevice(id: 'c', name: 'Legacy')],
-      mdnsPeers: [],
-      probe: (host) async {
-        probed.add(host);
-        return null;
-      },
-    );
-
-    expect(online, {'c': false});
-    expect(probed, isEmpty);
-  });
-
-  test('liveness is reported per device across a mixed set', () async {
-    final online = await computeDeviceLiveness(
-      devices: [
-        PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9'),
-        PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20'),
-        PairedDevice(id: 'd', name: 'Off', host: '192.168.0.30'),
-      ],
-      mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.9', port: 51888)],
-      probe: (host) async => host == '10.0.0.9'
-          ? Peer(id: 'a', name: 'Mac', host: host, port: 51888)
-          : host == '192.168.0.20'
-          ? Peer(id: 'b', name: 'PC', host: host, port: 51888)
-          : null,
-    );
-
-    expect(online, {'a': true, 'b': true, 'd': false});
-  });
-
-  test(
-    'liveness is independent of the manual connected (pause) flag',
-    () async {
-      final online = await computeDeviceLiveness(
-        devices: [
-          PairedDevice(
-            id: 'a',
-            name: 'Mac',
-            host: '10.0.0.9',
-            connected: false,
-          ),
-        ],
-        mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.9', port: 51888)],
-        probe: (host) async =>
-            Peer(id: 'a', name: 'Mac', host: host, port: 51888),
+    test('a valid pong clears an earlier 426 from another address', () async {
+      final report = await computeDeviceLiveness(
+        devices: [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
+        mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.66', port: 51888)],
+        ping: (_, host) async => host == '10.0.0.66'
+            ? PingOutcome.upgradeRequired
+            : PingOutcome.alive,
       );
 
-      expect(online, {'a': true});
-    },
-  );
+      expect(report.onlineIds, {'a'});
+      expect(report.upgradeRequired, isEmpty);
+    });
 
-  test('device ids are canonicalised when reporting liveness', () async {
-    final online = await computeDeviceLiveness(
-      devices: [PairedDevice(id: '  A-B  ', name: 'Mac', host: '10.0.0.9')],
-      mdnsPeers: [Peer(id: 'a-b', name: 'Mac', host: '10.0.0.9', port: 51888)],
-      probe: (host) async =>
-          Peer(id: ' A-B ', name: 'Mac', host: host, port: 51888),
+    test('a 426 to every ping marks the device outdated, not online', () async {
+      final report = await computeDeviceLiveness(
+        devices: [PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20')],
+        mdnsPeers: [],
+        ping: (_, _) async => PingOutcome.upgradeRequired,
+      );
+
+      expect(report.onlineIds, isEmpty);
+      expect(report.upgradeRequired, {'b'});
+    });
+
+    test(
+      'a stale-refused ping is clock skew: not online, host unchanged',
+      () async {
+        final device = PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9');
+        final report = await computeDeviceLiveness(
+          devices: [device],
+          mdnsPeers: [
+            Peer(id: 'a', name: 'Mac', host: '10.0.0.8', port: 51888),
+          ],
+          ping: (_, host) async => host == '10.0.0.8'
+              ? PingOutcome.clockSkew
+              : PingOutcome.unverified,
+        );
+
+        expect(report.clockSkew, {'a'});
+        expect(report.onlineIds, isEmpty);
+        expect(hostUpdates([device], report), isEmpty);
+      },
     );
 
-    expect(online, {'a-b': true});
+    test('a valid pong clears clock skew from another address', () async {
+      final report = await computeDeviceLiveness(
+        devices: [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
+        mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.8', port: 51888)],
+        ping: (_, host) async =>
+            host == '10.0.0.8' ? PingOutcome.clockSkew : PingOutcome.alive,
+      );
+
+      expect(report.onlineIds, {'a'});
+      expect(report.clockSkew, isEmpty);
+    });
+
+    test(
+      'a valid pong overrides an mDNS v1 claim: not needsUpdate, sent to the stored host',
+      () {
+        final impostor = Peer(
+          id: 'a',
+          name: 'Mac',
+          host: '10.0.0.66',
+          port: 51888,
+          protocolVersion: 1,
+        );
+        expect(
+          deviceNeedsUpdate(
+            deviceId: 'a',
+            mdnsPeers: [impostor],
+            outdatedDeviceIds: const {},
+          ),
+          isTrue,
+        );
+        expect(
+          deviceNeedsUpdate(
+            deviceId: 'a',
+            mdnsPeers: [impostor],
+            outdatedDeviceIds: const {},
+            verifiedOnlineIds: {'a'},
+          ),
+          isFalse,
+        );
+        final target = composeSendTargets(
+          [impostor],
+          [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
+          verifiedOnlineIds: {'a'},
+        ).single;
+        expect(target.needsUpdate, isFalse);
+        expect(target.host, '10.0.0.9');
+      },
+    );
+
+    test('a stale mDNS address falls back to the stored address', () async {
+      final pinged = <String>[];
+      final report = await computeDeviceLiveness(
+        devices: [PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9')],
+        mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.8', port: 51888)],
+        ping: (_, host) async {
+          pinged.add(host);
+          return host == '10.0.0.9'
+              ? PingOutcome.alive
+              : PingOutcome.unverified;
+        },
+      );
+
+      expect(report.verifiedHosts, {'a': '10.0.0.9'});
+      expect(pinged, ['10.0.0.8', '10.0.0.9']);
+    });
+
+    test('a device with no stored host is offline and is not pinged', () async {
+      final pinged = <String>[];
+      final report = await computeDeviceLiveness(
+        devices: [PairedDevice(id: 'c', name: 'Legacy')],
+        mdnsPeers: [],
+        ping: (_, host) async {
+          pinged.add(host);
+          return PingOutcome.unverified;
+        },
+      );
+
+      expect(report.onlineIds, isEmpty);
+      expect(pinged, isEmpty);
+    });
+
+    test('liveness is reported per device across a mixed set', () async {
+      final report = await computeDeviceLiveness(
+        devices: [
+          PairedDevice(id: 'a', name: 'Mac', host: '10.0.0.9'),
+          PairedDevice(id: 'b', name: 'PC', host: '192.168.0.20'),
+          PairedDevice(id: 'd', name: 'Off', host: '192.168.0.30'),
+        ],
+        mdnsPeers: [Peer(id: 'a', name: 'Mac', host: '10.0.0.9', port: 51888)],
+        ping: (device, _) async =>
+            device.id == 'd' ? PingOutcome.unverified : PingOutcome.alive,
+      );
+
+      expect(report.onlineIds, {'a', 'b'});
+    });
+
+    test(
+      'liveness is independent of the manual connected (pause) flag',
+      () async {
+        final report = await computeDeviceLiveness(
+          devices: [
+            PairedDevice(
+              id: 'a',
+              name: 'Mac',
+              host: '10.0.0.9',
+              connected: false,
+            ),
+          ],
+          mdnsPeers: [
+            Peer(id: 'a', name: 'Mac', host: '10.0.0.9', port: 51888),
+          ],
+          ping: (_, _) async => PingOutcome.alive,
+        );
+
+        expect(report.onlineIds, {'a'});
+      },
+    );
+
+    test('device ids are canonicalised when reporting liveness', () async {
+      final report = await computeDeviceLiveness(
+        devices: [PairedDevice(id: '  A-B  ', name: 'Mac', host: '10.0.0.9')],
+        mdnsPeers: [
+          Peer(id: 'a-b', name: 'Mac', host: '10.0.0.9', port: 51888),
+        ],
+        ping: (_, _) async => PingOutcome.alive,
+      );
+
+      expect(report.onlineIds, {'a-b'});
+    });
+  });
+
+  group('POST /v1/ping', () {
+    const localId = 'aaaaaaaa-0000-0000-0000-000000000000';
+    const deviceId = 'cccccccc-0000-0000-0000-000000000000';
+    final key = SecretKey(List<int>.filled(32, 7));
+
+    Future<Handler> makeHandler({SecretKey? knownKey}) async {
+      final store = await makePairedStore(localId, knownKey ?? key);
+      final identity = DeviceIdentity(id: deviceId, name: 'Companion');
+      return ClipServer(
+        identity: identity,
+        pairingCoordinator: PairingCoordinator(
+          identity: identity,
+          pairedStore: store,
+        ),
+        pairedStore: store,
+        onClipReceived: (_) {},
+      ).buildHandler();
+    }
+
+    Future<(int, String)?> Function(String) wire(Handler handler) =>
+        (body) async {
+          final response = await handler(
+            Request('POST', Uri.parse('http://localhost/v1/ping'), body: body),
+          );
+          return (response.statusCode, await response.readAsString());
+        };
+
+    Future<PingOutcome> ping(Future<(int, String)?> Function(String) post) =>
+        LivenessPing.ping(
+          deviceId: deviceId,
+          localDeviceId: localId,
+          pairKey: key,
+          post: post,
+        );
+
+    test('a valid pong from the paired device proves it alive', () async {
+      expect(await ping(wire(await makeHandler())), PingOutcome.alive);
+    });
+
+    test('an impostor without the pair key is not alive', () async {
+      final impostor = await makeHandler(
+        knownKey: SecretKey(List<int>.filled(32, 9)),
+      );
+      expect(await ping(wire(impostor)), PingOutcome.unverified);
+    });
+
+    test(
+      'a pong captured for an earlier ping does not answer a new one',
+      () async {
+        final post = wire(await makeHandler());
+        (int, String)? captured;
+        expect(
+          await ping((body) async => captured = await post(body)),
+          PingOutcome.alive,
+        );
+        expect(await ping((_) async => captured), PingOutcome.unverified);
+      },
+    );
+
+    test('a pong from another device, or a stale pong, is not alive', () async {
+      final nonce = base64Encode(List<int>.generate(12, (i) => i));
+      Future<PingOutcome> evaluate(String source, DateTime sentAt) async {
+        final pong = await CryptoEnvelopeUtils.sealJson(
+          {'pingNonce': nonce},
+          purpose: EnvelopePurpose.pong,
+          sourceDeviceId: source,
+          recipientDeviceId: localId,
+          pairKey: key,
+          sentAt: sentAt,
+        );
+        return LivenessPing.evaluatePong(
+          statusCode: 200,
+          body: jsonEncode(pong.toJson()),
+          pingNonce: nonce,
+          deviceId: deviceId,
+          localDeviceId: localId,
+          pairKey: key,
+        );
+      }
+
+      final now = DateTime.now();
+      expect(
+        await evaluate('dddddddd-0000-0000-0000-000000000000', now),
+        PingOutcome.unverified,
+      );
+      expect(
+        await evaluate(deviceId, now.subtract(const Duration(seconds: 301))),
+        PingOutcome.unverified,
+      );
+      expect(
+        await evaluate(deviceId, now.subtract(const Duration(seconds: 240))),
+        PingOutcome.alive,
+      );
+    });
+
+    test(
+      'a 426 is upgradeRequired, 400 stale is clockSkew, a non-pong 200 is unverified',
+      () async {
+        expect(
+          await ping((_) async => (426, jsonEncode(upgradeRequiredBody))),
+          PingOutcome.upgradeRequired,
+        );
+        expect(
+          await ping(
+            (_) async => (200, jsonEncode({'deviceId': deviceId, 'v': 2})),
+          ),
+          PingOutcome.unverified,
+        );
+        expect(await ping((_) async => null), PingOutcome.unverified);
+        expect(
+          await ping((_) async => (400, jsonEncode({'status': 'stale'}))),
+          PingOutcome.clockSkew,
+        );
+        expect(
+          await ping((_) async => (400, 'Bad Request')),
+          PingOutcome.unverified,
+        );
+      },
+    );
+
+    test('a 404 on /v1/ping is a v1 server: upgradeRequired', () async {
+      expect(
+        await ping((_) async => (404, 'Not Found')),
+        PingOutcome.upgradeRequired,
+      );
+    });
+
+    test(
+      'the responder answers 426, 401, 400 stale and 409 replayed',
+      () async {
+        final guard = ReplayGuard();
+        Future<int> respond(ClipEnvelope envelope) async {
+          final (status, _) = await LivenessPing.respond(
+            envelope: envelope,
+            localDeviceId: deviceId,
+            getKey: (id) async => id == localId ? key : null,
+            replayGuard: guard,
+          );
+          return status;
+        }
+
+        final ping = await LivenessPing.sealPing(
+          deviceId: deviceId,
+          localDeviceId: localId,
+          pairKey: key,
+        );
+        expect(
+          await respond(
+            ClipEnvelope(
+              v: 1,
+              sourceDeviceId: localId,
+              nonce: ping.nonce,
+              ciphertext: ping.ciphertext,
+            ),
+          ),
+          426,
+        );
+        expect(
+          await respond(
+            await LivenessPing.sealPing(
+              deviceId: deviceId,
+              localDeviceId: 'eeeeeeee-0000-0000-0000-000000000000',
+              pairKey: key,
+            ),
+          ),
+          401,
+        );
+        expect(
+          await respond(
+            await CryptoEnvelopeUtils.sealJson(
+              const {},
+              purpose: EnvelopePurpose.clip,
+              sourceDeviceId: localId,
+              recipientDeviceId: deviceId,
+              pairKey: key,
+            ),
+          ),
+          401,
+        );
+        expect(
+          await respond(
+            await LivenessPing.sealPing(
+              deviceId: deviceId,
+              localDeviceId: localId,
+              pairKey: key,
+              sentAt: DateTime.now().subtract(const Duration(seconds: 301)),
+            ),
+          ),
+          400,
+        );
+        expect(await respond(ping), 200);
+        expect(await respond(ping), 409);
+      },
+    );
+  });
+
+  group('ResumeGate', () {
+    test('settled waits for the resume probe after a pause', () async {
+      final gate = ResumeGate();
+      final probe = Completer<void>();
+      final events = <String>[];
+
+      gate.paused();
+      final settled = gate.settled().then((_) => events.add('settled'));
+      await Future<void>.delayed(Duration.zero);
+      expect(events, isEmpty);
+
+      final resumed = gate.resumed(() async {
+        events.add('probe-start');
+        await probe.future;
+        events.add('probe-end');
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(events, ['probe-start']);
+
+      probe.complete();
+      await Future.wait([settled, resumed]);
+      expect(events, ['probe-start', 'probe-end', 'settled']);
+    });
+
+    test('settled completes at once when nothing paused', () async {
+      var done = false;
+      await ResumeGate().settled().then((_) => done = true);
+      expect(done, isTrue);
+    });
+
+    test('a failed resume probe still releases waiters', () async {
+      final gate = ResumeGate()..paused();
+      final settled = gate.settled();
+      await expectLater(
+        gate.resumed(() async => throw StateError('offline')),
+        throwsStateError,
+      );
+      await settled;
+    });
+
+    test('settled gives up after the timeout if resume never comes', () async {
+      final gate = ResumeGate()..paused();
+      await gate.settled(timeout: const Duration(milliseconds: 10));
+    });
   });
 }

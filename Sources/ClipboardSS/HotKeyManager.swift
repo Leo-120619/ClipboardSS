@@ -1,6 +1,46 @@
 import AppKit
 import Carbon
 
+/// Registers global hot keys with the system; replaced in tests.
+@MainActor
+protocol HotKeyRegistering: AnyObject {
+    /// Returns false when the system refuses the shortcut (e.g. another app owns it).
+    func register(_ shortcut: KeyboardShortcut, id: UInt32) -> Bool
+    func unregisterAll()
+}
+
+@MainActor
+final class CarbonHotKeyRegistrar: HotKeyRegistering {
+    private static let hotKeySignature = OSType(0x434C5053)
+    private var registeredHotKeys: [UInt32: EventHotKeyRef] = [:]
+
+    func register(_ shortcut: KeyboardShortcut, id: UInt32) -> Bool {
+        var hotKeyRef: EventHotKeyRef?
+        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: id)
+        let status = RegisterEventHotKey(
+            UInt32(shortcut.keyCode),
+            shortcut.carbonModifierFlags,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+
+        if status == noErr, let hotKeyRef {
+            registeredHotKeys[id] = hotKeyRef
+            return true
+        }
+        return false
+    }
+
+    func unregisterAll() {
+        for hotKeyRef in registeredHotKeys.values {
+            UnregisterEventHotKey(hotKeyRef)
+        }
+        registeredHotKeys.removeAll()
+    }
+}
+
 @MainActor
 final class HotKeyManager {
     private enum HotKeyID: UInt32 {
@@ -9,31 +49,55 @@ final class HotKeyManager {
         case screenText = 3
     }
 
-    private static let hotKeySignature = OSType(0x434C5053)
-
     private var clipboardCallback: (() -> Void)?
     private var screenshotCallback: (() -> Void)?
     private var screenTextCallback: (() -> Void)?
+    private var snippetCallback: ((UUID) -> Void)?
+    /// Carbon hot key IDs at or above this value belong to text snippets.
+    private static let firstSnippetHotKeyID: UInt32 = 1000
+    private var snippetIDsByHotKeyID: [UInt32: UUID] = [:]
     private var eventHandler: EventHandlerRef?
-    private var registeredHotKeys: [UInt32: EventHotKeyRef] = [:]
+    private var isStarted = false
+    private let registrar: HotKeyRegistering
+    private let defaults: UserDefaults
 
-    var clipboardShortcut = KeyboardShortcut.savedClipboardShortcut {
+    /// Shortcuts the system refused at the last registration; shown in Preferences.
+    private(set) var registrationFailures: [KeyboardShortcut] = []
+    var onRegistrationFailuresChanged: (([KeyboardShortcut]) -> Void)?
+
+    var clipboardShortcut: KeyboardShortcut {
         didSet {
-            KeyboardShortcut.save(clipboardShortcut, keyPrefix: "clipboard")
+            KeyboardShortcut.save(clipboardShortcut, keyPrefix: "clipboard", defaults: defaults)
             registerHotKeys()
         }
     }
 
-    var screenshotShortcut = KeyboardShortcut.savedScreenshotShortcut {
+    var screenshotShortcut: KeyboardShortcut? {
         didSet {
-            KeyboardShortcut.save(screenshotShortcut, keyPrefix: "screenshot")
+            KeyboardShortcut.save(screenshotShortcut, keyPrefix: "screenshot", defaults: defaults)
             registerHotKeys()
         }
     }
 
-    var screenTextShortcut = KeyboardShortcut.savedScreenTextShortcut {
+    var screenTextShortcut: KeyboardShortcut? {
         didSet {
-            KeyboardShortcut.save(screenTextShortcut, keyPrefix: "screenText")
+            KeyboardShortcut.save(screenTextShortcut, keyPrefix: "screenText", defaults: defaults)
+            registerHotKeys()
+        }
+    }
+
+    init(registrar: HotKeyRegistering = CarbonHotKeyRegistrar(), defaults: UserDefaults = .standard) {
+        self.registrar = registrar
+        self.defaults = defaults
+        clipboardShortcut = KeyboardShortcut.load(keyPrefix: "clipboard", defaults: defaults) ?? .defaultClipboard
+        screenshotShortcut = KeyboardShortcut.load(keyPrefix: "screenshot", defaults: defaults)
+        screenTextShortcut = KeyboardShortcut.load(keyPrefix: "screenText", defaults: defaults)
+    }
+
+    /// Global shortcuts for text snippets. Snippets without a shortcut are skipped.
+    var snippetShortcuts: [SnippetHotKey] = [] {
+        didSet {
+            guard snippetShortcuts != oldValue else { return }
             registerHotKeys()
         }
     }
@@ -41,16 +105,20 @@ final class HotKeyManager {
     func start(
         clipboardCallback: @escaping () -> Void,
         screenshotCallback: @escaping () -> Void,
-        screenTextCallback: @escaping () -> Void = {}
+        screenTextCallback: @escaping () -> Void = {},
+        snippetCallback: @escaping (UUID) -> Void = { _ in }
     ) {
         self.clipboardCallback = clipboardCallback
         self.screenshotCallback = screenshotCallback
         self.screenTextCallback = screenTextCallback
+        self.snippetCallback = snippetCallback
         installEventHandlerIfNeeded()
+        isStarted = true
         registerHotKeys()
     }
 
     func stop() {
+        isStarted = false
         unregisterHotKeys()
 
         if let eventHandler {
@@ -60,6 +128,7 @@ final class HotKeyManager {
         clipboardCallback = nil
         screenshotCallback = nil
         screenTextCallback = nil
+        snippetCallback = nil
     }
 
     private func installEventHandlerIfNeeded() {
@@ -108,43 +177,54 @@ final class HotKeyManager {
     }
 
     private func registerHotKeys() {
-        guard eventHandler != nil else { return }
+        guard isStarted else { return }
 
         unregisterHotKeys()
-        register(clipboardShortcut, id: .clipboard)
+        // Command-V is never taken over, and each shortcut is registered once: earlier
+        // entries (built-ins, then snippets in order) win. The model refuses such
+        // shortcuts up front; this keeps stale saved values harmless.
+        var usedShortcuts: Set<KeyboardShortcut> = []
+        var failures: [KeyboardShortcut] = []
+        func register(_ shortcut: KeyboardShortcut, rawID: UInt32) -> Bool {
+            guard !shortcut.isReservedSystemShortcut, usedShortcuts.insert(shortcut).inserted else { return false }
+            guard registrar.register(shortcut, id: rawID) else {
+                failures.append(shortcut)
+                return false
+            }
+            return true
+        }
+
+        _ = register(clipboardShortcut, rawID: HotKeyID.clipboard.rawValue)
         if let screenshotShortcut {
-            register(screenshotShortcut, id: .screenshot)
+            _ = register(screenshotShortcut, rawID: HotKeyID.screenshot.rawValue)
         }
         if let screenTextShortcut {
-            register(screenTextShortcut, id: .screenText)
+            _ = register(screenTextShortcut, rawID: HotKeyID.screenText.rawValue)
         }
-    }
+        for (offset, snippet) in snippetShortcuts.enumerated() {
+            let hotKeyID = Self.firstSnippetHotKeyID + UInt32(offset)
+            if register(snippet.shortcut, rawID: hotKeyID) {
+                snippetIDsByHotKeyID[hotKeyID] = snippet.id
+            }
+        }
 
-    private func register(_ shortcut: KeyboardShortcut, id: HotKeyID) {
-        var hotKeyRef: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: id.rawValue)
-        let status = RegisterEventHotKey(
-            UInt32(shortcut.keyCode),
-            shortcut.carbonModifierFlags,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
-        )
-
-        if status == noErr, let hotKeyRef {
-            registeredHotKeys[id.rawValue] = hotKeyRef
+        if failures != registrationFailures {
+            registrationFailures = failures
+            onRegistrationFailuresChanged?(failures)
         }
     }
 
     private func unregisterHotKeys() {
-        for hotKeyRef in registeredHotKeys.values {
-            UnregisterEventHotKey(hotKeyRef)
-        }
-        registeredHotKeys.removeAll()
+        registrar.unregisterAll()
+        snippetIDsByHotKeyID.removeAll()
     }
 
     private func handleRegisteredHotKey(id: UInt32) {
+        if let snippetID = snippetIDsByHotKeyID[id] {
+            snippetCallback?(snippetID)
+            return
+        }
+
         if id == HotKeyID.clipboard.rawValue {
             clipboardCallback?()
             return
@@ -172,6 +252,13 @@ struct KeyboardShortcut: Equatable, Hashable {
     static let commandShiftV = KeyboardShortcut(keyCode: 9, modifiers: [.command, .shift])
     static let optionCommandV = KeyboardShortcut(keyCode: 9, modifiers: [.option, .command])
     static let controlCommandS = KeyboardShortcut(keyCode: 1, modifiers: [.control, .command])
+
+    /// Shortcuts the app must never take over (Command-V is the system Paste).
+    var isReservedSystemShortcut: Bool {
+        self == .commandV
+    }
+
+    static let commandV = KeyboardShortcut(keyCode: 9, modifiers: [.command])
 
     var modifierRawValue: UInt {
         modifiers.rawValue
@@ -334,8 +421,7 @@ struct KeyboardShortcut: Equatable, Hashable {
         load(keyPrefix: "screenText")
     }
 
-    static func load(keyPrefix: String) -> KeyboardShortcut? {
-        let defaults = UserDefaults.standard
+    static func load(keyPrefix: String, defaults: UserDefaults = .standard) -> KeyboardShortcut? {
         guard
             let keyCode = defaults.object(forKey: "\(keyPrefix)ShortcutKeyCode") as? NSNumber,
             let modifiers = defaults.object(forKey: "\(keyPrefix)ShortcutModifiers") as? NSNumber
@@ -349,8 +435,7 @@ struct KeyboardShortcut: Equatable, Hashable {
         )
     }
 
-    static func save(_ shortcut: KeyboardShortcut?, keyPrefix: String) {
-        let defaults = UserDefaults.standard
+    static func save(_ shortcut: KeyboardShortcut?, keyPrefix: String, defaults: UserDefaults = .standard) {
         guard let shortcut else {
             defaults.removeObject(forKey: "\(keyPrefix)ShortcutKeyCode")
             defaults.removeObject(forKey: "\(keyPrefix)ShortcutModifiers")

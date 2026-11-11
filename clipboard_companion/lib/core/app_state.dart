@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'models.dart';
 import 'paired_device_store.dart';
 import 'peer_browser.dart';
+import 'replay_guard.dart';
 import 'pairing_coordinator.dart';
 import 'clip_server.dart';
 import 'clip_sender.dart';
@@ -21,6 +22,7 @@ import 'file_transfer_ui.dart';
 import 'incoming_share.dart';
 import 'android_downloads.dart';
 import 'subnet_sweeper.dart';
+import 'liveness_ping.dart';
 import 'received_file_notifications.dart';
 
 class AsyncOperationQueue {
@@ -33,106 +35,236 @@ class AsyncOperationQueue {
   }
 }
 
+/// Lets a flow that backgrounded the app (a system file picker) wait until
+/// the resume that follows has restarted networking and re-probed devices:
+/// pausing clears liveness, so nothing looks reachable until then.
+class ResumeGate {
+  Completer<void>? _pending;
+
+  void paused() => _pending ??= Completer<void>();
+
+  Future<void> resumed(Future<void> Function() probe) async {
+    final pending = _pending;
+    try {
+      await probe();
+    } finally {
+      if (identical(_pending, pending)) _pending = null;
+      if (pending != null && !pending.isCompleted) pending.complete();
+    }
+  }
+
+  /// Completes once the resume after the last pause has finished (at once
+  /// when nothing is paused), or after [timeout].
+  Future<void> settled({Duration timeout = const Duration(seconds: 5)}) {
+    final pending = _pending;
+    if (pending == null) return Future<void>.value();
+    return pending.future.timeout(timeout, onTimeout: () {});
+  }
+}
+
 bool isDeviceConnectionActive({required bool enabled, required bool online}) =>
     enabled && online;
-
-Peer? matchingReconnectPeer({
-  required String deviceId,
-  required List<Peer> mdnsPeers,
-  required List<Peer> sweptPeers,
-}) {
-  final canonical = canonicalDeviceId(deviceId);
-  for (final peer in [...mdnsPeers, ...sweptPeers]) {
-    if (canonicalDeviceId(peer.id) == canonical) return peer;
-  }
-  return null;
-}
 
 Peer? resolveVerifiedPeer({
   required PairedDevice device,
   required bool online,
   required List<Peer> mdnsPeers,
+  Set<String> outdatedDeviceIds = const {},
 }) {
   if (!isDeviceConnectionActive(enabled: device.connected, online: online)) {
     return null;
   }
-  final canonical = canonicalDeviceId(device.id);
-  for (final peer in mdnsPeers) {
-    if (canonicalDeviceId(peer.id) == canonical) return peer;
-  }
+  // Never the mDNS-claimed address: only a pong moves the stored host.
   final host = device.host;
   if (host == null || host.isEmpty) return null;
+  return storedHostPeer(device, host, outdatedDeviceIds);
+}
+
+/// A peer at the device's stored host (the last host that answered a valid pong),
+/// carrying an older protocol version when it is in [outdatedDeviceIds].
+Peer storedHostPeer(
+  PairedDevice device,
+  String host,
+  Set<String> outdatedDeviceIds,
+) {
+  final canonical = canonicalDeviceId(device.id);
   return Peer(
     id: canonical,
     name: device.name,
     host: host,
     port: SubnetSweeper.fixedPort,
+    protocolVersion: outdatedDeviceIds.contains(canonical)
+        ? 1
+        : wireProtocolVersion,
   );
+}
+
+/// True when a paired device advertises an older wire protocol (via mDNS, or as
+/// recorded in [outdatedDeviceIds]): it is listed, but nothing is sent to it.
+///
+/// An unauthenticated mDNS `v < 2` counts only for devices that have not proved v2
+/// with a valid pong ([verifiedOnlineIds]), so a LAN impostor cannot block a live
+/// device.
+bool deviceNeedsUpdate({
+  required String deviceId,
+  required List<Peer> mdnsPeers,
+  required Set<String> outdatedDeviceIds,
+  Set<String> verifiedOnlineIds = const {},
+}) {
+  final canonical = canonicalDeviceId(deviceId);
+  return outdatedDeviceIds.contains(canonical) ||
+      (!verifiedOnlineIds.contains(canonical) &&
+          mdnsPeers.any(
+            (peer) =>
+                canonicalDeviceId(peer.id) == canonical && peer.needsUpdate,
+          ));
 }
 
 List<Peer> composeSendTargets(
   List<Peer> mdnsPeers,
-  List<PairedDevice> pairedDevices,
-) {
+  List<PairedDevice> pairedDevices, {
+  Set<String> outdatedDeviceIds = const {},
+  Set<String> verifiedOnlineIds = const {},
+}) {
   final byId = <String, Peer>{};
+  final pairedIds = {
+    for (final device in pairedDevices) canonicalDeviceId(device.id),
+  };
+  // Unpaired mDNS peers only count as visible; the sender has no key for them.
+  for (final peer in mdnsPeers) {
+    if (!pairedIds.contains(canonicalDeviceId(peer.id))) byId[peer.id] = peer;
+  }
+  // Paired devices go to their stored (ping-verified) host, never an mDNS-claimed
+  // one. An older mDNS `v` keeps them from being sent to, unless a pong proved v2.
+  final outdated = {
+    ...outdatedDeviceIds,
+    for (final peer in mdnsPeers)
+      if (peer.needsUpdate &&
+          !verifiedOnlineIds.contains(canonicalDeviceId(peer.id)))
+        canonicalDeviceId(peer.id),
+  };
   for (final device in pairedDevices.where((device) => device.connected)) {
     final host = device.host;
     if (host != null && host.isNotEmpty) {
-      byId[device.id] = Peer(
-        id: device.id,
-        name: device.name,
-        host: host,
-        port: 51888,
-      );
+      byId[device.id] = storedHostPeer(device, host, outdated);
     }
-  }
-  final pairedById = {for (final device in pairedDevices) device.id: device};
-  for (final peer in mdnsPeers) {
-    final paired = pairedById[peer.id];
-    if (paired == null || paired.connected) byId[peer.id] = peer;
   }
   return byId.values.toList();
 }
 
-/// Resolves whether each paired device is reachable right now. mDNS and the
-/// stored address provide candidates, but [probe] must confirm that a candidate
-/// answers with the expected device id. Independent of [PairedDevice.connected],
-/// which is a local pause switch rather than a statement about reachability.
-Future<Map<String, bool>> computeDeviceLiveness({
+/// Outcome of pinging paired devices: who answered a valid pong, and where.
+class LivenessReport {
+  /// Canonical ids of devices that answered a valid pong, keyed to the host that
+  /// answered.
+  final Map<String, String> verifiedHosts = {};
+
+  /// Canonical ids of devices that answered 426 and no valid pong.
+  final Set<String> upgradeRequired = {};
+
+  /// Canonical ids of devices that answered `400 stale` (clock out of sync) and no
+  /// valid pong.
+  final Set<String> clockSkew = {};
+
+  Set<String> get onlineIds => verifiedHosts.keys.toSet();
+
+  void merge(LivenessReport other) {
+    other.verifiedHosts.forEach(
+      (id, host) => verifiedHosts.putIfAbsent(id, () => host),
+    );
+    upgradeRequired
+      ..addAll(other.upgradeRequired)
+      ..removeAll(verifiedHosts.keys);
+    clockSkew
+      ..addAll(other.clockSkew)
+      ..removeAll(verifiedHosts.keys);
+  }
+}
+
+/// Pings one paired device at one host.
+typedef DevicePing =
+    Future<PingOutcome> Function(PairedDevice device, String host);
+
+/// Hosts to ping for a device: its current mDNS address(es), then the stored one.
+List<String> candidateHosts(PairedDevice device, List<Peer> mdnsPeers) {
+  final id = canonicalDeviceId(device.id);
+  final hosts = mdnsPeers
+      .where((peer) => canonicalDeviceId(peer.id) == id)
+      .map((peer) => peer.host)
+      .toList();
+  final host = device.host;
+  if (host != null && host.isNotEmpty && !hosts.contains(host)) {
+    hosts.add(host);
+  }
+  return hosts;
+}
+
+/// Pings [hosts] in order and stops at the first valid pong. A ping that throws
+/// (for example a secure-storage read of the pair key) is no evidence for this
+/// device and never fails the other devices' checks.
+Future<LivenessReport> verifyDevice(
+  PairedDevice device,
+  List<String> hosts,
+  DevicePing ping,
+) async {
+  final id = canonicalDeviceId(device.id);
+  final report = LivenessReport();
+  for (final host in hosts) {
+    PingOutcome outcome;
+    try {
+      outcome = await ping(device, host);
+    } catch (_) {
+      outcome = PingOutcome.unverified;
+    }
+    switch (outcome) {
+      case PingOutcome.alive:
+        report.verifiedHosts[id] = host;
+        report.upgradeRequired.remove(id);
+        report.clockSkew.remove(id);
+        return report;
+      case PingOutcome.upgradeRequired:
+        report.upgradeRequired.add(id);
+      case PingOutcome.clockSkew:
+        report.clockSkew.add(id);
+      case PingOutcome.unverified:
+        break;
+    }
+  }
+  return report;
+}
+
+/// Resolves which paired devices are reachable right now, and where. mDNS and the
+/// stored address only nominate hosts; a device is online only at a host that
+/// answered a valid pong (see [LivenessPing]). Independent of
+/// [PairedDevice.connected], which is a local pause switch rather than a statement
+/// about reachability.
+Future<LivenessReport> computeDeviceLiveness({
   required List<PairedDevice> devices,
   required List<Peer> mdnsPeers,
-  required Future<Peer?> Function(String host) probe,
+  required DevicePing ping,
 }) async {
-  final online = <String, bool>{};
-
-  await Future.wait(
-    devices.map((device) async {
-      final id = canonicalDeviceId(device.id);
-      final hosts = mdnsPeers
-          .where((peer) => canonicalDeviceId(peer.id) == id)
-          .map((peer) => peer.host)
-          .toList();
-      final host = device.host;
-      if (host != null && host.isNotEmpty && !hosts.contains(host)) {
-        hosts.add(host);
-      }
-      if (hosts.isEmpty) {
-        online[id] = false;
-        return;
-      }
-      for (final candidate in hosts) {
-        final peer = await probe(candidate);
-        if (peer != null && canonicalDeviceId(peer.id) == id) {
-          online[id] = true;
-          return;
-        }
-      }
-      online[id] = false;
-    }),
+  final report = LivenessReport();
+  final partials = await Future.wait(
+    devices.map(
+      (device) => verifyDevice(device, candidateHosts(device, mdnsPeers), ping),
+    ),
   );
-
-  return online;
+  for (final partial in partials) {
+    report.merge(partial);
+  }
+  return report;
 }
+
+/// Stored-host changes a report calls for: devices whose pong came from a host
+/// other than the one stored.
+Map<String, String> hostUpdates(
+  List<PairedDevice> devices,
+  LivenessReport report,
+) => {
+  for (final device in devices)
+    if (report.verifiedHosts[canonicalDeviceId(device.id)] case final host?
+        when host != device.host)
+      canonicalDeviceId(device.id): host,
+};
 
 List<Peer> composeJoinCandidates(List<Peer> mdnsPeers, List<Peer> sweptPeers) {
   final seen = <String>{};
@@ -206,14 +338,29 @@ class AppState extends ChangeNotifier {
   bool _discoveryRunning = false;
 
   StreamSubscription<FileTransferReceiveEvent>? _transferSub;
+  StreamSubscription<List<Peer>>? _peersSub;
   Timer? _transferGcTimer;
   Timer? _livenessTimer;
   http.Client? _livenessClient;
   final AsyncOperationQueue _networkTransitions = AsyncOperationQueue();
+  final ResumeGate _resumeGate = ResumeGate();
+  Future<void>? _startupLivenessProbe;
 
   /// Live reachability per paired device id. In-memory only: it is rebuilt from
   /// scratch on every refresh, so unpaired devices drop out on their own.
   final Map<String, bool> deviceOnline = {};
+
+  /// Paired devices that answered a ping with 426 (or, found only by the reconnect
+  /// sweep, advertised an older `v` on `/v1/id`). A valid pong clears the flag.
+  final Set<String> outdatedDeviceIds = {};
+
+  /// Paired devices whose last ping was refused as stale: their clock disagrees with
+  /// ours. Shown as "Clock out of sync"; never makes a device online or moves its host.
+  final Set<String> clockSkewDeviceIds = {};
+
+  /// One guard for every envelope endpoint, kept across network restarts, so a nonce
+  /// is single-use for the whole process.
+  final ReplayGuard _replayGuard = ReplayGuard();
   final Map<String, TransferCancelToken> _sendTokens = {};
   final Set<String> _consumedShareBatchIds = {};
   IncomingShareBatch? pendingShareBatch;
@@ -233,6 +380,32 @@ class AppState extends ChangeNotifier {
 
   String? get hostCode =>
       _coreNetworkingStarted ? pairingCoordinator.hostCode : null;
+
+  /// The number to compare while this device is the pairing target.
+  PairingComparison? get hostComparison =>
+      _coreNetworkingStarted ? pairingCoordinator.hostComparison : null;
+
+  /// The number to compare while this device is the pairing initiator.
+  PairingComparison? get joinComparison =>
+      _coreNetworkingStarted ? pairingCoordinator.joinComparison : null;
+
+  /// Devices found by the last "Scan network" (subnet sweep).
+  List<Peer> sweptPeers = const [];
+  bool scanInProgress = false;
+
+  /// Devices the user can pick to pair with: discovered, not paired yet, and on v2.
+  List<Peer> get pairingCandidates {
+    if (!_coreNetworkingStarted) return const [];
+    final paired = {
+      for (final device in pairedStore.devices) canonicalDeviceId(device.id),
+    };
+    return composeJoinCandidates(peerBrowser.peers, sweptPeers)
+        .where(
+          (peer) =>
+              !peer.needsUpdate && !paired.contains(canonicalDeviceId(peer.id)),
+        )
+        .toList();
+  }
 
   bool isReady = false;
   bool isStartingSync = false;
@@ -259,6 +432,18 @@ class AppState extends ChangeNotifier {
 
     // 2. Setup stores
     pairedStore = PairedDeviceStore(prefs);
+    await pairedStore.quarantineIfCorrupt();
+    if (pairedStore.quarantinedKey != null) {
+      // One-time notice: the unreadable list was moved aside, so this shows once.
+      lastError =
+          'Saved paired devices could not be read and were reset. Pair your devices again.';
+    }
+    try {
+      await pairedStore.migrateLegacyKeys();
+    } catch (e) {
+      // Keys stay in prefs and getKey retries the move on next use.
+      debugPrint('Pair key migration deferred: ${e.runtimeType}');
+    }
     _loadClips();
     if (Platform.isAndroid || Platform.isIOS) {
       _shareChannel.setMethodCallHandler(_handleShareMethod);
@@ -412,8 +597,10 @@ class AppState extends ChangeNotifier {
       final destinationDir = await _resolveDestinationDir();
       final nextFileReceiver = FileReceiver(
         pairedStore: pairedStore,
+        localDeviceId: identity.id,
         transfersDirectory: transfersDir,
         destinationProvider: () => destinationDir,
+        replayGuard: _replayGuard,
       );
 
       final nextClipServer = ClipServer(
@@ -427,6 +614,7 @@ class AppState extends ChangeNotifier {
           onClipReceived?.call(payload);
         },
         fileReceiver: nextFileReceiver,
+        replayGuard: _replayGuard,
       );
 
       try {
@@ -444,6 +632,10 @@ class AppState extends ChangeNotifier {
       fileReceiver = nextFileReceiver;
       clipServer = nextClipServer;
       _transferSub = fileReceiver.events.listen(handleReceiveEvent);
+      // The pairing card shows the hosted code, the number to compare and the
+      // devices to pair with; refresh it when any of them changes.
+      pairingCoordinator.onHostingChanged = notifyListeners;
+      _peersSub = peerBrowser.peersStream.listen((_) => notifyListeners());
       _transferGcTimer = Timer.periodic(
         const Duration(seconds: 30),
         (_) => fileReceiver.garbageCollect(),
@@ -476,7 +668,22 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> joinWithCode(String code) async {
+  /// Sweeps the local subnet for devices mDNS missed, so the user can pick one.
+  Future<void> scanForDevices() async {
+    if (scanInProgress) return;
+    scanInProgress = true;
+    notifyListeners();
+    try {
+      sweptPeers = await SubnetSweeper.sweep();
+    } finally {
+      scanInProgress = false;
+      notifyListeners();
+    }
+  }
+
+  /// Starts pairing with the one device the user selected. On success both
+  /// screens show a number; the user then calls [confirmJoin] or [cancelJoin].
+  Future<void> joinWithCode(String code, Peer peer) async {
     final normalizedCode = code.trim();
     if (!RegExp(r'^\d{6}$').hasMatch(normalizedCode)) {
       lastError = 'Enter a 6-digit pairing code.';
@@ -487,46 +694,57 @@ class AppState extends ChangeNotifier {
     joinInProgress = true;
     lastError = null;
     notifyListeners();
-
     try {
-      final mdnsCandidates = peerBrowser.peers;
-      if (await _tryPairing(mdnsCandidates, normalizedCode)) {
-        return;
-      }
-
-      final sweptCandidates = composeJoinCandidates(
-        mdnsCandidates,
-        await SubnetSweeper.sweep(),
-      );
-      if (await _tryPairing(sweptCandidates, normalizedCode)) {
-        return;
-      }
-
-      lastError =
-          'No device accepted that code. Make sure the other device shows a code on the same Wi-Fi.';
+      await pairingCoordinator.startPairing(peer, normalizedCode);
+    } catch (e) {
+      lastError = joinErrorMessage(e);
     } finally {
       joinInProgress = false;
       notifyListeners();
     }
   }
 
-  Future<bool> _tryPairing(List<Peer> candidates, String code) async {
-    for (final peer in candidates) {
-      try {
-        await pairingCoordinator.startPairing(peer, code);
-        lastError = null;
-        notifyListeners();
-        unawaited(refreshDeviceLiveness());
-        return true;
-      } catch (_) {
-        // Wrong code, not in hosting mode, or unreachable: try the next candidate.
-      }
+  /// The user confirmed the numbers match on this device.
+  Future<void> confirmJoin() async {
+    joinInProgress = true;
+    lastError = null;
+    notifyListeners();
+    try {
+      await pairingCoordinator.confirmPairing();
+      unawaited(refreshDeviceLiveness());
+    } on PairingCancelledException {
+      // The user cancelled here; nothing to report.
+    } catch (e) {
+      lastError = joinErrorMessage(e);
+    } finally {
+      joinInProgress = false;
+      notifyListeners();
     }
-    return false;
   }
 
-  Future<void> pauseSyncServices() =>
-      _enqueueNetworkTransition(_pauseSyncServices);
+  void cancelJoin() => unawaited(pairingCoordinator.cancelPairing());
+
+  void confirmHostedPairing() => pairingCoordinator.confirmHostedPairing();
+
+  void cancelHostedPairing() => pairingCoordinator.cancelHostedPairing();
+
+  static const alreadyPairedMessage =
+      'Remove the existing pairing on the other device first';
+
+  static String joinErrorMessage(Object error) => switch (error) {
+    PairingAlreadyPairedException() => alreadyPairedMessage,
+    PairingTimedOutException() =>
+      'The other device did not confirm in time. Show a new code and try again.',
+    PairingNotAcceptedException() =>
+      'The other device did not accept. Check the code, or show a new one, and try again.',
+    _ =>
+      'Could not reach that device. Make sure it is showing a code on the same Wi-Fi.',
+  };
+
+  Future<void> pauseSyncServices() {
+    _resumeGate.paused();
+    return _enqueueNetworkTransition(_pauseSyncServices);
+  }
 
   Future<void> _pauseSyncServices() async {
     if (!_coreNetworkingStarted || !_discoveryRunning) return;
@@ -561,6 +779,9 @@ class AppState extends ChangeNotifier {
         );
   }
 
+  /// Pings the device at its mDNS and stored addresses; failing that, sweeps the
+  /// subnet for hosts claiming its id on `/v1/id` and pings those. Only a valid pong
+  /// makes it online or moves its stored host.
   Future<bool> reconnectDevice(String id, {bool reportError = true}) async {
     if (!_coreNetworkingStarted) return false;
     final canonical = canonicalDeviceId(id);
@@ -569,68 +790,178 @@ class AppState extends ChangeNotifier {
         .firstOrNull;
     if (device == null || !device.connected) return false;
 
-    final candidates = <Peer>[
-      ...peerBrowser.peers.where(
-        (peer) => canonicalDeviceId(peer.id) == canonical,
-      ),
-      if (device.host case final host? when host.isNotEmpty)
-        Peer(
-          id: canonical,
-          name: device.name,
-          host: host,
-          port: SubnetSweeper.fixedPort,
-        ),
-    ];
-
-    Peer? matched;
-    for (final candidate in candidates) {
-      final probed = await SubnetSweeper.probeHost(candidate.host);
-      if (probed != null && canonicalDeviceId(probed.id) == canonical) {
-        matched = probed;
-        break;
+    final client = http.Client();
+    try {
+      final ping = _devicePing(client);
+      final tried = candidateHosts(device, peerBrowser.peers);
+      final report = await verifyDevice(device, tried, ping);
+      if (!report.verifiedHosts.containsKey(canonical)) {
+        final claimed = (await SubnetSweeper.sweep(
+          client: client,
+        )).where((peer) => canonicalDeviceId(peer.id) == canonical).toList();
+        report.merge(
+          await verifyDevice(
+            device,
+            claimed
+                .map((peer) => peer.host)
+                .where((host) => !tried.contains(host))
+                .toList(),
+            ping,
+          ),
+        );
+        // A v1 peer cannot answer a ping; its advertised version is the only signal.
+        if (!report.verifiedHosts.containsKey(canonical) &&
+            claimed.any((peer) => peer.needsUpdate)) {
+          report.upgradeRequired.add(canonical);
+        }
       }
-    }
-    matched ??= matchingReconnectPeer(
-      deviceId: canonical,
-      mdnsPeers: const [],
-      sweptPeers: await SubnetSweeper.sweep(),
-    );
 
-    if (matched == null) {
-      deviceOnline[canonical] = false;
-      if (reportError) lastError = 'That device is not reachable right now.';
+      final stored = await _applyLiveness(report, [device], rebuildAll: false);
+      if (!report.verifiedHosts.containsKey(canonical)) {
+        if (reportError) lastError = unreachableMessage(canonical);
+        notifyListeners();
+        return false;
+      }
+      // Keep a failed stored-host update visible.
+      if (stored) lastError = null;
       notifyListeners();
-      return false;
+      return true;
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Pings one paired device at one host over `POST /v1/ping` on [client].
+  DevicePing _devicePing(http.Client client) => (device, host) async {
+    // A secure-storage read failure is no evidence; other devices proceed.
+    final key = await pairedStore
+        .getKey(device.id)
+        .catchError((Object _) => null);
+    if (key == null) return PingOutcome.unverified;
+    return LivenessPing.ping(
+      deviceId: device.id,
+      localDeviceId: identity.id,
+      pairKey: key,
+      post: (body) => SubnetSweeper.postPing(host, body, client: client),
+    );
+  };
+
+  /// The only place a paired device becomes online, has its stored host changed, or
+  /// has its outdated flag changed, and only from ping results: `/v1/id` and mDNS
+  /// nominate hosts but never prove identity. With [rebuildAll], [deviceOnline] is
+  /// rebuilt from [devices] (so unpaired devices drop out); otherwise only [devices]
+  /// are updated. Returns false when a stored-host update failed (its error is left
+  /// in [lastError]); storage errors never escape, since the liveness timer calls this.
+  Future<bool> _applyLiveness(
+    LivenessReport report,
+    List<PairedDevice> devices, {
+    required bool rebuildAll,
+  }) async {
+    var changed = false;
+    var stored = true;
+    for (final MapEntry(key: id, value: host) in hostUpdates(
+      devices,
+      report,
+    ).entries) {
+      try {
+        await pairedStore.updateHost(id, host);
+      } catch (e) {
+        stored = false;
+        lastError = 'Could not save the device address: $e';
+      }
+      changed = true;
     }
 
-    await pairedStore.updateHost(canonical, matched.host);
-    deviceOnline[canonical] = true;
-    lastError = null;
-    notifyListeners();
-    return true;
+    final outdated = {...outdatedDeviceIds}
+      ..removeAll(report.onlineIds)
+      ..addAll(report.upgradeRequired);
+    if (!setEquals(outdated, outdatedDeviceIds)) {
+      outdatedDeviceIds
+        ..clear()
+        ..addAll(outdated);
+      changed = true;
+    }
+
+    final skewed = {
+      if (!rebuildAll)
+        ...clockSkewDeviceIds.difference({
+          for (final device in devices) canonicalDeviceId(device.id),
+        }),
+      ...report.clockSkew,
+    };
+    if (!setEquals(skewed, clockSkewDeviceIds)) {
+      clockSkewDeviceIds
+        ..clear()
+        ..addAll(skewed);
+      changed = true;
+    }
+
+    final next = <String, bool>{
+      if (!rebuildAll) ...deviceOnline,
+      for (final device in devices)
+        canonicalDeviceId(device.id): report.onlineIds.contains(
+          canonicalDeviceId(device.id),
+        ),
+    };
+    if (!mapEquals(deviceOnline, next)) {
+      deviceOnline
+        ..clear()
+        ..addAll(next);
+      changed = true;
+    }
+    if (changed) notifyListeners();
+    return stored;
+  }
+
+  /// Canonical ids of pong-verified (online) devices.
+  Set<String> get _verifiedOnlineIds => {
+    for (final entry in deviceOnline.entries)
+      if (entry.value) entry.key,
+  };
+
+  /// Whether [id] advertises an older wire protocol (see [deviceNeedsUpdate]).
+  bool isDeviceOutdated(String id) => deviceNeedsUpdate(
+    deviceId: id,
+    mdnsPeers: _coreNetworkingStarted ? peerBrowser.peers : const [],
+    outdatedDeviceIds: outdatedDeviceIds,
+    verifiedOnlineIds: _verifiedOnlineIds,
+  );
+
+  /// Whether [id]'s last ping was refused as stale (clocks out of sync).
+  bool isDeviceClockSkewed(String id) =>
+      clockSkewDeviceIds.contains(canonicalDeviceId(id));
+
+  /// Why a device cannot be sent to right now, for reconnect and file-send errors.
+  String unreachableMessage(String id) {
+    if (isDeviceOutdated(id)) return updateOtherDeviceMessage;
+    if (isDeviceClockSkewed(id)) {
+      final canonical = canonicalDeviceId(id);
+      final device = pairedStore.devices
+          .where((candidate) => candidate.id == canonical)
+          .firstOrNull;
+      return clockOutOfSyncMessage([device?.name ?? canonical]);
+    }
+    return 'That device is not reachable right now.';
   }
 
   /// Whether [id] answered on the network as of the last liveness refresh.
   bool isDeviceOnline(String id) =>
       deviceOnline[canonicalDeviceId(id)] ?? false;
 
-  /// Rebuilds [deviceOnline]. Device probes run concurrently on a shared client
-  /// and try the current mDNS address before the stored fallback.
+  /// Rebuilds [deviceOnline] from authenticated pings. Devices are pinged
+  /// concurrently on a shared client, trying the current mDNS address before the
+  /// stored one.
   Future<void> refreshDeviceLiveness() async {
     if (!_coreNetworkingStarted) return;
 
     final client = _livenessClient ??= http.Client();
-    final next = await computeDeviceLiveness(
-      devices: pairedStore.devices,
+    final devices = pairedStore.devices;
+    final report = await computeDeviceLiveness(
+      devices: devices,
       mdnsPeers: peerBrowser.peers,
-      probe: (host) => SubnetSweeper.probeHost(host, client: client),
+      ping: _devicePing(client),
     );
-
-    if (mapEquals(deviceOnline, next)) return;
-    deviceOnline
-      ..clear()
-      ..addAll(next);
-    notifyListeners();
+    await _applyLiveness(report, devices, rebuildAll: true);
   }
 
   void _startLivenessTimer() {
@@ -639,7 +970,9 @@ class AppState extends ChangeNotifier {
       _livenessInterval,
       (_) => unawaited(refreshDeviceLiveness()),
     );
-    unawaited(refreshDeviceLiveness());
+    final probe = refreshDeviceLiveness();
+    _startupLivenessProbe = probe;
+    unawaited(probe);
   }
 
   void _stopLivenessTimer() {
@@ -652,22 +985,40 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> resumeSyncServices() => startSyncServices();
+  Future<void> resumeSyncServices() => _resumeGate.resumed(() async {
+    await startSyncServices();
+    await _startupLivenessProbe;
+  });
 
-  Future<ClipSendSummary> sendClip(ClipPayload clip) async {
-    // Add to local UI
+  /// Completes once a pending resume has restarted sync and re-probed device
+  /// liveness (immediately if the app was not paused).
+  Future<void> whenResumeSettled() => _resumeGate.settled();
+
+  /// Adds a clip this device sends to the local history, unless it is already
+  /// there (re-sending an existing clip).
+  void recordOutgoingClip(ClipPayload clip) {
+    if (clips.any((existing) => existing.id == clip.id)) return;
     clips.insert(0, clip);
     _saveClips();
     notifyListeners();
+  }
+
+  Future<ClipSendSummary> sendClip(ClipPayload clip) async {
+    recordOutgoingClip(clip);
 
     // Broadcast
-    final targets = composeSendTargets(peerBrowser.peers, pairedStore.devices);
+    final targets = composeSendTargets(
+      peerBrowser.peers,
+      pairedStore.devices,
+      outdatedDeviceIds: outdatedDeviceIds,
+      verifiedOnlineIds: _verifiedOnlineIds,
+    );
     return clipSender.broadcast(clip, targets);
   }
 
   // MARK: - File transfer
 
-  /// Resolves the reachable [Peer] for a paired device (mDNS first, then stored host).
+  /// Resolves the reachable [Peer] for a paired device at its ping-verified stored host.
   Peer? resolvePeer(String deviceId) {
     final canonical = canonicalDeviceId(deviceId);
     final device = pairedStore.devices
@@ -678,6 +1029,7 @@ class AppState extends ChangeNotifier {
       device: device,
       online: isDeviceOnline(canonical),
       mdnsPeers: peerBrowser.peers,
+      outdatedDeviceIds: outdatedDeviceIds,
     );
   }
 
@@ -686,9 +1038,15 @@ class AppState extends ChangeNotifier {
 
   Future<bool> sendFileTo(File file, String deviceId) async {
     final connected = await reconnectDevice(deviceId, reportError: false);
+    // Checked after the reconnect probe, which records the advertised version.
+    if (isDeviceOutdated(deviceId)) {
+      lastError = updateOtherDeviceMessage;
+      notifyListeners();
+      return false;
+    }
     final peer = connected ? resolvePeer(deviceId) : null;
     if (peer == null) {
-      lastError = 'That device is not reachable right now.';
+      lastError = unreachableMessage(deviceId);
       notifyListeners();
       return false;
     }
@@ -709,14 +1067,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await fileSender.sendFile(
+      final outcome = await fileSender.sendFile(
         file: file,
         peer: peer,
         mimeType: _mimeType(file.path),
         onProgress: (p) => _updateSendProgress(uiId, p),
         isCancelled: () => token.cancelled,
       );
-      _completeSend(uiId, TransferStatus.completed);
+      _completeSend(
+        uiId,
+        outcome == FileSendOutcome.delivered
+            ? TransferStatus.completed
+            : TransferStatus.unconfirmed,
+      );
       return true;
     } on FileSendCancelledException {
       _completeSend(uiId, TransferStatus.cancelled);
@@ -969,6 +1332,7 @@ class AppState extends ChangeNotifier {
     _livenessTimer?.cancel();
     _livenessClient?.close();
     unawaited(_transferSub?.cancel());
+    unawaited(_peersSub?.cancel());
     if (_coreNetworkingStarted) {
       unawaited(peerBrowser.stop());
       unawaited(peerAdvertiser.stop());

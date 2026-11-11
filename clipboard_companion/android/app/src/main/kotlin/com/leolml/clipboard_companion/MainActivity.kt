@@ -3,23 +3,32 @@ package com.leolml.clipboard_companion
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.app.DownloadManager
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.MediaStore
 import android.content.ContentValues
 import android.os.Environment
 import android.os.Build
+import android.os.StatFs
+import android.os.ParcelFileDescriptor
+import android.system.Os
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.plugin.common.MethodChannel
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.Inet4Address
 import java.util.UUID
 import android.util.Base64
 import android.util.Xml
@@ -31,10 +40,14 @@ class MainActivity : FlutterActivity() {
     private val imagesChannelName = "clipboard_companion/images"
     private val shareChannelName = "clipboard_companion/incoming_share"
     private val downloadsChannelName = "clipboard_companion/android_downloads"
+    private val storageChannelName = "clipboard_companion/storage"
+    private val networkChannelName = "clipboard_companion/network"
     private val nearbyWifiRequestCode = 4107
     private var pendingPermissionResult: MethodChannel.Result? = null
     private var shareChannel: MethodChannel? = null
     @Volatile private var pendingShare: Map<String, Any>? = null
+    /** Total bytes one incoming share batch may stage into the cache before a device is picked. */
+    private val maxStagedShareBytes = 4L * 1024L * 1024L * 1024L
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         removeOversizedLegacyClipHistory()
@@ -109,6 +122,28 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, storageChannelName).setMethodCallHandler { call, result ->
+            when (call.method) {
+                // Free bytes on the volume holding `path` (incoming file-transfer quota).
+                "freeSpace" -> try {
+                    result.success(StatFs(call.argument<String>("path") ?: filesDir.path).availableBytes)
+                } catch (e: Exception) {
+                    result.error("freeSpace", e.message, null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, networkChannelName).setMethodCallHandler { call, result ->
+            when (call.method) {
+                // IPv4 addresses with prefix lengths, flagging the default network (subnet sweep).
+                "ipv4Interfaces" -> try {
+                    result.success(ipv4Interfaces())
+                } catch (e: Exception) {
+                    result.error("ipv4Interfaces", e.message, null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, downloadsChannelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "publishReceivedFile" -> publishReceivedFile(
@@ -137,6 +172,32 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun ipv4Interfaces(): List<Map<String, Any>> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return emptyList()
+        val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val active = connectivity.activeNetwork
+        val interfaces = mutableListOf<Map<String, Any>>()
+        @Suppress("DEPRECATION")
+        for (network in connectivity.allNetworks) {
+            val link = connectivity.getLinkProperties(network) ?: continue
+            val name = link.interfaceName ?: continue
+            val isDefaultRoute = network == active && link.routes.any { it.isDefaultRoute }
+            for (linkAddress in link.linkAddresses) {
+                val address = linkAddress.address as? Inet4Address ?: continue
+                val host = address.hostAddress ?: continue
+                interfaces.add(
+                    mapOf(
+                        "name" to name,
+                        "address" to host,
+                        "prefixLength" to linkAddress.prefixLength,
+                        "isDefaultRoute" to isDefaultRoute,
+                    )
+                )
+            }
+        }
+        return interfaces
+    }
+
     private fun publishReceivedFile(
         sourcePath: String?,
         fileName: String?,
@@ -154,36 +215,61 @@ class MainActivity : FlutterActivity() {
         }
         Thread {
             try {
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, sanitizeFileName(fileName))
-                    put(MediaStore.Downloads.MIME_TYPE, mimeType ?: "application/octet-stream")
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                        put(MediaStore.Downloads.IS_PENDING, 1)
-                    }
+                val saved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    publishToMediaStoreDownloads(source, fileName, mimeType)
+                } else {
+                    publishToLegacyDownloads(source, fileName)
                 }
-                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: error("Could not create the Downloads entry")
-                try {
-                    contentResolver.openOutputStream(uri)?.use { output ->
-                        source.inputStream().use { input -> input.copyTo(output) }
-                    } ?: error("Could not write the Downloads entry")
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        contentResolver.update(uri, ContentValues().apply {
-                            put(MediaStore.Downloads.IS_PENDING, 0)
-                        }, null, null)
-                    }
-                    runOnUiThread { result.success(uri.toString()) }
-                } catch (e: Exception) {
-                    contentResolver.delete(uri, null, null)
-                    throw e
-                }
+                runOnUiThread { result.success(saved) }
             } catch (e: Exception) {
                 runOnUiThread {
                     result.error("save_failed", "Could not save the received file to Downloads.", e.message)
                 }
             }
         }.start()
+    }
+
+    /** MediaStore.Downloads only exists from API 29. */
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun publishToMediaStoreDownloads(source: File, fileName: String, mimeType: String?): String {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, sanitizeFileName(fileName))
+            put(MediaStore.Downloads.MIME_TYPE, mimeType ?: "application/octet-stream")
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("Could not create the Downloads entry")
+        try {
+            contentResolver.openOutputStream(uri)?.use { output ->
+                source.inputStream().use { input -> input.copyTo(output) }
+            } ?: error("Could not write the Downloads entry")
+            contentResolver.update(uri, ContentValues().apply {
+                put(MediaStore.Downloads.IS_PENDING, 0)
+            }, null, null)
+            return uri.toString()
+        } catch (e: Exception) {
+            contentResolver.delete(uri, null, null)
+            throw e
+        }
+    }
+
+    /**
+     * Below API 29, use the app's Downloads directory on external storage; writing the shared
+     * Downloads folder there would need WRITE_EXTERNAL_STORAGE, which the app does not request.
+     */
+    private fun publishToLegacyDownloads(source: File, fileName: String): String {
+        val directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: error("External storage is unavailable")
+        directory.mkdirs()
+        val destination = uniqueFile(directory, sanitizeFileName(fileName))
+        try {
+            source.inputStream().use { input -> destination.outputStream().use(input::copyTo) }
+        } catch (e: Exception) {
+            destination.delete()
+            throw e
+        }
+        return Uri.fromFile(destination).toString()
     }
 
     private fun openDownloads(result: MethodChannel.Result) {
@@ -210,21 +296,27 @@ class MainActivity : FlutterActivity() {
             val batchId = UUID.randomUUID().toString()
             val directory = File(cacheDir, "incoming_shares/$batchId").apply { mkdirs() }
             var skipped = 0
+            var stagedBytes = 0L
             val attachments = uris.mapIndexedNotNull { index, uri ->
+                var destination: File? = null
                 try {
                     val metadata = queryMetadata(uri)
+                    val remaining = maxStagedShareBytes - stagedBytes
+                    if (metadata.second != null && metadata.second!! > remaining) error("Share too large")
                     val safeName = sanitizeFileName(metadata.first.ifBlank { "shared-$index" })
-                    val destination = uniqueFile(directory, safeName)
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        destination.outputStream().use(input::copyTo)
-                    } ?: error("Unreadable shared file")
+                    val target = uniqueFile(directory, safeName).also { destination = it }
+                    val copied = openShareStream(uri).use { input ->
+                        target.outputStream().use { output -> copyCapped(input, output, remaining) }
+                    }
+                    stagedBytes += copied
                     mapOf(
-                        "path" to destination.absolutePath,
-                        "name" to destination.name,
+                        "path" to target.absolutePath,
+                        "name" to target.name,
                         "mimeType" to (contentResolver.getType(uri) ?: "application/octet-stream"),
-                        "size" to destination.length()
+                        "size" to target.length()
                     )
                 } catch (_: Exception) {
+                    destination?.delete()
                     skipped++
                     null
                 }
@@ -241,6 +333,59 @@ class MainActivity : FlutterActivity() {
             pendingShare = batch
             runOnUiThread { shareChannel?.invokeMethod("incomingShare", batch) }
         }.start()
+    }
+
+    /**
+     * Opens a shared URI for reading, refusing anything that could exfiltrate this app's own
+     * files: `file://` URIs, our own provider, and any descriptor that resolves inside our
+     * data directories. The stream is read from the same descriptor that was checked.
+     */
+    private fun openShareStream(uri: Uri): InputStream {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) error("Only content:// shares are accepted")
+        if (uri.authority == "$packageName.fileprovider") error("Refusing the app's own files")
+        val descriptor = try {
+            contentResolver.openFileDescriptor(uri, "r")
+        } catch (_: FileNotFoundException) {
+            null
+        }
+        if (descriptor == null) {
+            // Streaming providers (pipes) have no backing path to check.
+            return contentResolver.openInputStream(uri) ?: error("Unreadable shared file")
+        }
+        try {
+            // Fail closed: a descriptor we cannot resolve is not staged.
+            val resolved = File(Os.readlink("/proc/self/fd/${descriptor.fd}")).canonicalPath
+            if (isInsideAppStorage(resolved)) error("Refusing the app's own files")
+        } catch (e: Exception) {
+            descriptor.close()
+            throw e
+        }
+        return ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+    }
+
+    private fun isInsideAppStorage(path: String): Boolean {
+        val roots = listOfNotNull(
+            applicationInfo.dataDir,
+            filesDir.parent,
+            "/data/data/$packageName",
+            "/data/user/0/$packageName",
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) dataDir.path else null,
+            getExternalFilesDir(null)?.parent
+        ).mapNotNull { runCatching { File(it).canonicalPath }.getOrNull() }.toSet()
+        return roots.any { root -> path == root || path.startsWith("$root/") }
+    }
+
+    /** Copies at most [limit] bytes; throws if the source holds more. */
+    private fun copyCapped(input: InputStream, output: OutputStream, limit: Long): Long {
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) return total
+            total += read
+            if (total > limit) error("Share too large")
+            output.write(buffer, 0, read)
+        }
     }
 
     private fun queryMetadata(uri: Uri): Pair<String, Long?> {

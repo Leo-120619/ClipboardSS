@@ -63,6 +63,7 @@
 		EA86067F8F0CFBD67774FCD4 /* KeychainPairKeyStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 736D7200E55DDD962C564CCB /* KeychainPairKeyStorage.swift */; };
 		F73FB48D306595D70DF5AC5E /* PhotoEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 456CFF7F25EACF8D2E535219 /* PhotoEditorView.swift */; };
 		F904B47733D3CC757685EF5F /* ClipboardSSLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C859D053DC78587B277EF530 /* ClipboardSSLogo.swift */; };
+		FB78BB38627B0234713B27D7 /* TextSnippets.swift in Sources */ = {isa = PBXBuildFile; fileRef = E859BCA2A7E4252B7E65A6E7 /* TextSnippets.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -152,6 +153,7 @@
 		DFD4E961237AF34D5E50086B /* VisionTextRecognition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionTextRecognition.swift; sourceTree = "<group>"; };
 		E28B29116140529683733A79 /* DevicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesView.swift; sourceTree = "<group>"; };
 		E402BD00A36824726C5FD8A2 /* OCRService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRService.swift; sourceTree = "<group>"; };
+		E859BCA2A7E4252B7E65A6E7 /* TextSnippets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSnippets.swift; sourceTree = "<group>"; };
 		EA85C1C9A89F36C23E2B0859 /* SubnetSweeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubnetSweeper.swift; sourceTree = "<group>"; };
 		EB07D3D15F5F6B37470252C2 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		EC946A8CB782158B26C87C35 /* ShortcutRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutRecorderView.swift; sourceTree = "<group>"; };
@@ -275,6 +277,7 @@
 				EC946A8CB782158B26C87C35 /* ShortcutRecorderView.swift */,
 				EA85C1C9A89F36C23E2B0859 /* SubnetSweeper.swift */,
 				418488DE1ED0293C0A2D8EDA /* SystemPasteboardClient.swift */,
+				E859BCA2A7E4252B7E65A6E7 /* TextSnippets.swift */,
 				DFD4E961237AF34D5E50086B /* VisionTextRecognition.swift */,
 			);
 			name = ClipboardSS;
@@ -461,6 +464,7 @@
 				B3B5B0C472F5939D53632A87 /* ShortcutRecorderView.swift in Sources */,
 				8EE2B7C6A1E94C32C1C95769 /* SubnetSweeper.swift in Sources */,
 				E92A89D2E7A9B664E567FB47 /* SystemPasteboardClient.swift in Sources */,
+				FB78BB38627B0234713B27D7 /* TextSnippets.swift in Sources */,
 				0654624E7E60F83BEE60331B /* VisionTextRecognition.swift in Sources */,
 				71DE8400C15FB2CC344B18A6 /* main.swift in Sources */,
 			);

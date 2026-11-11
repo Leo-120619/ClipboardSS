@@ -8,20 +8,26 @@ func makeTestAppModel(
     store: ClipStore,
     pasteboard: PasteboardClient,
     launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginController(),
-    screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService()
+    screenTextCaptureService: any ScreenTextCapturing = ScreenTextCaptureService(),
+    screenshotCaptureService: any ScreenshotCapturing = ScreenshotCaptureService(),
+    ocrService: any ScreenshotTextRecognizing = StubTextRecognizer(),
+    snippetStore: TextSnippetStore = TextSnippetStore(
+        defaults: UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)") ?? .standard
+    ),
+    clipboardMonitor: ClipboardMonitor? = nil,
+    transport: PeerTransport = TestPeerTransport()
 ) throws -> AppModel {
     let identity = DeviceIdentity(id: UUID(), name: "Test Mac")
     let pairedStore = try PairedDeviceStore(
         storageURL: store.storageDirectory.appendingPathComponent("paired-devices.json"),
         keyStorage: TestPairKeyStorage()
     )
-    let transport = TestPeerTransport()
     let pairingCoordinator = PairingCoordinator(
         identity: identity,
         pairedStore: pairedStore,
         transport: transport
     )
-    let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard)
+    let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard, monitor: clipboardMonitor)
     let clipServer = try ClipServer(
         identity: identity,
         receiver: clipReceiver,
@@ -42,6 +48,7 @@ func makeTestAppModel(
     let downloadsDir = store.storageDirectory.appendingPathComponent("Downloads", isDirectory: true)
     let fileReceiver = FileReceiver(
         pairedStore: pairedStore,
+        localDeviceId: identity.id,
         transfersDirectory: store.storageDirectory.appendingPathComponent("Transfers", isDirectory: true),
         destinationProvider: { downloadsDir }
     )
@@ -49,17 +56,19 @@ func makeTestAppModel(
     return AppModel(
         store: store,
         writer: ClipboardWriter(pasteboard: pasteboard, store: store),
-        screenshotCaptureService: ScreenshotCaptureService(),
-        ocrService: OCRService(),
+        screenshotCaptureService: screenshotCaptureService,
+        ocrService: ocrService,
         screenTextCaptureService: screenTextCaptureService,
         launchAtLogin: launchAtLogin,
         pasteboard: pasteboard,
+        snippetStore: snippetStore,
         pairingCoordinator: pairingCoordinator,
         peerBrowser: peerBrowser,
         clipSender: clipSender,
         clipServer: clipServer,
         fileSender: fileSender,
-        fileReceiver: fileReceiver
+        fileReceiver: fileReceiver,
+        clipboardMonitor: clipboardMonitor
     )
 }
 
@@ -79,8 +88,16 @@ private final class TestPairKeyStorage: PairKeyStorage, @unchecked Sendable {
     }
 }
 
-private struct TestPeerTransport: PeerTransport {
-    func send(_ data: Data, to peer: Peer) async throws -> Data {
+/// Returns no text immediately. The real `OCRService` runs Vision, which can stall for
+/// seconds to minutes while the Neural Engine model compiles, so AppModel tests that wait
+/// for a capture to finish must not depend on it.
+@MainActor
+struct StubTextRecognizer: ScreenshotTextRecognizing {
+    func recognizeText(in imageURL: URL) async throws -> [OCRTextBlock] { [] }
+}
+
+struct TestPeerTransport: PeerTransport {
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         Data()
     }
 }

@@ -28,13 +28,25 @@ public sealed class ClipStore
         _imageDirectory = Path.Combine(StorageDirectory, "Images");
         Directory.CreateDirectory(StorageDirectory);
         Directory.CreateDirectory(_imageDirectory);
-        _items = File.Exists(_metadataPath)
-            ? JsonSerializer.Deserialize<List<ClipItem>>(File.ReadAllBytes(_metadataPath), WireJson.Options)
-                ?? []
-            : [];
+        _items = [];
+        if (File.Exists(_metadataPath))
+        {
+            try
+            {
+                _items = JsonSerializer.Deserialize<List<ClipItem>>(File.ReadAllBytes(_metadataPath), WireJson.Options)
+                    ?? [];
+            }
+            catch (JsonException)
+            {
+                QuarantinedFilePath = CorruptStateFile.Quarantine(_metadataPath, _now());
+            }
+        }
     }
 
     public string StorageDirectory { get; }
+
+    /// <summary>Where an unreadable clips.json was moved at launch, so the UI can tell the user once.</summary>
+    public string? QuarantinedFilePath { get; }
 
     public IReadOnlyList<ClipItem> Items
     {
@@ -79,12 +91,7 @@ public sealed class ClipStore
                 return RefreshExisting(existing);
             }
 
-            var extension = fileExtension.Trim();
-            if (extension.Length == 0)
-            {
-                extension = "png";
-            }
-
+            var extension = SanitizedImageExtension(fileExtension);
             var fileName = $"{Guid.NewGuid():D}.{extension}";
             var relativePath = Path.Combine("Images", fileName);
             AtomicFile.WriteAllBytes(Path.Combine(StorageDirectory, relativePath), data);
@@ -98,6 +105,28 @@ public sealed class ClipStore
             };
             return Upsert(clip);
         }
+    }
+
+    /// <summary>
+    /// Returns the lowercased extension when it is 1-5 ASCII letters or digits, otherwise "png".
+    /// The extension is peer-supplied, so anything else (separators, dots, "..") is discarded.
+    /// </summary>
+    public static string SanitizedImageExtension(string fileExtension)
+    {
+        if (fileExtension.Length is < 1 or > 5)
+        {
+            return "png";
+        }
+
+        foreach (var character in fileExtension)
+        {
+            if (!char.IsAsciiLetterOrDigit(character))
+            {
+                return "png";
+            }
+        }
+
+        return fileExtension.ToLowerInvariant();
     }
 
     public void SetPinned(Guid id, bool isPinned)

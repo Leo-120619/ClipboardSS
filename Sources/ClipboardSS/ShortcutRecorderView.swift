@@ -26,7 +26,7 @@ struct ShortcutRecorderView: View {
     }
 }
 
-private struct ShortcutRecorderField: NSViewRepresentable {
+struct ShortcutRecorderField: NSViewRepresentable {
     @Binding var shortcut: KeyboardShortcut?
 
     func makeNSView(context: Context) -> ShortcutRecorderButton {
@@ -45,7 +45,7 @@ private struct ShortcutRecorderField: NSViewRepresentable {
     }
 }
 
-private final class ShortcutRecorderButton: NSButton {
+final class ShortcutRecorderButton: NSButton {
     var shortcut: KeyboardShortcut? {
         didSet {
             updateTitle()
@@ -98,7 +98,13 @@ private final class ShortcutRecorderButton: NSButton {
             return
         }
 
-        onShortcutChanged?(KeyboardShortcut(keyCode: event.keyCode, modifiers: modifiers))
+        let recorded = KeyboardShortcut(keyCode: event.keyCode, modifiers: modifiers)
+        // Command-V is the system Paste; keep recording so the user can pick another.
+        guard !recorded.isReservedSystemShortcut else {
+            NSSound.beep()
+            return
+        }
+        onShortcutChanged?(recorded)
         isRecording = false
     }
 

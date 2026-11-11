@@ -52,6 +52,87 @@ struct ClipboardServiceTests {
         #expect(store.items.map(\.text) == ["two", "one"])
     }
 
+    @Test("monitor skips a pasteboard change the app marked as its own")
+    func monitorSkipsIgnoredChange() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: temporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+
+        pasteboard.changeCount = 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "snippet", imageData: nil)
+        monitor.ignoreCurrentChange()
+        try monitor.poll()
+
+        #expect(store.items.isEmpty)
+
+        pasteboard.changeCount = 2
+        pasteboard.snapshot = ClipboardSnapshot(text: "user copy", imageData: nil)
+        try monitor.poll()
+
+        #expect(store.items.map(\.text) == ["user copy"])
+    }
+
+    @Test("monitor never stores a concealed or transient pasteboard item")
+    func testPollSkipsSensitiveSnapshot() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: temporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+
+        pasteboard.changeCount = 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "hunter2", imageData: nil, isSensitive: true)
+        try monitor.poll()
+        try monitor.poll()
+
+        #expect(store.items.isEmpty)
+    }
+
+    @Test("monitor captures the next normal copy after a sensitive one")
+    func testPollCapturesNextNormalCopyAfterSensitiveOne() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: temporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+
+        pasteboard.changeCount = 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "hunter2", imageData: Data([1, 2, 3]), isSensitive: true)
+        try monitor.poll()
+
+        pasteboard.changeCount = 2
+        pasteboard.snapshot = ClipboardSnapshot(text: "normal copy", imageData: nil)
+        try monitor.poll()
+        try monitor.poll()
+
+        #expect(store.items.map(\.text) == ["normal copy"])
+    }
+
+    @Test("a capture that fails to save is retried once for the same change, then dropped")
+    func pollFailureIsRetriedOnce() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: temporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+        let metadataURL = store.storageDirectory.appendingPathComponent("clips.json")
+
+        // A directory where clips.json belongs makes every save fail.
+        pasteboard.changeCount = 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "one", imageData: nil)
+        try FileManager.default.createDirectory(at: metadataURL, withIntermediateDirectories: true)
+        #expect(throws: (any Error).self) { try monitor.poll() }
+        try FileManager.default.removeItem(at: metadataURL)
+
+        let retried = try monitor.poll()
+        #expect(retried?.text == "one", "the failed change must be captured on the next tick")
+        #expect(try monitor.poll() == nil)
+
+        // Two failures for the same change: the second is final.
+        pasteboard.changeCount = 2
+        pasteboard.snapshot = ClipboardSnapshot(text: "two", imageData: nil)
+        try FileManager.default.removeItem(at: metadataURL)
+        try FileManager.default.createDirectory(at: metadataURL, withIntermediateDirectories: true)
+        #expect(throws: (any Error).self) { try monitor.poll() }
+        #expect(throws: (any Error).self) { try monitor.poll() }
+        try FileManager.default.removeItem(at: metadataURL)
+        #expect(try monitor.poll() == nil)
+    }
+
     @Test("PairedDevice persists optional host and legacy records decode")
     func pairedDeviceHostRoundTrip() async throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

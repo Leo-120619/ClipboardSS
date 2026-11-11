@@ -11,10 +11,24 @@ public enum FileTransferConstants {
     public static let fileKeySalt = "ClipboardSS_FileKey"
     /// Receiver session idle timeout before garbage collection.
     public static let idleTimeout: TimeInterval = 60
+    /// Free space an offer must leave on the transfers volume: 500 MB (MiB, 524,288,000 bytes).
+    public static let freeSpaceReserve: Int64 = 500 * 1024 * 1024
+    /// Most concurrent receive sessions one source device may hold.
+    public static let maxSessionsPerDevice = 8
+    /// How long a cancelled transfer id is remembered (chunks for it get 410).
+    public static let cancelledRetention: TimeInterval = 600
     /// HTTP header carrying the transfer id on chunk requests (read lowercased).
     public static let transferIdHeader = "X-Transfer-Id"
     /// HTTP header carrying the chunk index on chunk requests (read lowercased).
     public static let chunkIndexHeader = "X-Chunk-Index"
+
+    /// How long a sender waits for `/v1/file/finish`, which the receiver answers only after
+    /// hashing the whole file: 1 s per 20 MiB, at least 30 s, at most 600 s (4 GiB -> 205 s).
+    public static func finishTimeout(fileSize: Int64) -> TimeInterval {
+        let perSecond: Int64 = 20 * 1024 * 1024
+        let seconds = (max(0, fileSize) + perSecond - 1) / perSecond
+        return TimeInterval(min(600, max(30, seconds)))
+    }
 }
 
 /// Inner JSON of `POST /v1/file/offer` (sealed in a `ClipEnvelope`).

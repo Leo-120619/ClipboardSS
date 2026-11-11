@@ -4,7 +4,10 @@ import 'dart:io';
 import 'package:clipboard_companion/core/content_hasher.dart';
 import 'package:clipboard_companion/core/file_receiver.dart';
 import 'package:clipboard_companion/core/file_sender.dart';
+import 'package:clipboard_companion/core/file_transfer_models.dart';
+import 'package:clipboard_companion/core/paired_device_store.dart';
 import 'package:clipboard_companion/core/models.dart';
+import 'package:clipboard_companion/core/replay_guard.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -134,6 +137,68 @@ void main() {
     expect(requests.map((r) => r.url.path), ['/v1/file/offer']);
   });
 
+  test('refuses to send to a peer that advertises an older protocol', () async {
+    final requests = <http.Request>[];
+    final client = MockClient((request) async {
+      requests.add(request);
+      return http.Response('{}', 200);
+    });
+    final sender = await makeSender(client);
+    final outdated = Peer(
+      id: peerId,
+      name: 'Peer',
+      host: '10.0.0.1',
+      port: 51888,
+      protocolVersion: 1,
+    );
+
+    await expectLater(
+      sender.sendFile(file: makeFile(16), peer: outdated),
+      throwsA(isA<FileSendNeedsUpdateException>()),
+    );
+    expect(requests, isEmpty);
+  });
+
+  test('a 426 answer surfaces as needs-update, not unauthorized', () async {
+    final client = MockClient(
+      (request) async =>
+          http.Response('{"status":"upgradeRequired","minVersion":2}', 426),
+    );
+    final sender = await makeSender(client);
+
+    await expectLater(
+      sender.sendFile(file: makeFile(16), peer: peer),
+      throwsA(
+        isA<FileSendNeedsUpdateException>().having(
+          (e) => e.toString(),
+          'message',
+          updateOtherDeviceMessage,
+        ),
+      ),
+    );
+  });
+
+  test(
+    'a stale answer surfaces as clock out of sync with the device',
+    () async {
+      final client = MockClient(
+        (request) async => http.Response('{"status":"stale"}', 400),
+      );
+      final sender = await makeSender(client);
+
+      await expectLater(
+        sender.sendFile(file: makeFile(16), peer: peer),
+        throwsA(
+          isA<FileSendClockOutOfSyncException>().having(
+            (e) => e.toString(),
+            'message',
+            'Clock out of sync with Peer.',
+          ),
+        ),
+      );
+    },
+  );
+
   test('sending to an unpaired peer throws', () async {
     final client = MockClient((request) async => http.Response('{}', 200));
     final sender = await makeSender(client);
@@ -170,6 +235,80 @@ void main() {
     );
   });
 
+  group('finish timeout', () {
+    FileSender timedSender(
+      http.Client client,
+      PairedDeviceStore store, {
+      Duration Function(int fileSize)? finishTimeout,
+    }) => FileSender(
+      identity: DeviceIdentity(
+        id: 'aaaaaaaa-1111-2222-3333-444444444444',
+        name: 'Mac',
+      ),
+      pairedStore: store,
+      client: client,
+      requestTimeout: const Duration(milliseconds: 50),
+      finishTimeout: finishTimeout,
+    );
+
+    test('finishUsesExtendedTimeoutForLargeFile', () async {
+      expect(
+        FileTransferConstants.finishTimeout(4 * 1024 * 1024 * 1024),
+        const Duration(seconds: 205),
+      );
+      expect(
+        FileTransferConstants.finishTimeout(0),
+        const Duration(seconds: 30),
+      );
+      expect(
+        FileTransferConstants.finishTimeout(30 * 20 * 1024 * 1024 + 1),
+        const Duration(seconds: 31),
+      );
+      expect(
+        FileTransferConstants.finishTimeout(1 << 40),
+        const Duration(seconds: 600),
+      );
+
+      // The receiver hashes before answering finish: longer than the
+      // per-request timeout is fine.
+      final client = MockClient((request) async {
+        if (request.url.path == '/v1/file/finish') {
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+        }
+        return http.Response('{}', 200);
+      });
+      final sender = timedSender(client, await makePairedStore(peerId, key));
+
+      expect(
+        await sender.sendFile(file: makeFile(1024), peer: peer),
+        FileSendOutcome.delivered,
+      );
+    });
+
+    test('senderDoesNotCancelAfterFinishTimeout', () async {
+      final requests = <String>[];
+      final client = MockClient((request) async {
+        requests.add(request.url.path);
+        if (request.url.path == '/v1/file/finish') {
+          return Completer<http.Response>().future;
+        }
+        return http.Response('{}', 200);
+      });
+      final sender = timedSender(
+        client,
+        await makePairedStore(peerId, key),
+        finishTimeout: (_) => const Duration(milliseconds: 20),
+      );
+
+      // A saved file must not be reported failed or deleted (Review Focus 4).
+      expect(
+        await sender.sendFile(file: makeFile(1024), peer: peer),
+        FileSendOutcome.unconfirmed,
+      );
+      expect(requests, ['/v1/file/offer', '/v1/file/chunk', '/v1/file/finish']);
+    });
+  });
+
   test(
     'loopback e2e: file arrives hash-verified through the real routes',
     () async {
@@ -177,6 +316,8 @@ void main() {
       final destDir = makeTempDir('dest');
       final receiver = FileReceiver(
         pairedStore: store,
+        // One shared store: the receiver is the `peer` the sender addresses.
+        localDeviceId: peer.id,
         transfersDirectory: makeTempDir('transfers'),
         destinationProvider: () => destDir,
       );
@@ -235,4 +376,65 @@ void main() {
       );
     },
   );
+
+  group('clock skew (Review Focus 1)', () {
+    Future<Directory> loopbackSend(Duration receiverClockOffset) async {
+      final store = await makePairedStore(peerId, key);
+      final destDir = makeTempDir('dest');
+      final receiver = FileReceiver(
+        pairedStore: store,
+        localDeviceId: peer.id,
+        transfersDirectory: makeTempDir('transfers'),
+        destinationProvider: () => destDir,
+        replayGuard: ReplayGuard(
+          now: () => DateTime.now().add(receiverClockOffset),
+        ),
+      );
+      final client = MockClient((request) async {
+        final FileTransferResponse result;
+        switch (request.url.path) {
+          case '/v1/file/offer':
+            result = await receiver.handleOffer(
+              ClipEnvelope.fromJson(jsonDecode(request.body)),
+            );
+          case '/v1/file/chunk':
+            result = await receiver.handleChunk(
+              request.headers['x-transfer-id'] ?? '',
+              int.tryParse(request.headers['x-chunk-index'] ?? '') ?? -1,
+              request.bodyBytes,
+            );
+          case '/v1/file/finish':
+            result = await receiver.handleFinish(
+              ClipEnvelope.fromJson(jsonDecode(request.body)),
+            );
+          case '/v1/file/cancel':
+            result = await receiver.handleCancel(
+              ClipEnvelope.fromJson(jsonDecode(request.body)),
+            );
+          default:
+            result = FileTransferResponse(404, {});
+        }
+        return http.Response(jsonEncode(result.body), result.statusCode);
+      });
+      final sender = FileSender(
+        identity: DeviceIdentity(id: peerId, name: 'Peer'),
+        pairedStore: store,
+        client: client,
+      );
+      await sender.sendFile(file: makeFile(100), peer: peer);
+      return destDir;
+    }
+
+    test('a receiver 4 minutes off still receives the file', () async {
+      final destDir = await loopbackSend(const Duration(minutes: 4));
+      expect(File('${destDir.path}/payload.bin').existsSync(), isTrue);
+    });
+
+    test('a receiver 20 minutes off reports clock out of sync', () async {
+      await expectLater(
+        loopbackSend(const Duration(minutes: -20)),
+        throwsA(isA<FileSendClockOutOfSyncException>()),
+      );
+    });
+  });
 }

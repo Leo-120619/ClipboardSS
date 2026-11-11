@@ -17,4 +17,5 @@ Export-PfxCertificate -Cert $certificate -FilePath $pfx -Password $Password | Ou
 Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
 Write-Host "Created developer certificate: $cer"
 Write-Host "Created private PFX (keep private): $pfx"
+Write-Host "Certificate thumbprint (pass to package-msix.ps1 -CertificateThumbprint): $($certificate.Thumbprint)"
 Write-Host 'Import the .cer into Trusted Root Certification Authorities on development devices before sideloading.'

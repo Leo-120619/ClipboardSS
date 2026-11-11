@@ -22,8 +22,8 @@ struct ClipboardSyncTests {
         let iId = UUID()
         let tId = UUID()
         
-        let (iKey, iCode) = try initiator.completePairing(remotePublicKey: target.ephemeralPublicKey, initiatorId: iId, targetId: tId, isInitiator: true, code: "000000")
-        let (tKey, tCode) = try target.completePairing(remotePublicKey: initiator.ephemeralPublicKey, initiatorId: iId, targetId: tId, isInitiator: false, code: "000000")
+        let (iKey, iCode) = try initiator.completePairing(remotePublicKey: target.ephemeralPublicKey, isInitiator: true, code: "000000")
+        let (tKey, tCode) = try target.completePairing(remotePublicKey: initiator.ephemeralPublicKey, isInitiator: false, code: "000000")
         
         #expect(iKey == tKey)
         #expect(iCode == tCode)
@@ -37,20 +37,13 @@ struct ClipboardSyncTests {
     func codeBoundPairing() throws {
         let initiator = PairingSession()
         let target = PairingSession()
-        let iId = UUID()
-        let tId = UUID()
-
         let (keyA, _) = try initiator.completePairing(
             remotePublicKey: target.ephemeralPublicKey,
-            initiatorId: iId,
-            targetId: tId,
             isInitiator: true,
             code: "048213"
         )
         let (keyB, _) = try target.completePairing(
             remotePublicKey: initiator.ephemeralPublicKey,
-            initiatorId: iId,
-            targetId: tId,
             isInitiator: false,
             code: "048213"
         )
@@ -58,12 +51,38 @@ struct ClipboardSyncTests {
 
         let (keyWrong, _) = try target.completePairing(
             remotePublicKey: initiator.ephemeralPublicKey,
-            initiatorId: iId,
-            targetId: tId,
             isInitiator: false,
             code: "999999"
         )
         #expect(keyWrong != keyA)
+    }
+
+    @Test("Pairing v2 matches the pinned vector in docs/wire-protocol.md")
+    func pairingV2MatchesPinnedVector() throws {
+        let initiator = try PairingSession(privateKey: Data(hex: "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"))
+        let target = try PairingSession(privateKey: Data(hex: "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"))
+        let salt = Data(0..<16)
+        #expect(initiator.ephemeralPublicKey.hexString == "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+        #expect(target.ephemeralPublicKey.hexString == "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+
+        let commitment = PairingSession.commitment(publicKey: initiator.ephemeralPublicKey, salt: salt)
+        #expect(commitment.hexString == "c288f1b99596594082bc7d2c3684e2baef0516454e44b3cd6d7bcbd8845f4c55")
+        #expect(PairingSession.commitmentMatches(commitment, publicKey: initiator.ephemeralPublicKey, salt: salt))
+        #expect(!PairingSession.commitmentMatches(commitment, publicKey: target.ephemeralPublicKey, salt: salt))
+
+        let (iKey, iCode) = try initiator.completePairing(remotePublicKey: target.ephemeralPublicKey, isInitiator: true, code: "123456")
+        let (tKey, tCode) = try target.completePairing(remotePublicKey: initiator.ephemeralPublicKey, isInitiator: false, code: "123456")
+        #expect(iKey.withUnsafeBytes { Data($0) }.hexString == "8088860b8ecd246dbb52966bba419592f44ab2da96dec0d03725257384cdb83f")
+        #expect(tKey == iKey)
+        #expect(iCode == "885454")
+        #expect(tCode == "885454")
+
+        let proof = PairingSession.generateConfirmationProof(
+            pairKey: iKey,
+            initiatorId: UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!,
+            targetId: UUID(uuidString: "4D967C79-47DC-4E1F-A3BD-D3160B082DA7")!
+        )
+        #expect(proof.hexString == "b4bb2c3b5b26e686aba290b1e6469b756684cb6f131b355f106905140204c23b")
     }
 
     @Test("Confirmation proof uses lowercase canonical UUID strings")
@@ -88,14 +107,15 @@ struct ClipboardSyncTests {
         let payload = ClipPayload(id: UUID(), type: .text, createdAt: Date(), text: "secret message", previewText: "secret", contentHash: "hash123", sourceDeviceName: "Mac")
         let key = SymmetricKey(size: .bits256)
         
-        let envelope = try ClipEnvelope.seal(payload: payload, sourceDeviceId: UUID(), pairKey: key)
+        let recipient = UUID()
+        let envelope = try ClipEnvelope.seal(payload: payload, purpose: .clip, sourceDeviceId: UUID(), recipientDeviceId: recipient, pairKey: key)
         
-        let opened = try envelope.open(pairKey: key)
+        let opened = try envelope.open(ClipPayload.self, purpose: .clip, recipientDeviceId: recipient, pairKey: key)
         #expect(opened.text == "secret message")
         
         let wrongKey = SymmetricKey(size: .bits256)
         #expect(throws: EnvelopeError.decryptionFailed) {
-            try envelope.open(pairKey: wrongKey)
+            try envelope.open(ClipPayload.self, purpose: .clip, recipientDeviceId: recipient, pairKey: wrongKey)
         }
     }
     
@@ -133,6 +153,71 @@ struct ClipboardSyncTests {
         #expect(pasteboard.lastText == "hello net")
     }
 
+    @Test("ClipReceiver rejects an undecodable image without storing it or touching the pasteboard")
+    @MainActor
+    func receiveUndecodableImageIsRejectedAndNotStored() async throws {
+        let pasteboard = FakePasteboard()
+        let storage = try syncTemporaryDirectory()
+        let store = try ClipStore(storageDirectory: storage)
+        let receiver = ClipReceiver(store: store, pasteboard: pasteboard)
+        var bytes: [UInt8] = [0x89, 0x50, 0x4E, 0x47]
+        bytes += (0..<32).map { _ in UInt8.random(in: 0...255) }
+        let payload = ClipPayload(
+            id: UUID(), type: .image, createdAt: Date(), text: nil,
+            imageBase64: Data(bytes).base64EncodedString(), imageExtension: "png",
+            previewText: "Image", contentHash: "ignored", sourceDeviceName: "Phone"
+        )
+
+        #expect(throws: (any Error).self) { try receiver.receive(payload) }
+
+        #expect(store.items.isEmpty)
+        let images = try FileManager.default.contentsOfDirectory(atPath: storage.appendingPathComponent("Images").path)
+        #expect(images.isEmpty)
+        #expect(pasteboard.clearCount == 0)
+        #expect(pasteboard.lastImageData == nil)
+    }
+
+    @Test("ClipReceiver stores a decodable image and writes it to the pasteboard")
+    @MainActor
+    func receiveValidImageIsStored() async throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: try syncTemporaryDirectory())
+        let receiver = ClipReceiver(store: store, pasteboard: pasteboard)
+        let png = try #require(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+        let payload = ClipPayload(
+            id: UUID(), type: .image, createdAt: Date(), text: nil,
+            imageBase64: png.base64EncodedString(), imageExtension: "PNG",
+            previewText: "Image", contentHash: "ignored", sourceDeviceName: "Phone"
+        )
+
+        let result = try receiver.receive(payload)
+
+        guard case .added(let clip) = result else {
+            Issue.record("Expected added")
+            return
+        }
+        #expect(clip.imagePath?.hasSuffix(".png") == true)
+        #expect(pasteboard.lastImageData == png)
+    }
+
+    @Test("ClipReceiver marks its pasteboard write as seen, so the monitor does not capture it")
+    @MainActor
+    func receivedClipIsNotCapturedAsLocalCopy() throws {
+        let pasteboard = FakePasteboard()
+        let store = try ClipStore(storageDirectory: try syncTemporaryDirectory())
+        let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
+        let receiver = ClipReceiver(store: store, pasteboard: pasteboard, monitor: monitor)
+        let payload = ClipPayload(id: UUID(), type: .text, createdAt: Date(), text: "from phone", previewText: "from phone", contentHash: "ignored", sourceDeviceName: "Phone")
+
+        _ = try receiver.receive(payload)
+        #expect(pasteboard.changeCount == 1)
+        #expect(try monitor.poll() == nil)
+
+        pasteboard.changeCount += 1
+        pasteboard.snapshot = ClipboardSnapshot(text: "typed", imageData: nil)
+        #expect(try monitor.poll()?.text == "typed")
+    }
+
     @Test("ClipSender broadcast")
     func clipSenderBroadcast() async throws {
         let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
@@ -157,6 +242,90 @@ struct ClipboardSyncTests {
         let secondResult = try await sender.broadcast(clip: clip, to: [peer, selfPeer])
         #expect(transport.sentRequests.count == 2)
         #expect(secondResult.successCount == 1)
+    }
+
+    @Test("ClipSender seals for the recipient and skips peers that need an update")
+    func clipSenderSealsForRecipientAndSkipsOutdatedPeers() async throws {
+        let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
+        let transport = FakePeerTransport()
+        let myId = UUID()
+        let sender = ClipSender(identity: DeviceIdentity(id: myId, name: "Mac"), pairedStore: pairedStore, transport: transport, storageDirectory: try syncTemporaryDirectory())
+
+        let currentId = UUID()
+        let outdatedId = UUID()
+        let key = SymmetricKey(size: .bits256)
+        try await pairedStore.addDevice(PairedDevice(id: currentId, name: "Phone"), key: key)
+        try await pairedStore.addDevice(PairedDevice(id: outdatedId, name: "Old"), key: key)
+
+        let clip = ClipItem(type: .text, createdAt: Date(), text: "hi", previewText: "hi", contentHash: "123")
+        let result = try await sender.broadcast(clip: clip, to: [
+            Peer(id: currentId, name: "Phone", host: "10.0.0.1", port: 8080),
+            Peer(id: outdatedId, name: "Old", host: "10.0.0.2", port: 8080, protocolVersion: 1),
+        ])
+
+        #expect(transport.sentRequests.count == 1)
+        #expect(transport.sentRequests[0].1.id == currentId)
+        #expect(result.successCount == 1)
+        #expect(result.needsUpdateCount == 1)
+
+        let request = try HTTPCodec.parseRequest(transport.sentRequests[0].0)
+        let envelope = try JSONDecoder().decode(ClipEnvelope.self, from: request.body)
+        #expect(envelope.v == 2)
+        let opened = try envelope.open(ClipPayload.self, purpose: .clip, recipientDeviceId: currentId, pairKey: key)
+        #expect(opened.text == "hi")
+    }
+
+    @Test("ClipSender counts a 426 answer as needing an update")
+    func clipSenderCounts426AsNeedsUpdate() async throws {
+        let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
+        let transport = FakePeerTransport()
+        transport.responseData = HTTPCodec.encodeResponse(
+            HTTPResponse(statusCode: 426, headers: [:], body: Data(#"{"status":"upgradeRequired","minVersion":2}"#.utf8))
+        )
+        let sender = ClipSender(identity: DeviceIdentity(id: UUID(), name: "Mac"), pairedStore: pairedStore, transport: transport, storageDirectory: try syncTemporaryDirectory())
+        let peerId = UUID()
+        try await pairedStore.addDevice(PairedDevice(id: peerId, name: "Phone"), key: SymmetricKey(size: .bits256))
+
+        let clip = ClipItem(type: .text, createdAt: Date(), text: "hi", previewText: "hi", contentHash: "123")
+        let result = try await sender.broadcast(clip: clip, to: [Peer(id: peerId, name: "Phone", host: "10.0.0.1", port: 8080)])
+        #expect(result.failureCount == 1)
+        #expect(result.needsUpdateCount == 1)
+    }
+
+    @Test("ClipSender reports a stale answer as the clock being out of sync with that device")
+    func clipSenderReportsStaleAsClockOutOfSync() async throws {
+        let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
+        let transport = FakePeerTransport()
+        transport.responseData = HTTPCodec.encodeResponse(
+            HTTPResponse(statusCode: 400, headers: ["Content-Type": "application/json"], body: Data(#"{"status":"stale"}"#.utf8))
+        )
+        let sender = ClipSender(identity: DeviceIdentity(id: UUID(), name: "Mac"), pairedStore: pairedStore, transport: transport, storageDirectory: try syncTemporaryDirectory())
+        let peerId = UUID()
+        try await pairedStore.addDevice(PairedDevice(id: peerId, name: "Phone"), key: SymmetricKey(size: .bits256))
+
+        let clip = ClipItem(type: .text, createdAt: Date(), text: "hi", previewText: "hi", contentHash: "123")
+        let result = try await sender.broadcast(clip: clip, to: [Peer(id: peerId, name: "Phone", host: "10.0.0.1", port: 8080)])
+        #expect(result.failureCount == 1)
+        #expect(result.clockOutOfSyncPeerNames == ["Phone"])
+        #expect(result.needsUpdateCount == 0)
+        #expect(ProtocolMismatch.clockOutOfSyncMessage(deviceNames: result.clockOutOfSyncPeerNames) == "Clock out of sync with Phone.")
+    }
+
+    @Test("ClipSender stamps sentAt into every clip it seals")
+    func clipSenderStampsSentAt() async throws {
+        let pairedStore = try PairedDeviceStore(storageURL: try syncTemporaryDirectory().appendingPathComponent("keys.json"), keyStorage: FakePairKeyStorage())
+        let transport = FakePeerTransport()
+        let sender = ClipSender(identity: DeviceIdentity(id: UUID(), name: "Mac"), pairedStore: pairedStore, transport: transport, storageDirectory: try syncTemporaryDirectory())
+        let peerId = UUID()
+        let key = SymmetricKey(size: .bits256)
+        try await pairedStore.addDevice(PairedDevice(id: peerId, name: "Phone"), key: key)
+
+        let clip = ClipItem(type: .text, createdAt: Date(timeIntervalSince1970: 0), text: "hi", previewText: "hi", contentHash: "123")
+        _ = try await sender.broadcast(clip: clip, to: [Peer(id: peerId, name: "Phone", host: "10.0.0.1", port: 8080)])
+        let request = try HTTPCodec.parseRequest(transport.sentRequests[0].0)
+        let envelope = try JSONDecoder().decode(ClipEnvelope.self, from: request.body)
+        let opened = try envelope.openStamped(ClipPayload.self, purpose: .clip, recipientDeviceId: peerId, pairKey: key)
+        #expect(abs(opened.sentAt.timeIntervalSinceNow) < 5)
     }
 
     @Test("ClipSender treats non-200 responses as failed sends")
@@ -198,16 +367,20 @@ private final class FakePasteboard: PasteboardClient, @unchecked Sendable {
 
     func clearContents() {
         clearCount += 1
+        changeCount += 1
         lastText = nil
         lastImageData = nil
+        snapshot = ClipboardSnapshot(text: nil, imageData: nil)
     }
 
     func writeText(_ text: String) {
         lastText = text
+        snapshot.text = text
     }
 
     func writeImageData(_ data: Data) {
         lastImageData = data
+        snapshot.imageData = data
     }
 }
 
@@ -234,7 +407,7 @@ private final class FakePeerTransport: PeerTransport, @unchecked Sendable {
         HTTPResponse(statusCode: 200, headers: [:], body: Data("OK".utf8))
     )
     
-    func send(_ data: Data, to peer: Peer) async throws -> Data {
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         if shouldFail { throw URLError(.cannotConnectToHost) }
         sentRequests.append((data, peer))
         return responseData
@@ -245,4 +418,19 @@ private func syncTemporaryDirectory() throws -> URL {
     let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+private extension Data {
+    init(hex: String) {
+        var bytes: [UInt8] = []
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            bytes.append(UInt8(hex[index..<next], radix: 16)!)
+            index = next
+        }
+        self.init(bytes)
+    }
+
+    var hexString: String { map { String(format: "%02x", $0) }.joined() }
 }

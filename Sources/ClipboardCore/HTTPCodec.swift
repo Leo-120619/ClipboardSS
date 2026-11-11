@@ -30,16 +30,15 @@ public enum HTTPCodecError: Error {
     case incomplete
     case invalidFormat
     case payloadTooLarge
+    case headersTooLarge
 }
 
 public enum HTTPCodec {
     public static let maxBodySize = 20 * 1024 * 1024 // 20 MB
+    public static let maxHeaderSize = 16 * 1024
 
     public static func parseRequest(_ data: Data) throws -> HTTPRequest {
-        guard let range = data.range(of: Data("\r\n\r\n".utf8)) else {
-            throw HTTPCodecError.incomplete
-        }
-        
+        let range = try headerTerminatorRange(in: data)
         let headData = data[..<range.lowerBound]
         let bodyData = data[range.upperBound...]
         
@@ -64,17 +63,8 @@ public enum HTTPCodec {
             }
         }
 
-        if let contentLengthStr = headers["content-length"], let contentLength = Int(contentLengthStr) {
-            if contentLength > maxBodySize {
-                throw HTTPCodecError.payloadTooLarge
-            }
-            if bodyData.count < contentLength {
-                throw HTTPCodecError.incomplete
-            }
-            return HTTPRequest(method: method, path: path, headers: headers, body: bodyData.prefix(contentLength))
-        }
-
-        return HTTPRequest(method: method, path: path, headers: headers, body: bodyData)
+        let body = try resolveBody(bodyData, contentLengthHeader: headers["content-length"])
+        return HTTPRequest(method: method, path: path, headers: headers, body: body)
     }
 
     public static func encodeResponse(_ response: HTTPResponse) -> Data {
@@ -84,6 +74,7 @@ public enum HTTPCodec {
         case 400: reason = "Bad Request"
         case 401: reason = "Unauthorized"
         case 413: reason = "Payload Too Large"
+        case 431: reason = "Request Header Fields Too Large"
         default: reason = "Status"
         }
         
@@ -103,10 +94,7 @@ public enum HTTPCodec {
     }
     
     public static func parseResponse(_ data: Data) throws -> HTTPResponse {
-        guard let range = data.range(of: Data("\r\n\r\n".utf8)) else {
-            throw HTTPCodecError.incomplete
-        }
-        
+        let range = try headerTerminatorRange(in: data)
         let headData = data[..<range.lowerBound]
         let bodyData = data[range.upperBound...]
         
@@ -130,17 +118,8 @@ public enum HTTPCodec {
             }
         }
 
-        if let contentLengthStr = headers["content-length"], let contentLength = Int(contentLengthStr) {
-            if contentLength > maxBodySize {
-                throw HTTPCodecError.payloadTooLarge
-            }
-            if bodyData.count < contentLength {
-                throw HTTPCodecError.incomplete
-            }
-            return HTTPResponse(statusCode: statusCode, headers: headers, body: bodyData.prefix(contentLength))
-        }
-
-        return HTTPResponse(statusCode: statusCode, headers: headers, body: bodyData)
+        let body = try resolveBody(bodyData, contentLengthHeader: headers["content-length"])
+        return HTTPResponse(statusCode: statusCode, headers: headers, body: body)
     }
 
     public static func encodeRequest(_ request: HTTPRequest, host: String) -> Data {
@@ -158,5 +137,45 @@ public enum HTTPCodec {
         var data = Data(head.utf8)
         data.append(request.body)
         return data
+    }
+
+    private static let headerTerminator = Data("\r\n\r\n".utf8)
+
+    /// Locates the end of the header block, refusing to look past `maxHeaderSize` bytes
+    /// so a peer that never sends a terminator cannot make us buffer without bound.
+    private static func headerTerminatorRange(in data: Data) throws -> Range<Data.Index> {
+        let searchLimit = maxHeaderSize + headerTerminator.count
+        let window = data.prefix(searchLimit)
+        if let range = window.range(of: headerTerminator) {
+            return range
+        }
+        if data.count >= searchLimit {
+            throw HTTPCodecError.headersTooLarge
+        }
+        throw HTTPCodecError.incomplete
+    }
+
+    /// Validates `Content-Length` and returns the body as standalone `Data` (never a slice),
+    /// so callers always see a zero-based buffer.
+    private static func resolveBody(_ bodyData: Data, contentLengthHeader: String?) throws -> Data {
+        guard let rawLength = contentLengthHeader else {
+            return Data(bodyData)
+        }
+        let trimmed = rawLength.trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+        // Only a plain run of ASCII digits is a valid length; Int(_:) alone would accept "-1" or "+5".
+        guard !trimmed.isEmpty, trimmed.utf8.allSatisfy({ $0 >= UInt8(ascii: "0") && $0 <= UInt8(ascii: "9") }) else {
+            throw HTTPCodecError.invalidFormat
+        }
+        // All digits but not representable as Int means it is far beyond any allowed size.
+        guard let contentLength = Int(trimmed) else {
+            throw HTTPCodecError.payloadTooLarge
+        }
+        if contentLength > maxBodySize {
+            throw HTTPCodecError.payloadTooLarge
+        }
+        if bodyData.count < contentLength {
+            throw HTTPCodecError.incomplete
+        }
+        return Data(bodyData.prefix(contentLength))
     }
 }

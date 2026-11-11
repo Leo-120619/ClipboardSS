@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 enum ClipType { text, image }
 
 String canonicalDeviceId(String id) => id.trim().toLowerCase();
@@ -63,6 +65,9 @@ class ClipPayload {
   }
 }
 
+/// Envelope and discovery protocol version (mDNS TXT `v`, `/v1/id` `v`, envelope `v`).
+const int wireProtocolVersion = 2;
+
 class ClipEnvelope {
   final int v;
   final String sourceDeviceId;
@@ -101,12 +106,39 @@ class Peer {
   final String host;
   final int port;
 
+  /// Wire protocol version the peer advertised (mDNS TXT `v` or `/v1/id` `v`).
+  /// Peers resolved without an advertisement (stored host) are assumed current.
+  final int protocolVersion;
+
   Peer({
     required String id,
     required this.name,
     required this.host,
     required this.port,
+    this.protocolVersion = wireProtocolVersion,
   }) : id = canonicalDeviceId(id);
+
+  /// The peer speaks an older wire protocol: list it, but never send to it.
+  bool get needsUpdate => protocolVersion < wireProtocolVersion;
+}
+
+/// User-facing text for a peer that runs another wire protocol version.
+const updateOtherDeviceMessage =
+    'Update ClipboardSS on the other device to keep syncing.';
+
+/// User-facing text for peers that answered `400 {"status":"stale"}`.
+String clockOutOfSyncMessage(List<String> deviceNames) =>
+    'Clock out of sync with ${deviceNames.join(', ')}.';
+
+/// True when an HTTP answer is `400 {"status":"stale"}` (the peer's clock disagrees).
+bool isStaleResponse(int statusCode, String body) {
+  if (statusCode != 400) return false;
+  try {
+    final decoded = jsonDecode(body);
+    return decoded is Map && decoded['status'] == 'stale';
+  } on FormatException {
+    return false;
+  }
 }
 
 class PairedDevice {
