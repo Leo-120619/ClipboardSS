@@ -18,6 +18,8 @@ public enum PairingError: Error {
     case timedOut
     /// There is no pairing waiting for this device's confirmation.
     case noPendingPairing
+    /// This device's user cancelled while the confirm was in flight; nothing was stored.
+    case cancelled
 }
 
 public struct PairingSession: Sendable {

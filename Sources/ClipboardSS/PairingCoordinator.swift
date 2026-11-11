@@ -56,6 +56,7 @@ public final class PairingCoordinator: ObservableObject {
 
     /// A valid `/v1/pair/confirm` waiting for this device's user.
     private struct HeldConfirm {
+        let initiatorId: UUID
         let continuation: CheckedContinuation<HostDecision, Never>
         let timeout: Task<Void, Never>
     }
@@ -64,8 +65,8 @@ public final class PairingCoordinator: ObservableObject {
 
     // Hosting state. All pairing rules on the target side are enforced in
     // `handlePairStartRequest` / `handlePairRevealRequest` / `handlePairConfirmRequest`:
-    // - one pending initiator per code (the same deviceId may restart until it has
-    //   revealed; any other start is refused with 403);
+    // - a code hands out at most one target key: any second start (same deviceId
+    //   or not) ends the code with 403;
     // - reveal and confirm are refused (401) unless the code is active and unexpired;
     // - any failure (bad reveal or commitment, bad proof, cancel here, 60 s confirm
     //   timeout) ends the code and clears pending state; so do stop, expiry and start;
@@ -75,6 +76,9 @@ public final class PairingCoordinator: ObservableObject {
     private var pending: PendingInitiator?
     private var held: HeldConfirm?
     private var hostCodeExpiry: Date?
+    /// Bumped whenever hosting ends, so a handler resumed after an await can tell
+    /// whether the state it read is still current.
+    private var generation = 0
     private var expiryTask: Task<Void, Never>?
     private let now: () -> Date
 
@@ -85,6 +89,7 @@ public final class PairingCoordinator: ObservableObject {
 
     // Initiator state: the one device the user chose, waiting for the user to compare numbers.
     private struct PendingJoin {
+        let id = UUID()
         let peer: Peer
         let targetId: UUID
         let targetName: String
@@ -155,6 +160,7 @@ public final class PairingCoordinator: ObservableObject {
 
     /// Ends the hosted code and all pending state; a held confirm is answered 401.
     private func endHosting() {
+        generation += 1
         pending = nil
         hostCode = nil
         hostCodeExpiry = nil
@@ -162,6 +168,11 @@ public final class PairingCoordinator: ObservableObject {
         expiryTask = nil
         hostComparison = nil
         if let held { resolveHeld(held, with: .cancelled) }
+    }
+
+    private func endHostingIfCurrent(_ generation: Int) {
+        guard generation == self.generation else { return }
+        endHosting()
     }
 
     private func resolveHeld(_ held: HeldConfirm, with decision: HostDecision) {
@@ -191,8 +202,11 @@ public final class PairingCoordinator: ObservableObject {
             logToFile("PairingCoordinator: Rejecting pair start because this device is not hosting")
             throw PairingError.notHosting
         }
-        if let pending, pending.id != initiatorId || pending.pairKey != nil {
-            logToFile("PairingCoordinator: Rejecting pair start because another initiator is pending")
+        if pending != nil {
+            // This code already handed out a key; a second one would let a code holder
+            // re-roll the comparison number. The user must generate a new code.
+            logToFile("PairingCoordinator: Second pair start for this code; the code is now invalid")
+            endHosting()
             throw PairingError.initiatorConflict
         }
         guard let commitment = Data(base64Encoded: commitmentBase64), commitment.count == 32 else {
@@ -244,7 +258,14 @@ public final class PairingCoordinator: ObservableObject {
 
     public func handlePairConfirmRequest(initiatorId: UUID, proofBase64: String) async throws -> PairConfirmOutcome {
         logToFile("PairingCoordinator: handlePairConfirmRequest from \(initiatorId.uuidString)")
-        guard activeHostCode() != nil else { return .rejected }
+        guard activeHostCode() != nil else {
+            // The initiator that is being held cancelled (it sends a confirm with a bad proof).
+            if let held, held.initiatorId == initiatorId {
+                logToFile("PairingCoordinator: The other device cancelled pairing")
+                endHosting()
+            }
+            return .rejected
+        }
         // Every confirm spends the code. The comparison stays on screen until it is resolved.
         let pending = self.pending
         let localConfirmed = hostComparison?.localConfirmed == true
@@ -252,6 +273,7 @@ public final class PairingCoordinator: ObservableObject {
         hostCode = nil
         hostCodeExpiry = nil
         expiryTask?.cancel()
+        let generation = self.generation
 
         guard let pending, pending.id == initiatorId, let pairKey = pending.pairKey,
               let proof = Data(base64Encoded: proofBase64),
@@ -264,18 +286,20 @@ public final class PairingCoordinator: ObservableObject {
 
         if await pairedStore.devices.contains(where: { $0.id == initiatorId }) {
             logToFile("PairingCoordinator: Rejecting pair confirm for an already paired device")
-            endHosting()
+            endHostingIfCurrent(generation)
             return .alreadyPaired
         }
+        guard generation == self.generation else { return .rejected }
 
         if !localConfirmed {
-            let decision = await holdForLocalDecision()
+            let decision = await holdForLocalDecision(initiatorId: initiatorId)
             guard decision == .confirmed else {
                 logToFile("PairingCoordinator: Pairing was not confirmed on this device")
-                endHosting()
+                endHostingIfCurrent(generation)
                 return decision == .timedOut ? .timedOut : .rejected
             }
         }
+        guard generation == self.generation else { return .rejected }
         endHosting()
 
         try await pairedStore.addDevice(
@@ -287,7 +311,9 @@ public final class PairingCoordinator: ObservableObject {
         return .paired
     }
 
-    private func holdForLocalDecision() async -> HostDecision {
+    private func holdForLocalDecision(initiatorId: UUID) async -> HostDecision {
+        // This device's user may have pressed Confirm while the proof was being checked.
+        if hostComparison?.localConfirmed == true { return .confirmed }
         let holdNanoseconds = UInt64(max(confirmHoldTimeout, 0) * 1_000_000_000)
         return await withCheckedContinuation { continuation in
             let timeout = Task { [weak self] in
@@ -295,7 +321,7 @@ public final class PairingCoordinator: ObservableObject {
                 guard !Task.isCancelled, let self, let held = self.held else { return }
                 self.resolveHeld(held, with: .timedOut)
             }
-            held = HeldConfirm(continuation: continuation, timeout: timeout)
+            held = HeldConfirm(initiatorId: initiatorId, continuation: continuation, timeout: timeout)
         }
     }
 
@@ -424,8 +450,10 @@ public final class PairingCoordinator: ObservableObject {
         guard let join = pendingJoin else { throw PairingError.noPendingPairing }
         joinComparison?.localConfirmed = true
         defer {
-            pendingJoin = nil
-            joinComparison = nil
+            if pendingJoin?.id == join.id {
+                pendingJoin = nil
+                joinComparison = nil
+            }
         }
 
         let proof = PairingSession.generateConfirmationProof(pairKey: join.pairKey, initiatorId: identity.id, targetId: join.targetId)
@@ -437,6 +465,9 @@ public final class PairingCoordinator: ObservableObject {
             via: confirmTransport
         )
         logToFile("PairingCoordinator: /v1/pair/confirm HTTP Status: \(response.statusCode)")
+
+        // The user cancelled while waiting: store nothing, whatever the answer.
+        guard pendingJoin?.id == join.id else { throw PairingError.cancelled }
 
         switch response.statusCode {
         case 200:
@@ -451,10 +482,19 @@ public final class PairingCoordinator: ObservableObject {
         }
     }
 
-    /// This device's user cancelled (or the numbers differ). Nothing was stored.
-    public func cancelPairing() {
-        pendingJoin = nil
+    /// This device's user cancelled (or the numbers differ). Nothing is stored, even if a
+    /// confirm is in flight, and the target is told with a confirm carrying an invalid proof,
+    /// which it answers 401 after ending its code and comparison.
+    @discardableResult
+    public func cancelPairing() -> Task<Void, Never>? {
         joinComparison = nil
+        guard let join = pendingJoin else { return nil }
+        pendingJoin = nil
+        struct PairConfirmReq: Encodable { let deviceId: UUID; let proof: String }
+        let notice = PairConfirmReq(deviceId: identity.id, proof: Data(count: 32).base64EncodedString())
+        return Task {
+            _ = try? await post(notice, path: "/v1/pair/confirm", to: join.peer, via: transport)
+        }
     }
 
     private func post<Body: Encodable>(_ body: Body, path: String, to peer: Peer, via transport: PeerTransport) async throws -> HTTPResponse {

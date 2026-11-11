@@ -65,40 +65,43 @@ struct PairingCoordinatorTests {
         #expect(try await harness.pairedStore.getKey(for: harness.initiatorA) == nil)
     }
 
-    @Test("a second initiator is refused while one is pending")
-    func secondInitiatorWhilePendingIsRejected() async throws {
+    @Test("a second start from another device ends the code")
+    func secondInitiatorWhilePendingEndsCode() async throws {
         let harness = try PairingHarness()
         let code = harness.coordinator.startHosting()
         let first = try await harness.start(initiatorId: harness.initiatorA, code: code)
 
         await #expect(throws: PairingError.self) {
-            _ = try await harness.start(initiatorId: harness.initiatorB, code: code)
+            _ = try await harness.startWithoutReveal(initiatorId: harness.initiatorB)
         }
+        #expect(harness.coordinator.hostCode == nil)
+        #expect(harness.coordinator.hostComparison == nil)
 
-        // The refused start did not displace the pending initiator.
         harness.coordinator.confirmHostedPairing()
         let outcome = try await harness.coordinator.handlePairConfirmRequest(
             initiatorId: harness.initiatorA,
             proofBase64: first.proof.base64EncodedString()
         )
-        #expect(outcome == .paired)
-        #expect(try await harness.pairedStore.getKey(for: harness.initiatorA) == first.pairKey)
+        #expect(outcome == .rejected)
+        #expect(try await harness.pairedStore.getKey(for: harness.initiatorA) == nil)
     }
 
-    @Test("the same initiator may restart while pending")
-    func secondStartFromSameInitiatorReplacesPending() async throws {
+    @Test("a code hands out one target key: a second start from the same device ends it")
+    func secondStartFromSameInitiatorEndsCode() async throws {
         let harness = try PairingHarness()
-        let code = harness.coordinator.startHosting()
-        _ = try await harness.startWithoutReveal(initiatorId: harness.initiatorA)
-        let second = try await harness.start(initiatorId: harness.initiatorA, code: code)
+        _ = harness.coordinator.startHosting()
+        let started = try await harness.startWithoutReveal(initiatorId: harness.initiatorA)
 
-        harness.coordinator.confirmHostedPairing()
-        let outcome = try await harness.coordinator.handlePairConfirmRequest(
+        await #expect(throws: PairingError.self) {
+            _ = try await harness.startWithoutReveal(initiatorId: harness.initiatorA)
+        }
+        #expect(harness.coordinator.hostCode == nil)
+        let reveal = harness.coordinator.handlePairRevealRequest(
             initiatorId: harness.initiatorA,
-            proofBase64: second.proof.base64EncodedString()
+            initiatorPubKeyBase64: started.session.ephemeralPublicKey.base64EncodedString(),
+            saltBase64: started.salt.base64EncodedString()
         )
-        #expect(outcome == .paired)
-        #expect(try await harness.pairedStore.getKey(for: harness.initiatorA) == second.pairKey)
+        #expect(reveal == .rejected)
     }
 
     @Test("a confirm for an already paired deviceId is rejected and keeps the stored key")
@@ -220,6 +223,44 @@ struct PairingCoordinatorTests {
         #expect(target.coordinator.hostCode == nil)
         #expect(target.coordinator.hostComparison == nil)
         #expect(initiator.coordinator.joinComparison == nil)
+    }
+
+    @Test("cancelling on the initiator after confirming stores nothing on either side")
+    func initiatorCancelAfterConfirmStoresNothing() async throws {
+        let target = try PairingHarness()
+        let initiator = try PairingHarness(transport: LoopbackPairingTransport(target: target.coordinator))
+        let code = target.coordinator.startHosting()
+        let peer = Peer(id: target.identity.id, name: target.identity.name, host: "10.0.0.2", port: 51888)
+
+        _ = try await initiator.coordinator.startPairing(with: peer, code: code)
+        let confirming = Task { try await initiator.coordinator.confirmPairing() }
+        try await target.waitUntilConfirmIsHeld()
+        await initiator.coordinator.cancelPairing()?.value
+        target.coordinator.confirmHostedPairing()
+
+        await #expect(throws: PairingError.cancelled) { try await confirming.value }
+        #expect(await initiator.pairedStore.devices.isEmpty)
+        #expect(await target.pairedStore.devices.isEmpty)
+        #expect(target.coordinator.hostCode == nil)
+        #expect(target.coordinator.hostComparison == nil)
+        #expect(initiator.coordinator.joinComparison == nil)
+    }
+
+    @Test("the target confirms first, then the initiator: both store the key")
+    func targetConfirmsFirstThenInitiatorConfirms() async throws {
+        let target = try PairingHarness()
+        let initiator = try PairingHarness(transport: LoopbackPairingTransport(target: target.coordinator))
+        let code = target.coordinator.startHosting()
+        let peer = Peer(id: target.identity.id, name: target.identity.name, host: "10.0.0.2", port: 51888)
+
+        _ = try await initiator.coordinator.startPairing(with: peer, code: code)
+        target.coordinator.confirmHostedPairing()
+        #expect(target.coordinator.hostComparison?.localConfirmed == true)
+        try await initiator.coordinator.confirmPairing()
+
+        let initiatorKey = try #require(try await initiator.pairedStore.getKey(for: target.identity.id))
+        #expect(try await target.pairedStore.getKey(for: initiator.identity.id) == initiatorKey)
+        #expect(!target.coordinator.isHoldingConfirm)
     }
 
     @Test("the initiator only contacts the device the user selected")

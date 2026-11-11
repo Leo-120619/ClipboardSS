@@ -55,8 +55,9 @@ until both users have confirmed.
    ```
 2. **Target -> Initiator**: `200`
    `{"deviceId": "<lowercase uuid>", "deviceName": "<string>", "ephemeralPublicKey": "<base64>"}`
-   (X25519 public key). `403` when no code is active, another initiator is pending, or the
-   commitment is not 32 bytes. The same deviceId may restart until it has revealed.
+   (X25519 public key). `403` when no code is active or the commitment is not 32 bytes.
+   A code hands out **at most one** target key: any second start for it (same deviceId or
+   not) ends the code with `403`, so a code holder cannot re-roll the comparison number.
 3. **Initiator -> Target**: `POST /v1/pair/reveal`
    `{"deviceId": "<lowercase uuid>", "ephemeralPublicKey": "<base64>", "salt": "<base64>"}`
    → `200 {"status":"ok"}` · `401` no active code or no matching pending initiator ·
@@ -77,6 +78,9 @@ until both users have confirmed.
    - `401`: no active code, wrong deviceId or proof, or the target's user cancelled.
    - `408 {"status":"timeout"}`: the target's user did not confirm within 60 s.
    - `409 {"status":"alreadyPaired"}`: the target already has this deviceId paired.
+   **Cancel on the initiator** (before or after its own Confirm) sends this request with an
+   invalid proof (32 zero bytes); the target ends its code and comparison (and answers a held
+   confirm from that deviceId with `401`), and the initiator stores nothing whatever it hears.
    Clients use a 75 s timeout for this request (10 s for the others). The servers' 15 s
    request deadline covers only receiving the request, not this hold.
 

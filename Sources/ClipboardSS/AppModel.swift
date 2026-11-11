@@ -480,6 +480,8 @@ final class AppModel: ObservableObject {
                 try await pairingCoordinator.confirmPairing()
                 await refreshPairedDevices()
                 await refreshDeviceLiveness()
+            } catch PairingError.cancelled {
+                // The user cancelled here; nothing to report.
             } catch {
                 lastError = Self.joinErrorMessage(error)
             }
