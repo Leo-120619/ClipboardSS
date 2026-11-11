@@ -138,6 +138,61 @@ struct AppModelShareTests {
         #expect(!FileManager.default.fileExists(atPath: second.path))
     }
 
+    @Test("quitting after some files of a share were staged keeps the unsent ones for the next launch")
+    func partlySentShareSurvivesRestart() async throws {
+        let transport = CountingTransport(delay: .seconds(30))
+        let fixture = try await ShareFixture(transport: transport)
+        let drop = try fixture.makeDrop(names: ["a.png", "b.png", "c.png"])
+        await fixture.goOnline([fixture.deviceId])
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        // a.png is staged and in flight; b.png and c.png wait in the queue. The app quits now.
+        #expect(!FileManager.default.fileExists(atPath: drop.appendingPathComponent("a.png").path))
+
+        let relaunched = ShareInbox.pendingDrops(in: fixture.outbox)
+        #expect(relaunched.map { AppModel.shareKey($0.directory) } == [AppModel.shareKey(drop)])
+        #expect(relaunched.first?.fileURLs.map(\.lastPathComponent) == ["b.png", "c.png"])
+
+        let restartTransport = CountingTransport()
+        let restarted = try await ShareFixture(transport: restartTransport)
+        await restarted.goOnline([restarted.deviceId])
+        restarted.model.enqueueShares(relaunched)
+        #expect(restarted.model.transfers.map(\.fileName).sorted() == ["b.png", "c.png"])
+        try await restarted.waitForTransfersToSettle()
+        #expect(restartTransport.offeredPaths.count == 2)
+        #expect(!FileManager.default.fileExists(atPath: drop.path))
+    }
+
+    @Test("a cancelled queued file of a share is not re-sent after a restart")
+    func cancelledQueuedShareFileIsDroppedFromManifest() async throws {
+        let transport = CountingTransport(delay: .seconds(30))
+        let fixture = try await ShareFixture(transport: transport)
+        let drop = try fixture.makeDrop(names: ["a.png", "b.png", "c.png"])
+        await fixture.goOnline([fixture.deviceId])
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        let cancelled = try #require(fixture.model.transfers.first { $0.fileName == "b.png" })
+
+        fixture.model.cancelTransfer(id: cancelled.id)
+
+        let relaunched = ShareInbox.pendingDrops(in: fixture.outbox)
+        #expect(relaunched.map { AppModel.shareKey($0.directory) } == [AppModel.shareKey(drop)])
+        #expect(relaunched.first?.fileURLs.map(\.lastPathComponent) == ["c.png"])
+    }
+
+    @Test("cancelling the last queued file of a share removes the drop instead of leaving an empty manifest")
+    func cancellingLastQueuedShareFileRemovesDrop() async throws {
+        let transport = CountingTransport(delay: .seconds(30))
+        let fixture = try await ShareFixture(transport: transport)
+        let drop = try fixture.makeDrop(names: ["a.png", "b.png"])
+        await fixture.goOnline([fixture.deviceId])
+        fixture.model.enqueueShares(ShareInbox.pendingDrops(in: fixture.outbox))
+        let cancelled = try #require(fixture.model.transfers.first { $0.fileName == "b.png" })
+
+        fixture.model.cancelTransfer(id: cancelled.id)
+
+        #expect(!FileManager.default.fileExists(atPath: drop.path))
+        #expect(ShareInbox.pendingDrops(in: fixture.outbox).isEmpty)
+    }
+
     @Test("a picked device that is unreachable never sends the drop to another device")
     func failedPickDoesNotAutoSendElsewhere() async throws {
         let fixture = try await ShareFixture(deviceCount: 2)

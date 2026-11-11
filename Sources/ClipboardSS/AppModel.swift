@@ -701,7 +701,8 @@ final class AppModel: ObservableObject {
     /// An outbox drop with files queued: how many are not yet handed off, and whether the
     /// user picked the device.
     private struct ShareInFlight {
-        let drop: ShareInbox.PendingDrop
+        /// The drop as its manifest now reads: only the files still waiting in the queue.
+        var drop: ShareInbox.PendingDrop
         var remaining: Int
         let pickedByUser: Bool
     }
@@ -741,7 +742,10 @@ final class AppModel: ObservableObject {
         let uiId = job.uiId
         guard let token = sendTokens[uiId], !token.isCancelled else {
             completeSend(uiId: uiId, status: .cancelled)
-            if let key = job.shareKey { shareFileHandedOff(key) }
+            if let key = job.shareKey {
+                retainUnsentShareFiles(key, leaving: job.url)
+                shareFileHandedOff(key)
+            }
             return false
         }
         guard !deviceNeedsUpdate(deviceId), let peer = resolvePeer(for: deviceId) else {
@@ -751,7 +755,9 @@ final class AppModel: ObservableObject {
         var url = job.url
         if let key = job.shareKey {
             defer { shareFileHandedOff(key) }
-            guard let staged = stageSharedFile(job.url) else {
+            let staged = stageSharedFile(job.url)
+            retainUnsentShareFiles(key, leaving: job.url)
+            guard let staged else {
                 completeSend(uiId: uiId, status: .failed(FileSendError.fileUnreadable.localizedDescription))
                 return false
             }
@@ -816,6 +822,17 @@ final class AppModel: ObservableObject {
         if inFlight.pickedByUser { shareTargetHolds[key] = deviceId }
     }
 
+    /// A file of a queued drop left the queue (staged or cancelled): rewrites the drop's
+    /// manifest to list only its files still waiting, so a relaunch re-sends just those. After
+    /// the last file the folder is removed by `shareFileHandedOff`, so no empty manifest is written.
+    private func retainUnsentShareFiles(_ key: String, leaving url: URL) {
+        guard var inFlight = sharesInFlight[key] else { return }
+        let unsent = inFlight.drop.fileURLs.filter { $0 != url }
+        guard !unsent.isEmpty, unsent.count != inFlight.drop.fileURLs.count else { return }
+        inFlight.drop = ShareInbox.retain(unsent, in: inFlight.drop)
+        sharesInFlight[key] = inFlight
+    }
+
     /// One file of a queued drop left the queue; the drop leaves the outbox after its last.
     private func shareFileHandedOff(_ key: String) {
         guard var inFlight = sharesInFlight[key] else { return }
@@ -837,7 +854,10 @@ final class AppModel: ObservableObject {
             sendQueues[deviceId]?.remove(at: index)
             if sendQueues[deviceId]?.isEmpty == true { sendQueues[deviceId] = nil }
             completeSend(uiId: id, status: .cancelled)
-            if let key = job.shareKey { shareFileHandedOff(key) }
+            if let key = job.shareKey {
+                retainUnsentShareFiles(key, leaving: job.url)
+                shareFileHandedOff(key)
+            }
             return
         }
         sendTokens[id]?.cancel()
