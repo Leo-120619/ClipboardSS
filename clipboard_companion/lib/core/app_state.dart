@@ -1056,14 +1056,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await fileSender.sendFile(
+      final outcome = await fileSender.sendFile(
         file: file,
         peer: peer,
         mimeType: _mimeType(file.path),
         onProgress: (p) => _updateSendProgress(uiId, p),
         isCancelled: () => token.cancelled,
       );
-      _completeSend(uiId, TransferStatus.completed);
+      _completeSend(
+        uiId,
+        outcome == FileSendOutcome.delivered
+            ? TransferStatus.completed
+            : TransferStatus.unconfirmed,
+      );
       return true;
     } on FileSendCancelledException {
       _completeSend(uiId, TransferStatus.cancelled);

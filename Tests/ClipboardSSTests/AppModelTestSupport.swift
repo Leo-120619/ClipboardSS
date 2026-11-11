@@ -88,7 +88,7 @@ private final class TestPairKeyStorage: PairKeyStorage, @unchecked Sendable {
 }
 
 private struct TestPeerTransport: PeerTransport {
-    func send(_ data: Data, to peer: Peer) async throws -> Data {
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         Data()
     }
 }

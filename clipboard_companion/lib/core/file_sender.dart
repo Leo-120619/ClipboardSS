@@ -22,6 +22,11 @@ class FileSendException implements Exception {
 
 class FileSendCancelledException implements Exception {}
 
+/// A request got no answer within its timeout.
+class _RequestTimeoutException extends FileSendException {
+  _RequestTimeoutException(super.message);
+}
+
 /// The peer runs another wire protocol version (advertised, or answered 426).
 class FileSendNeedsUpdateException extends FileSendException {
   FileSendNeedsUpdateException() : super(updateOtherDeviceMessage);
@@ -40,24 +45,41 @@ class FileSendClockOutOfSyncException extends FileSendException {
   String toString() => message;
 }
 
+/// How a send ended when it did not throw.
+enum FileSendOutcome {
+  /// The receiver confirmed it saved the file.
+  delivered,
+
+  /// Every chunk was delivered but `/v1/file/finish` timed out. The receiver
+  /// may still have saved the file, so this is not a failure, and no cancel is
+  /// sent.
+  unconfirmed,
+}
+
 /// Sends a single file to one paired peer using the chunked protocol. Streams the file in
 /// 4 MiB slices via [RandomAccessFile] — never loads the whole file. Two passes: a
 /// streaming hash pass, then offer -> chunks -> finish. Reports monotonic progress and
-/// honours cancellation, best-effort issuing `/v1/file/cancel` on any post-offer failure.
+/// honours cancellation, best-effort issuing `/v1/file/cancel` on any post-offer failure
+/// except a finish timeout (see [FileSendOutcome.unconfirmed]).
 class FileSender {
   final DeviceIdentity identity;
   final PairedDeviceStore pairedStore;
   final http.Client _client;
   final Duration requestTimeout;
 
+  /// Timeout for `/v1/file/finish`, by file size.
+  final Duration Function(int fileSize) finishTimeout;
+
   FileSender({
     required this.identity,
     required this.pairedStore,
     http.Client? client,
     this.requestTimeout = const Duration(seconds: 10),
-  }) : _client = client ?? http.Client();
+    Duration Function(int fileSize)? finishTimeout,
+  }) : _client = client ?? http.Client(),
+       finishTimeout = finishTimeout ?? FileTransferConstants.finishTimeout;
 
-  Future<void> sendFile({
+  Future<FileSendOutcome> sendFile({
     required File file,
     required Peer peer,
     String mimeType = 'application/octet-stream',
@@ -145,13 +167,21 @@ class FileSender {
         peer,
         key,
       );
-      await _post(
-        peer,
-        '/v1/file/finish',
-        body: utf8.encode(jsonEncode(finishEnvelope.toJson())),
-        contentType: 'application/json',
-      );
+      // The receiver hashes the whole file before it answers.
+      try {
+        await _post(
+          peer,
+          '/v1/file/finish',
+          body: utf8.encode(jsonEncode(finishEnvelope.toJson())),
+          contentType: 'application/json',
+          timeout: finishTimeout(fileSize),
+        );
+      } on _RequestTimeoutException {
+        // The receiver may be finalizing: a cancel could delete a saved file.
+        return FileSendOutcome.unconfirmed;
+      }
       onProgress?.call(1.0);
+      return FileSendOutcome.delivered;
     } catch (e) {
       await _bestEffortCancel(peer, transferId, key);
       rethrow;
@@ -200,6 +230,7 @@ class FileSender {
     required List<int> body,
     required String contentType,
     Map<String, String> headers = const {},
+    Duration? timeout,
   }) async {
     final uri = Uri(
       scheme: 'http',
@@ -215,9 +246,9 @@ class FileSender {
             headers: {'Content-Type': contentType, ...headers},
             body: body is Uint8List ? body : Uint8List.fromList(body),
           )
-          .timeout(requestTimeout);
+          .timeout(timeout ?? requestTimeout);
     } on TimeoutException {
-      throw FileSendException('$path timed out');
+      throw _RequestTimeoutException('$path timed out');
     }
     if (response.statusCode == 426) throw FileSendNeedsUpdateException();
     if (isStaleResponse(response.statusCode, response.body)) {

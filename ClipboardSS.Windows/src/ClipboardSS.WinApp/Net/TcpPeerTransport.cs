@@ -5,6 +5,7 @@ using ClipboardSS.Core.Sync;
 
 namespace ClipboardSS.App.Net;
 
+/// <param name="timeout">Default per-request limit; a request may pass its own.</param>
 public sealed class TcpPeerTransport(TimeSpan? timeout = null) : IPeerTransport
 {
     private readonly TimeSpan _timeout = timeout ?? TimeSpan.FromSeconds(10);
@@ -12,10 +13,11 @@ public sealed class TcpPeerTransport(TimeSpan? timeout = null) : IPeerTransport
     public async Task<byte[]> SendAsync(
         byte[] data,
         Peer peer,
+        TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(_timeout);
+        timeoutSource.CancelAfter(timeout ?? _timeout);
         using var client = new TcpClient { NoDelay = true };
         try
         {

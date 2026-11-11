@@ -19,6 +19,15 @@ class FileTransferConstants {
 
   /// How long a cancelled transfer id is remembered (chunks for it get 410).
   static const Duration cancelledRetention = Duration(seconds: 600);
+
+  /// How long a sender waits for `/v1/file/finish`, which the receiver answers
+  /// only after hashing the whole file: 1 s per 20 MiB, at least 30 s, at most
+  /// 600 s (4 GiB -> 205 s).
+  static Duration finishTimeout(int fileSize) {
+    const perSecond = 20 * 1024 * 1024;
+    final seconds = (fileSize < 0 ? 0 : fileSize + perSecond - 1) ~/ perSecond;
+    return Duration(seconds: seconds.clamp(30, 600));
+  }
 }
 
 String _iso8601(DateTime date) =>

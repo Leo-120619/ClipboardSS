@@ -38,7 +38,22 @@ public enum ProtocolMismatch {
 }
 
 public protocol PeerTransport: Sendable {
-    func send(_ data: Data, to peer: Peer) async throws -> Data
+    /// Sends one HTTP request and returns the raw response.
+    /// - Parameter timeout: limit for this request, in seconds. Requests the peer answers only
+    ///   after slow work (a held pairing confirm, a file finish that hashes the file) pass a
+    ///   longer one.
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data
+}
+
+public enum PeerTransportDefaults {
+    /// Per-request limit for requests the peer answers straight away.
+    public static let requestTimeout: TimeInterval = 10
+}
+
+public extension PeerTransport {
+    func send(_ data: Data, to peer: Peer) async throws -> Data {
+        try await send(data, to: peer, timeout: PeerTransportDefaults.requestTimeout)
+    }
 }
 
 public enum SendError: Error {

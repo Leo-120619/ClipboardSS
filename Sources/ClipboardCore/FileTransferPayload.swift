@@ -21,6 +21,14 @@ public enum FileTransferConstants {
     public static let transferIdHeader = "X-Transfer-Id"
     /// HTTP header carrying the chunk index on chunk requests (read lowercased).
     public static let chunkIndexHeader = "X-Chunk-Index"
+
+    /// How long a sender waits for `/v1/file/finish`, which the receiver answers only after
+    /// hashing the whole file: 1 s per 20 MiB, at least 30 s, at most 600 s (4 GiB -> 205 s).
+    public static func finishTimeout(fileSize: Int64) -> TimeInterval {
+        let perSecond: Int64 = 20 * 1024 * 1024
+        let seconds = (max(0, fileSize) + perSecond - 1) / perSecond
+        return TimeInterval(min(600, max(30, seconds)))
+    }
 }
 
 /// Inner JSON of `POST /v1/file/offer` (sealed in a `ClipEnvelope`).

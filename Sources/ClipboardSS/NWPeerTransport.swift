@@ -3,13 +3,7 @@ import Network
 import ClipboardCore
 
 public final class NWPeerTransport: PeerTransport, @unchecked Sendable {
-    private let timeout: TimeInterval
-
-    /// - Parameter timeout: per-request limit; `/v1/pair/confirm` needs a longer one
-    ///   (`PairingCoordinator.confirmRequestTimeout`) because the target may hold it.
-    public init(timeout: TimeInterval = 10) {
-        self.timeout = timeout
-    }
+    public init() {}
 
     static func endpoint(for peer: Peer) -> NWEndpoint {
         if peer.port == 0 {
@@ -27,9 +21,8 @@ public final class NWPeerTransport: PeerTransport, @unchecked Sendable {
         return .hostPort(host: NWEndpoint.Host(peer.host), port: port)
     }
     
-    public func send(_ data: Data, to peer: Peer) async throws -> Data {
+    public func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         let ep = Self.endpoint(for: peer)
-        let timeout = self.timeout
         logToFile("NWPeerTransport: send initiated to peer \(peer.name), resolved endpoint: \(ep)")
         
         if peer.port != 0, NWEndpoint.Port(rawValue: peer.port) == nil {

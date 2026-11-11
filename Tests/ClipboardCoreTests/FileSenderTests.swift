@@ -94,6 +94,42 @@ struct FileSenderTests {
         #expect(transport.requests.map(\.path).contains("/v1/file/cancel"))
     }
 
+    @Test("finish waits for the receiver's hash: its timeout scales with file size (4 GB -> 205 s)")
+    func finishUsesExtendedTimeoutForLargeFile() async throws {
+        #expect(FileTransferConstants.finishTimeout(fileSize: 4 * 1024 * 1024 * 1024) == 205)
+        #expect(FileTransferConstants.finishTimeout(fileSize: 0) == 30)
+        #expect(FileTransferConstants.finishTimeout(fileSize: 30 * 20 * 1024 * 1024 + 1) == 31)
+        #expect(FileTransferConstants.finishTimeout(fileSize: 1 << 40) == 600)
+
+        let transport = RecordingTransport()
+        let sender = try await makeSender(peerId: peer.id, key: SymmetricKey(size: .bits256), transport: transport)
+        let size = 9 * 1024 * 1024
+        try await sender.sendFile(at: try makeFile(bytes: size), to: peer)
+
+        #expect(transport.timeouts(for: "/v1/file/finish") == [FileTransferConstants.finishTimeout(fileSize: Int64(size))])
+        #expect(transport.timeouts(for: "/v1/file/offer") == [PeerTransportDefaults.requestTimeout])
+        #expect(transport.timeouts(for: "/v1/file/chunk") == Array(repeating: PeerTransportDefaults.requestTimeout, count: 3))
+    }
+
+    @Test("a finish that times out is reported unconfirmed and sends no cancel (Review Focus 4)")
+    func senderDoesNotCancelAfterFinishTimeout() async throws {
+        let transport = RecordingTransport()
+        transport.errorForPath["/v1/file/finish"] = URLError(.timedOut)
+        let sender = try await makeSender(peerId: peer.id, key: SymmetricKey(size: .bits256), transport: transport)
+
+        let outcome = try await sender.sendFile(at: try makeFile(bytes: 1024), to: peer)
+
+        #expect(outcome == .unconfirmed)
+        #expect(transport.requests.map(\.path) == ["/v1/file/offer", "/v1/file/chunk", "/v1/file/finish"])
+    }
+
+    @Test("a confirmed finish is reported delivered")
+    func confirmedFinishIsDelivered() async throws {
+        let transport = RecordingTransport()
+        let sender = try await makeSender(peerId: peer.id, key: SymmetricKey(size: .bits256), transport: transport)
+        #expect(try await sender.sendFile(at: try makeFile(bytes: 16), to: peer) == .delivered)
+    }
+
     @Test("a non-200 offer aborts before any chunk or cancel")
     func nonOKOfferAborts() async throws {
         let transport = RecordingTransport()

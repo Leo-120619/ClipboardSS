@@ -377,6 +377,14 @@ authenticate a chunk body before treating a repeated index as an idempotent dupl
    `401` unpaired, paused or AEAD failure · `404` unknown transferId **or a session owned by
    a different device** (`envelope.sourceDeviceId` must equal the offer's). Both 422s
    destroy the session and its temp file.
+   The receiver answers only after hashing the whole file, so senders wait
+   `min(600, max(30, ceil(fileSize / 20 MiB)))` seconds for it (4 GiB → 205 s; every other
+   request: 10 s). A finish that times out is reported **unconfirmed**, not failed, and the
+   sender sends no cancel: the receiver may be saving the file. While a finish is hashing,
+   idle GC keeps the session alive. Dart, which hashes without holding a lock, answers a second
+   finish for the same transfer `409 {"status":"finishing"}` and a finish whose session was
+   cancelled mid-hash `410 {"status":"cancelled"}`; Swift and C# hash under the transfer lock, so
+   a second finish sees the transfer already gone (`404`).
 
 4. **`POST /v1/file/cancel`** — envelope-sealed `{"transferId": "...", "sentAt": "..."}`;
    idempotent `200`. Like every envelope endpoint, also `400 stale` / `409 replayed`.
@@ -397,7 +405,7 @@ authenticate a chunk body before treating a repeated index as an idempotent dupl
   offer setup) closes the file handle and deletes the `.part`.
 - Sender streams the file in 4 MiB slices (two passes: streaming hash, then
   offer → chunks → finish) and aborts the whole transfer on any non-200, best-effort
-  issuing `/v1/file/cancel`.
+  issuing `/v1/file/cancel` (except after a finish timeout, see above).
 
 ### File Transfer Test Vectors (pinned, cross-platform)
 

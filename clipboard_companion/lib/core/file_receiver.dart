@@ -55,6 +55,10 @@ class _Session {
   int bytesWritten = 0;
   DateTime lastActivity;
 
+  /// A finish is hashing this session: a second finish gets 409, and GC
+  /// keeps it alive however long the hash takes.
+  bool finishing = false;
+
   /// Tail of this session's chunk writes. Every write runs after the previous
   /// one settles: the writes share [raf]'s file position.
   Future<void> writeChain = Future<void>.value();
@@ -91,6 +95,9 @@ class FileReceiver {
   final Future<void> Function(RandomAccessFile raf, int offset, List<int> bytes)
   chunkWriter;
 
+  /// Hashes a finished temp file off the main isolate (a seam for tests).
+  final Future<String> Function(String path) fileHasher;
+
   final _sessions = <String, _Session>{};
 
   /// Offers past validation whose session is still being set up: holding the id
@@ -114,12 +121,17 @@ class FileReceiver {
     Future<int> Function()? freeSpaceProvider,
     Future<void> Function(RandomAccessFile raf, int offset, List<int> bytes)?
     chunkWriter,
+    Future<String> Function(String path)? fileHasher,
   }) : localDeviceId = canonicalDeviceId(localDeviceId),
        now = now ?? DateTime.now,
        replayGuard = replayGuard ?? ReplayGuard(),
        freeSpaceProvider =
            freeSpaceProvider ?? (() => volumeFreeSpace(transfersDirectory)),
-       chunkWriter = chunkWriter ?? _defaultChunkWriter;
+       chunkWriter = chunkWriter ?? _defaultChunkWriter,
+       fileHasher = fileHasher ?? _defaultFileHasher;
+
+  static Future<String> _defaultFileHasher(String path) =>
+      Isolate.run(() => ContentHasher.fileHashOfFile(File(path)));
 
   static Future<void> _defaultChunkWriter(
     RandomAccessFile raf,
@@ -389,21 +401,26 @@ class FileReceiver {
     if (session.received.length != session.offer.chunkCount) {
       return FileTransferResponse(409, {'status': 'incomplete'});
     }
+    if (session.finishing) {
+      return FileTransferResponse(409, {'status': 'finishing'});
+    }
+    session.finishing = true;
+    session.lastActivity = now();
 
     // A duplicate chunk may still hold the handle.
     await session.writeChain;
     if (!_isLive(finish.transferId, session)) {
-      return FileTransferResponse(404, {'status': 'unknown'});
+      return _goneDuringFinish(finish.transferId, session);
     }
 
     final String computed;
     try {
       await session.raf.close();
-      final tempPath = session.tempFile.path;
-      computed = await Isolate.run(
-        () => ContentHasher.fileHashOfFile(File(tempPath)),
-      );
+      computed = await fileHasher(session.tempFile.path);
     } catch (_) {
+      if (!_isLive(finish.transferId, session)) {
+        return _goneDuringFinish(finish.transferId, session);
+      }
       await _destroy(finish.transferId, session);
       _emit(
         FileTransferReceiveEvent(
@@ -413,6 +430,10 @@ class FileReceiver {
         ),
       );
       return FileTransferResponse(422, {'status': 'error'});
+    }
+    // A cancel may have torn the session down while it was hashed.
+    if (!_isLive(finish.transferId, session)) {
+      return _goneDuringFinish(finish.transferId, session);
     }
     if (computed != session.offer.fileHash) {
       await _destroy(finish.transferId, session);
@@ -426,9 +447,10 @@ class FileReceiver {
       return FileTransferResponse(422, {'status': 'hashMismatch'});
     }
 
+    // Unregistered before the move: a cancel arriving now no longer applies.
+    _sessions.remove(finish.transferId);
     try {
       final destination = await _finalize(session);
-      _sessions.remove(finish.transferId);
       _emit(
         FileTransferReceiveEvent(
           'completed',
@@ -503,6 +525,10 @@ class FileReceiver {
   /// and forgets cancelled ids older than the cancelled-id retention.
   Future<void> garbageCollect() async {
     final cutoff = now().subtract(idleTimeout);
+    for (final session in _sessions.values) {
+      // Still alive however long its hash takes.
+      if (session.finishing) session.lastActivity = now();
+    }
     final stale = _sessions.entries
         .where((e) => e.value.lastActivity.isBefore(cutoff))
         .toList();
@@ -524,6 +550,21 @@ class FileReceiver {
 
   bool _isLive(String transferId, _Session session) =>
       identical(_sessions[transferId], session);
+
+  /// A finish whose session was cancelled mid-hash: the cancel already
+  /// reported it, so only the temp file (which a reader may have kept the
+  /// cancel from deleting) is left to clean up.
+  Future<FileTransferResponse> _goneDuringFinish(
+    String transferId,
+    _Session session,
+  ) async {
+    try {
+      if (await session.tempFile.exists()) await session.tempFile.delete();
+    } catch (_) {}
+    return _cancelled.containsKey(transferId)
+        ? FileTransferResponse(410, {'status': 'cancelled'})
+        : FileTransferResponse(404, {'status': 'unknown'});
+  }
 
   /// Runs [write] after every earlier write of [session] has settled.
   Future<_WriteOutcome> _serializedWrite(

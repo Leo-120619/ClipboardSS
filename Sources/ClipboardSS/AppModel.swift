@@ -698,14 +698,15 @@ final class AppModel: ObservableObject {
         let mime = Self.mimeType(for: url)
         Task.detached { [weak self] in
             do {
-                try await sender.sendFile(
+                let outcome = try await sender.sendFile(
                     at: url,
                     to: peer,
                     mimeType: mime,
                     progress: { p in Task { @MainActor in self?.setTransferProgress(uiId: uiId, progress: p) } },
                     isCancelled: { token.isCancelled }
                 )
-                await MainActor.run { self?.completeSend(uiId: uiId, status: .completed) }
+                let status: FileTransferState.Status = outcome == .delivered ? .completed : .unconfirmed
+                await MainActor.run { self?.completeSend(uiId: uiId, status: status) }
             } catch is CancellationError {
                 await MainActor.run { self?.completeSend(uiId: uiId, status: .cancelled) }
             } catch let error as FileSendError where error == .cancelled {

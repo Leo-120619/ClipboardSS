@@ -2058,6 +2058,14 @@ class _TransferRow extends StatelessWidget {
           );
         }
         return const Icon(Icons.check_circle, color: Colors.green, size: 20);
+      case TransferStatus.unconfirmed:
+        return Tooltip(
+          message: unconfirmedSendMessage,
+          child: Text(
+            'Sent, not confirmed',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        );
       case TransferStatus.failed:
         return Tooltip(
           message: transfer.reason ?? 'Failed',

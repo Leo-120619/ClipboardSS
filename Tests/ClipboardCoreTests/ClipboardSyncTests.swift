@@ -407,7 +407,7 @@ private final class FakePeerTransport: PeerTransport, @unchecked Sendable {
         HTTPResponse(statusCode: 200, headers: [:], body: Data("OK".utf8))
     )
     
-    func send(_ data: Data, to peer: Peer) async throws -> Data {
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         if shouldFail { throw URLError(.cannotConnectToHost) }
         sentRequests.append((data, peer))
         return responseData

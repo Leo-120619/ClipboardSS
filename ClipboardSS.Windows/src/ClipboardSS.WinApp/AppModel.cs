@@ -751,19 +751,26 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 
+    /// <summary>
+    /// Receiver events arrive on server threads, which are still answering the transfer's request:
+    /// nothing here may block them, so work is queued to the UI thread and dialogs open later.
+    /// </summary>
     private void UpdateTransfer(FileTransferProgress progress)
     {
         void Apply()
         {
             var index = _transfers.FindIndex(item => item.TransferId == progress.TransferId);
+            // A late progress event must not reopen a finished row.
+            if (index >= 0 && progress.Status == FileTransferStatus.Active && _transfers[index].Status != FileTransferStatus.Active) return;
             if (index >= 0) _transfers[index] = progress; else _transfers.Insert(0, progress);
             // Newest first; keep only the most recent MaxTransfers rows.
             if (_transfers.Count > MaxTransfers) _transfers.RemoveRange(MaxTransfers, _transfers.Count - MaxTransfers);
             OnPropertyChanged(nameof(Transfers)); StateChanged?.Invoke(this, EventArgs.Empty);
+            // Modal dialogs run after this returns, never inside the caller's stack.
             if (progress.Direction == FileTransferDirection.Receiving && progress.Status == FileTransferStatus.Completed)
-                ProcessCompletedReceive(progress);
+                Application.Current.Dispatcher.BeginInvoke(() => ProcessCompletedReceive(progress));
         }
-        if (Application.Current.Dispatcher.CheckAccess()) Apply(); else Application.Current.Dispatcher.Invoke(Apply);
+        if (Application.Current.Dispatcher.CheckAccess()) Apply(); else Application.Current.Dispatcher.BeginInvoke(Apply);
     }
 
     private void ProcessCompletedReceive(FileTransferProgress progress)

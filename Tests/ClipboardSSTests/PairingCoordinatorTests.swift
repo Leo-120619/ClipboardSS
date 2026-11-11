@@ -277,6 +277,8 @@ struct PairingCoordinatorTests {
 
         #expect(loopback.requests.map(\.path) == ["/v1/pair/start", "/v1/pair/reveal", "/v1/pair/confirm"])
         #expect(Set(loopback.requests.map(\.host)) == ["10.0.0.2"])
+        // The target may hold the confirm for 60 s, so only it gets the long timeout.
+        #expect(loopback.requests.map(\.timeout) == [10, 10, PairingCoordinator.confirmRequestTimeout])
     }
 
     @Test("a held confirm times out after 60 s with 408 and ends the code")
@@ -412,17 +414,17 @@ private final class PairingHarness {
 @MainActor
 private final class LoopbackPairingTransport: PeerTransport, @unchecked Sendable {
     let target: PairingCoordinator
-    private(set) var requests: [(host: String, path: String)] = []
+    private(set) var requests: [(host: String, path: String, timeout: TimeInterval)] = []
 
     init(target: PairingCoordinator) { self.target = target }
 
-    nonisolated func send(_ data: Data, to peer: Peer) async throws -> Data {
-        try await deliver(data, to: peer)
+    nonisolated func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
+        try await deliver(data, to: peer, timeout: timeout)
     }
 
-    private func deliver(_ data: Data, to peer: Peer) async throws -> Data {
+    private func deliver(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         let request = try HTTPCodec.parseRequest(data)
-        requests.append((peer.host, request.path))
+        requests.append((peer.host, request.path, timeout))
         let response = await target.respond(toPairRequest: request, remoteHost: "10.0.0.9")
         return HTTPCodec.encodeResponse(response)
     }
@@ -441,7 +443,7 @@ private final class InMemoryPairKeyStorage: PairKeyStorage, @unchecked Sendable 
 }
 
 private struct UnusedPeerTransport: PeerTransport {
-    func send(_ data: Data, to peer: Peer) async throws -> Data { Data() }
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data { Data() }
 }
 
 /// Replies to each request with the next canned HTTP response.
@@ -449,7 +451,7 @@ private final class ScriptedPeerTransport: PeerTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var responses: [Data]
     init(responses: [Data]) { self.responses = responses }
-    func send(_ data: Data, to peer: Peer) async throws -> Data {
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data {
         lock.withLock { responses.removeFirst() }
     }
 }

@@ -147,12 +147,7 @@ public partial class App : System.Windows.Application
             Path.Combine(_settings.StorageDirectory, "paired-devices.json"),
             pairKeys);
         var transport = new TcpPeerTransport();
-        // /v1/pair/confirm may be held up to 60 s by the target while its user compares numbers.
-        var pairing = new PairingCoordinator(
-            identity,
-            pairedStore,
-            transport,
-            confirmTransport: new TcpPeerTransport(PairingCoordinator.DefaultConfirmRequestTimeout));
+        var pairing = new PairingCoordinator(identity, pairedStore, transport);
         var mdns = new MdnsService(identity);
         var sweeper = new SubnetSweeper();
         var sender = new ClipSender(identity, pairedStore, transport, _settings.StorageDirectory);

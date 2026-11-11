@@ -23,10 +23,20 @@ public enum FileSendError: Error, Equatable, LocalizedError {
     }
 }
 
+/// How a send ended when it did not throw.
+public enum FileSendOutcome: Sendable, Equatable {
+    /// The receiver confirmed it saved the file.
+    case delivered
+    /// Every chunk was delivered but `/v1/file/finish` timed out. The receiver may still have
+    /// saved the file, so this is not a failure, and no cancel is sent.
+    case unconfirmed
+}
+
 /// Sends a single file to one paired peer using the chunked protocol. Streams the file in
 /// 4 MiB slices via `FileHandle` — never loads the whole file. Two passes: a streaming
 /// hash pass, then offer → chunks → finish. Reports monotonic progress and honours
-/// cancellation, best-effort issuing `/v1/file/cancel` on any failure after the offer.
+/// cancellation, best-effort issuing `/v1/file/cancel` on any failure after the offer, except
+/// a finish timeout (see `FileSendOutcome.unconfirmed`).
 public struct FileSender: Sendable {
     private let identity: DeviceIdentity
     public let pairedStore: PairedDeviceStore
@@ -41,13 +51,14 @@ public struct FileSender: Sendable {
     /// - Parameters:
     ///   - progress: called with a value in 0...1 after each chunk (monotonic).
     ///   - isCancelled: polled before each chunk; returning true aborts the transfer.
+    @discardableResult
     public func sendFile(
         at url: URL,
         to peer: Peer,
         mimeType: String = "application/octet-stream",
         progress: (@Sendable (Double) -> Void)? = nil,
         isCancelled: (@Sendable () -> Bool)? = nil
-    ) async throws {
+    ) async throws -> FileSendOutcome {
         guard let key = try? await pairedStore.getKey(for: peer.id) else {
             throw FileSendError.notPaired
         }
@@ -117,11 +128,24 @@ public struct FileSender: Sendable {
                 }
             }
 
-            // Finish.
+            // Finish. The receiver hashes the whole file before it answers.
             let finish = FileFinishPayload(transferId: transferId)
             let finishEnvelope = try seal(finish, purpose: .fileFinish, to: peer, key: key)
-            try await post("/v1/file/finish", body: encodeJSON(finishEnvelope), contentType: "application/json", headers: [:], to: peer)
+            do {
+                try await post(
+                    "/v1/file/finish",
+                    body: encodeJSON(finishEnvelope),
+                    contentType: "application/json",
+                    headers: [:],
+                    to: peer,
+                    timeout: FileTransferConstants.finishTimeout(fileSize: fileSize)
+                )
+            } catch let error as URLError where error.code == .timedOut {
+                // The receiver may be finalizing: a cancel could delete a saved file.
+                return .unconfirmed
+            }
             progress?(1.0)
+            return .delivered
         } catch {
             await bestEffortCancel(transferId: transferId, peer: peer, key: key)
             throw error
@@ -152,13 +176,14 @@ public struct FileSender: Sendable {
         body: Data,
         contentType: String,
         headers: [String: String],
-        to peer: Peer
+        to peer: Peer,
+        timeout: TimeInterval = PeerTransportDefaults.requestTimeout
     ) async throws -> HTTPResponse {
         var allHeaders = headers
         allHeaders["Content-Type"] = contentType
         let request = HTTPRequest(method: "POST", path: path, headers: allHeaders, body: body)
         let requestData = HTTPCodec.encodeRequest(request, host: "\(peer.host):\(peer.port)")
-        let responseData = try await transport.send(requestData, to: peer)
+        let responseData = try await transport.send(requestData, to: peer, timeout: timeout)
         let response = try HTTPCodec.parseResponse(responseData)
         if response.statusCode == 426 {
             throw FileSendError.peerNeedsUpdate

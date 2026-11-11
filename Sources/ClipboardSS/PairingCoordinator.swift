@@ -40,7 +40,6 @@ public final class PairingCoordinator: ObservableObject {
     public let identity: DeviceIdentity
     public let pairedStore: PairedDeviceStore
     private let transport: PeerTransport
-    private let confirmTransport: PeerTransport
     private let confirmHoldTimeout: TimeInterval
 
     /// The single initiator that has sent `/v1/pair/start` against the hosted code.
@@ -103,20 +102,16 @@ public final class PairingCoordinator: ObservableObject {
     /// paired store, so observers can refresh their view of paired devices.
     public var onPairedDevicesChanged: (() -> Void)?
 
-    /// - Parameter confirmTransport: used for `/v1/pair/confirm`, which the target may hold
-    ///   for `confirmHoldTimeout`; give it a timeout of at least `confirmRequestTimeout`.
     public init(
         identity: DeviceIdentity,
         pairedStore: PairedDeviceStore,
         transport: PeerTransport,
-        confirmTransport: PeerTransport? = nil,
         confirmHoldTimeout: TimeInterval = PairingCoordinator.confirmHoldTimeout,
         now: @escaping () -> Date = Date.init
     ) {
         self.identity = identity
         self.pairedStore = pairedStore
         self.transport = transport
-        self.confirmTransport = confirmTransport ?? transport
         self.confirmHoldTimeout = confirmHoldTimeout
         self.now = now
     }
@@ -404,8 +399,7 @@ public final class PairingCoordinator: ObservableObject {
                 commitment: PairingSession.commitment(publicKey: session.ephemeralPublicKey, salt: salt).base64EncodedString()
             ),
             path: "/v1/pair/start",
-            to: peer,
-            via: transport
+            to: peer
         )
         guard startResponse.statusCode == 200 else {
             logToFile("PairingCoordinator: /v1/pair/start returned status \(startResponse.statusCode)")
@@ -425,8 +419,7 @@ public final class PairingCoordinator: ObservableObject {
                 salt: salt.base64EncodedString()
             ),
             path: "/v1/pair/reveal",
-            to: peer,
-            via: transport
+            to: peer
         )
         guard revealResponse.statusCode == 200 else {
             logToFile("PairingCoordinator: /v1/pair/reveal returned status \(revealResponse.statusCode)")
@@ -462,7 +455,7 @@ public final class PairingCoordinator: ObservableObject {
             PairConfirmReq(deviceId: identity.id, proof: proof.base64EncodedString()),
             path: "/v1/pair/confirm",
             to: join.peer,
-            via: confirmTransport
+            timeout: Self.confirmRequestTimeout
         )
         logToFile("PairingCoordinator: /v1/pair/confirm HTTP Status: \(response.statusCode)")
 
@@ -493,18 +486,23 @@ public final class PairingCoordinator: ObservableObject {
         struct PairConfirmReq: Encodable { let deviceId: UUID; let proof: String }
         let notice = PairConfirmReq(deviceId: identity.id, proof: Data(count: 32).base64EncodedString())
         return Task {
-            _ = try? await post(notice, path: "/v1/pair/confirm", to: join.peer, via: transport)
+            _ = try? await post(notice, path: "/v1/pair/confirm", to: join.peer)
         }
     }
 
-    private func post<Body: Encodable>(_ body: Body, path: String, to peer: Peer, via transport: PeerTransport) async throws -> HTTPResponse {
+    private func post<Body: Encodable>(
+        _ body: Body,
+        path: String,
+        to peer: Peer,
+        timeout: TimeInterval = PeerTransportDefaults.requestTimeout
+    ) async throws -> HTTPResponse {
         let request = HTTPRequest(
             method: "POST",
             path: path,
             headers: ["Content-Type": "application/json"],
             body: try JSONEncoder().encode(body)
         )
-        let responseData = try await transport.send(HTTPCodec.encodeRequest(request, host: peer.host), to: peer)
+        let responseData = try await transport.send(HTTPCodec.encodeRequest(request, host: peer.host), to: peer, timeout: timeout)
         return try HTTPCodec.parseResponse(responseData)
     }
 }

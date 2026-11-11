@@ -342,6 +342,11 @@ struct TransferRow: View {
                         .buttonStyle(.borderless)
                 }
             }
+        case .unconfirmed:
+            Text("Sent, not confirmed")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help(FileTransferState.unconfirmedMessage)
         case let .failed(reason):
             Text("Failed")
                 .font(.caption)

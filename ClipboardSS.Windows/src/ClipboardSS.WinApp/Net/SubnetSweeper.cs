@@ -51,7 +51,7 @@ public sealed class SubnetSweeper(TimeSpan? timeout = null, int concurrency = 32
         {
             return await LivenessPing.PingAsync(
                 host, deviceId, localDeviceId, pairKey,
-                (bytes, token) => transport.SendAsync(bytes, target, token),
+                (bytes, token) => transport.SendAsync(bytes, target, cancellationToken: token),
                 cancellationToken: timeoutSource.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -91,7 +91,7 @@ public sealed class SubnetSweeper(TimeSpan? timeout = null, int concurrency = 32
             var responseBytes = await transport.SendAsync(
                 HttpCodec.EncodeRequest(request, $"{host}:51888"),
                 probe,
-                timeoutSource.Token);
+                cancellationToken: timeoutSource.Token);
             var response = HttpCodec.ParseResponse(responseBytes);
             if (response.StatusCode != 200) return null;
             var identity = JsonSerializer.Deserialize<IdentityResponse>(response.Body, WireJson.Options);

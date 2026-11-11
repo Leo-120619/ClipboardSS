@@ -7,9 +7,13 @@ using ClipboardSS.Core.Storage;
 
 namespace ClipboardSS.Core.Sync;
 
+/// <summary>
+/// Sends one file: offer, chunks, finish. Any failure after the offer sends a best-effort cancel,
+/// except a finish timeout (<see cref="FileSendOutcome.Unconfirmed"/>).
+/// </summary>
 public sealed class FileSender(DeviceIdentity identity, PairedDeviceStore pairedStore, IPeerTransport transport)
 {
-    public async Task SendAsync(string path, Peer peer, IProgress<FileTransferProgress>? progress = null,
+    public async Task<FileSendOutcome> SendAsync(string path, Peer peer, IProgress<FileTransferProgress>? progress = null,
         CancellationToken cancellationToken = default, string? transferId = null)
     {
         var pairKey = pairedStore.GetKey(peer.Id) ?? throw new InvalidOperationException("The target device is not paired.");
@@ -42,8 +46,20 @@ public sealed class FileSender(DeviceIdentity identity, PairedDeviceStore paired
                 sent += count;
                 progress?.Report(new(transferId, info.Name, sent, info.Length, FileTransferDirection.Sending, FileTransferStatus.Active));
             }
-            await SendControlAsync("/v1/file/finish", EnvelopePurpose.FileFinish, new FileFinishPayload(transferId), peer, pairKey, cancellationToken);
+            // The receiver hashes the whole file before it answers.
+            try
+            {
+                await SendControlAsync("/v1/file/finish", EnvelopePurpose.FileFinish, new FileFinishPayload(transferId), peer, pairKey,
+                    cancellationToken, FileTransferConstants.FinishTimeout(info.Length));
+            }
+            catch (TimeoutException)
+            {
+                // The receiver may be finalizing: a cancel could delete a saved file.
+                progress?.Report(new(transferId, info.Name, info.Length, info.Length, FileTransferDirection.Sending, FileTransferStatus.Unconfirmed));
+                return FileSendOutcome.Unconfirmed;
+            }
             progress?.Report(new(transferId, info.Name, info.Length, info.Length, FileTransferDirection.Sending, FileTransferStatus.Completed));
+            return FileSendOutcome.Delivered;
         }
         catch
         {
@@ -54,17 +70,17 @@ public sealed class FileSender(DeviceIdentity identity, PairedDeviceStore paired
     }
 
     private async Task SendControlAsync<T>(
-        string path, EnvelopePurpose purpose, T payload, Peer peer, byte[] key, CancellationToken token)
+        string path, EnvelopePurpose purpose, T payload, Peer peer, byte[] key, CancellationToken token, TimeSpan? timeout = null)
     {
         var envelope = EnvelopeCrypto.SealJson(payload, purpose, identity.Id, peer.Id, key);
         await SendRequestAsync(new HttpRequest("POST", path,
             new Dictionary<string, string> { ["Content-Type"] = "application/json" },
-            JsonSerializer.SerializeToUtf8Bytes(envelope, WireJson.Options)), peer, token);
+            JsonSerializer.SerializeToUtf8Bytes(envelope, WireJson.Options)), peer, token, timeout);
     }
 
-    private async Task SendRequestAsync(HttpRequest request, Peer peer, CancellationToken token)
+    private async Task SendRequestAsync(HttpRequest request, Peer peer, CancellationToken token, TimeSpan? timeout = null)
     {
-        var bytes = await transport.SendAsync(HttpCodec.EncodeRequest(request, $"{peer.Host}:{peer.Port}"), peer, token);
+        var bytes = await transport.SendAsync(HttpCodec.EncodeRequest(request, $"{peer.Host}:{peer.Port}"), peer, timeout, token);
         var response = HttpCodec.ParseResponse(bytes);
         if (response.StatusCode == 426) throw new PeerNeedsUpdateException();
         if (WireProtocol.IsStaleResponse(response.StatusCode, response.Body)) throw new PeerClockOutOfSyncException(peer.Name);

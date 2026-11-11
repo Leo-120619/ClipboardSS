@@ -89,7 +89,7 @@ public sealed class ClipSender(
                 var responseData = await transport.SendAsync(
                     HttpCodec.EncodeRequest(request, $"{target.Peer.Host}:{target.Peer.Port}"),
                     target.Peer,
-                    cancellationToken);
+                    cancellationToken: cancellationToken);
                 var response = HttpCodec.ParseResponse(responseData);
                 if (response.StatusCode == 426) throw new PeerNeedsUpdateException();
                 if (WireProtocol.IsStaleResponse(response.StatusCode, response.Body))

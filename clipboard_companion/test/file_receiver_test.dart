@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:clipboard_companion/core/content_hasher.dart';
 import 'package:clipboard_companion/core/crypto_utils.dart';
 import 'package:clipboard_companion/core/file_receiver.dart';
 import 'package:clipboard_companion/core/file_transfer_models.dart';
@@ -471,6 +472,7 @@ void main() {
     makeRobust({
       int freeSpace = 1 << 40,
       Future<void> Function(RandomAccessFile, int, List<int>)? chunkWriter,
+      Future<String> Function(String path)? fileHasher,
     }) async {
       final store = await makePairedStore(peerId, key);
       await store.addDevice(PairedDevice(id: otherId, name: 'Other'), otherKey);
@@ -485,6 +487,7 @@ void main() {
         now: clock.now,
         freeSpaceProvider: () async => freeSpace,
         chunkWriter: chunkWriter,
+        fileHasher: fileHasher,
       );
       return (
         receiver: receiver,
@@ -835,6 +838,129 @@ void main() {
         200,
       );
       expect(await File('${r.dest.path}/file.bin').readAsBytes(), payload);
+    });
+
+    group('finish while hashing', () {
+      /// A hasher the test releases: lets other requests land mid-hash.
+      ({
+        Future<String> Function(String) hasher,
+        Future<void> started,
+        void Function() release,
+        int Function() calls,
+      })
+      gatedHasher() {
+        final started = Completer<void>();
+        final release = Completer<void>();
+        var calls = 0;
+        return (
+          hasher: (path) async {
+            calls++;
+            if (!started.isCompleted) started.complete();
+            await release.future;
+            return ContentHasher.fileHashOfFile(File(path));
+          },
+          started: started.future,
+          release: () => release.complete(),
+          calls: () => calls,
+        );
+      }
+
+      Future<PreparedTransfer> delivered(FileReceiver receiver) async {
+        final t = await prepareTransfer(
+          data: List<int>.generate(10, (i) => i),
+          chunkSize: 4,
+          peerId: peerId,
+          key: key,
+        );
+        await receiver.handleOffer(t.offer);
+        for (var i = 0; i < t.chunks.length; i++) {
+          await receiver.handleChunk(t.transferId, i, t.chunks[i]);
+        }
+        return t;
+      }
+
+      test('finishRefreshesLastActivity', () async {
+        final gate = gatedHasher();
+        final r = await makeRobust(fileHasher: gate.hasher);
+        final t = await delivered(r.receiver);
+        final events = <String>[];
+        final sub = r.receiver.events.listen((e) => events.add(e.type));
+        r.clock.advance(const Duration(seconds: 59));
+
+        final finishing = r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        );
+        await gate.started;
+        // The hash of a large file outlasts the idle timeout.
+        r.clock.advance(const Duration(seconds: 120));
+        await r.receiver.garbageCollect();
+        gate.release();
+        final response = await finishing;
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+
+        expect(response.statusCode, 200);
+        expect(
+          await File('${r.dest.path}/file.bin').readAsBytes(),
+          List<int>.generate(10, (i) => i),
+        );
+        expect(events, ['completed']);
+      });
+
+      test('a second concurrent finish does not finalize twice', () async {
+        final gate = gatedHasher();
+        final r = await makeRobust(fileHasher: gate.hasher);
+        final t = await delivered(r.receiver);
+        final events = <String>[];
+        final sub = r.receiver.events.listen((e) => events.add(e.type));
+
+        final first = r.receiver.handleFinish(await finishFor(t.transferId));
+        await gate.started;
+        final second = await r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        );
+        gate.release();
+        final response = await first;
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+
+        expect(response.statusCode, 200);
+        expect(second.statusCode, 409);
+        expect(statusOf(second), 'finishing');
+        expect(gate.calls(), 1);
+        expect(events, ['completed']);
+        expect(r.dest.listSync().map((e) => e.uri.pathSegments.last), [
+          'file.bin',
+        ]);
+      });
+
+      test('a cancel during the hash wins: nothing is saved', () async {
+        final gate = gatedHasher();
+        final r = await makeRobust(fileHasher: gate.hasher);
+        final t = await delivered(r.receiver);
+        final events = <String>[];
+        final sub = r.receiver.events.listen((e) => events.add(e.type));
+
+        final finishing = r.receiver.handleFinish(
+          await finishFor(t.transferId),
+        );
+        await gate.started;
+        expect(
+          (await r.receiver.handleCancel(
+            await cancelFor(t.transferId),
+          )).statusCode,
+          200,
+        );
+        gate.release();
+        final response = await finishing;
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+
+        expect(response.statusCode, 410);
+        expect(r.dest.listSync(), isEmpty);
+        expect(r.transfers.listSync(), isEmpty);
+        expect(events, ['cancelled']);
+      });
     });
 
     test('chunk writes for one session never overlap', () async {

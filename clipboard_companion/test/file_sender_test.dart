@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:clipboard_companion/core/content_hasher.dart';
 import 'package:clipboard_companion/core/file_receiver.dart';
 import 'package:clipboard_companion/core/file_sender.dart';
+import 'package:clipboard_companion/core/file_transfer_models.dart';
+import 'package:clipboard_companion/core/paired_device_store.dart';
 import 'package:clipboard_companion/core/models.dart';
 import 'package:clipboard_companion/core/replay_guard.dart';
 import 'package:cryptography/cryptography.dart';
@@ -231,6 +233,80 @@ void main() {
       sender.sendFile(file: makeFile(16), peer: peer),
       throwsA(isA<FileSendException>()),
     );
+  });
+
+  group('finish timeout', () {
+    FileSender timedSender(
+      http.Client client,
+      PairedDeviceStore store, {
+      Duration Function(int fileSize)? finishTimeout,
+    }) => FileSender(
+      identity: DeviceIdentity(
+        id: 'aaaaaaaa-1111-2222-3333-444444444444',
+        name: 'Mac',
+      ),
+      pairedStore: store,
+      client: client,
+      requestTimeout: const Duration(milliseconds: 50),
+      finishTimeout: finishTimeout,
+    );
+
+    test('finishUsesExtendedTimeoutForLargeFile', () async {
+      expect(
+        FileTransferConstants.finishTimeout(4 * 1024 * 1024 * 1024),
+        const Duration(seconds: 205),
+      );
+      expect(
+        FileTransferConstants.finishTimeout(0),
+        const Duration(seconds: 30),
+      );
+      expect(
+        FileTransferConstants.finishTimeout(30 * 20 * 1024 * 1024 + 1),
+        const Duration(seconds: 31),
+      );
+      expect(
+        FileTransferConstants.finishTimeout(1 << 40),
+        const Duration(seconds: 600),
+      );
+
+      // The receiver hashes before answering finish: longer than the
+      // per-request timeout is fine.
+      final client = MockClient((request) async {
+        if (request.url.path == '/v1/file/finish') {
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+        }
+        return http.Response('{}', 200);
+      });
+      final sender = timedSender(client, await makePairedStore(peerId, key));
+
+      expect(
+        await sender.sendFile(file: makeFile(1024), peer: peer),
+        FileSendOutcome.delivered,
+      );
+    });
+
+    test('senderDoesNotCancelAfterFinishTimeout', () async {
+      final requests = <String>[];
+      final client = MockClient((request) async {
+        requests.add(request.url.path);
+        if (request.url.path == '/v1/file/finish') {
+          return Completer<http.Response>().future;
+        }
+        return http.Response('{}', 200);
+      });
+      final sender = timedSender(
+        client,
+        await makePairedStore(peerId, key),
+        finishTimeout: (_) => const Duration(milliseconds: 20),
+      );
+
+      // A saved file must not be reported failed or deleted (Review Focus 4).
+      expect(
+        await sender.sendFile(file: makeFile(1024), peer: peer),
+        FileSendOutcome.unconfirmed,
+      );
+      expect(requests, ['/v1/file/offer', '/v1/file/chunk', '/v1/file/finish']);
+    });
   });
 
   test(

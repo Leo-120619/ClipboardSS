@@ -34,16 +34,11 @@ public sealed class PairingTimedOutException()
 /// <param name="LocalConfirmed">This device's user already pressed Confirm and is waiting for the other side.</param>
 public sealed record PairingComparison(string DeviceName, string ConfirmCode, bool LocalConfirmed = false);
 
-/// <param name="confirmTransport">
-/// Used for <c>/v1/pair/confirm</c>, which the target may hold for <see cref="DefaultConfirmHoldTimeout"/>;
-/// give it a timeout of at least <see cref="DefaultConfirmRequestTimeout"/>.
-/// </param>
 public sealed class PairingCoordinator(
     DeviceIdentity identity,
     PairedDeviceStore pairedStore,
     IPeerTransport transport,
     Func<DateTimeOffset>? clock = null,
-    IPeerTransport? confirmTransport = null,
     TimeSpan? confirmHoldTimeout = null)
 {
     /// <summary>How long the target holds <c>/v1/pair/confirm</c> waiting for its own user (else 408).</summary>
@@ -52,7 +47,6 @@ public sealed class PairingCoordinator(
     public static readonly TimeSpan DefaultConfirmRequestTimeout = TimeSpan.FromSeconds(75);
 
     private readonly Func<DateTimeOffset> _now = clock ?? (() => DateTimeOffset.UtcNow);
-    private readonly IPeerTransport _confirmTransport = confirmTransport ?? transport;
     private readonly TimeSpan _confirmHoldTimeout = confirmHoldTimeout ?? DefaultConfirmHoldTimeout;
     private readonly object _gate = new();
 
@@ -389,7 +383,6 @@ public sealed class PairingCoordinator(
                     Identity.Id,
                     Identity.Name,
                     Convert.ToBase64String(PairingSession.Commitment(session.EphemeralPublicKey, salt))),
-                transport,
                 cancellationToken);
             if (start.StatusCode != 200) throw new PairingNotAcceptedException(start.StatusCode);
             var response = JsonSerializer.Deserialize<PairStartResponse>(start.Body, WireJson.Options)
@@ -402,7 +395,6 @@ public sealed class PairingCoordinator(
                     Identity.Id,
                     Convert.ToBase64String(session.EphemeralPublicKey),
                     Convert.ToBase64String(salt)),
-                transport,
                 cancellationToken);
             if (reveal.StatusCode != 200) throw new PairingNotAcceptedException(reveal.StatusCode);
 
@@ -446,8 +438,8 @@ public sealed class PairingCoordinator(
                     join.Peer,
                     "/v1/pair/confirm",
                     new PairConfirmRequest(Identity.Id, Convert.ToBase64String(proof)),
-                    _confirmTransport,
-                    linked.Token);
+                    linked.Token,
+                    DefaultConfirmRequestTimeout);
             }
             catch (OperationCanceledException) when (join.Cancellation.IsCancellationRequested)
             {
@@ -510,7 +502,6 @@ public sealed class PairingCoordinator(
                 join.Peer,
                 "/v1/pair/confirm",
                 new PairConfirmRequest(Identity.Id, Convert.ToBase64String(new byte[32])),
-                transport,
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception)
@@ -566,17 +557,18 @@ public sealed class PairingCoordinator(
         Peer peer,
         string path,
         object body,
-        IPeerTransport via,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? timeout = null)
     {
         var request = new HttpRequest(
             "POST",
             path,
             new Dictionary<string, string> { ["Content-Type"] = "application/json" },
             JsonSerializer.SerializeToUtf8Bytes(body, WireJson.Options));
-        var responseBytes = await via.SendAsync(
+        var responseBytes = await transport.SendAsync(
             HttpCodec.EncodeRequest(request, $"{peer.Host}:{peer.Port}"),
             peer,
+            timeout,
             cancellationToken).ConfigureAwait(false);
         return HttpCodec.ParseResponse(responseBytes);
     }

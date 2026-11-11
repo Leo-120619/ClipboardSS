@@ -261,6 +261,62 @@ public sealed class FileTransferTests
         Assert.Equal(404, (await receiver.FinishAsync("zombie", Peer)).StatusCode);
     }
 
+    [Fact]
+    public async Task FinishRefreshesLastActivity()
+    {
+        using var temp = new TemporaryDirectory();
+        var now = DateTimeOffset.UtcNow;
+        var downloads = Path.Combine(temp.Path, "downloads");
+        FileReceiver? receiver = null;
+        Task? collecting = null;
+        receiver = new FileReceiver(Path.Combine(temp.Path, "parts"), () =>
+        {
+            // Asked for after the hash: a hash that took 2 minutes, and a GC tick meanwhile.
+            now += TimeSpan.FromSeconds(120);
+            collecting = receiver!.CleanupExpiredAsync();
+            return downloads;
+        }, () => now, () => long.MaxValue);
+        using var _ = receiver;
+        var bytes = new byte[] { 1, 2, 3, 4, 5 };
+        await receiver.OfferAsync(SmallOffer("slow-hash", bytes), PairKey, Peer);
+        await SendAllChunks(receiver, "slow-hash", bytes);
+        now += TimeSpan.FromSeconds(59);
+
+        var finished = await receiver.FinishAsync("slow-hash", Peer);
+        await collecting!;
+
+        Assert.Equal(200, finished.StatusCode);
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(finished.SavedPath!));
+    }
+
+    [Fact]
+    public async Task TransferChangedIsRaisedAfterResponseAndOutsideGate()
+    {
+        using var temp = new TemporaryDirectory();
+        using var receiver = NewReceiver(temp);
+        var observed = new List<(FileTransferStatus Status, bool GateFree, bool Saved)>();
+        receiver.TransferChanged += progress =>
+        {
+            // A handler that calls back into the receiver (or blocks, like a modal dialog) must not
+            // run while the transfer lock is held.
+            var gateFree = receiver.CleanupExpiredAsync().Wait(TimeSpan.FromSeconds(2));
+            observed.Add((progress.Status, gateFree, progress.SavedPath is { } path && File.Exists(path)));
+        };
+        var bytes = new byte[] { 1, 2, 3, 4, 5 };
+        await receiver.OfferAsync(SmallOffer("events", bytes), PairKey, Peer);
+        await SendAllChunks(receiver, "events", bytes);
+
+        var finished = await receiver.FinishAsync("events", Peer);
+
+        Assert.Equal(200, finished.StatusCode);
+        Assert.Equal(
+            [(FileTransferStatus.Active, true, false), (FileTransferStatus.Active, true, false), (FileTransferStatus.Active, true, false),
+             (FileTransferStatus.Completed, true, true)],
+            observed);
+        // The completed event comes after the transfer is committed: it is no longer active.
+        Assert.Equal(404, (await receiver.FinishAsync("events", Peer)).StatusCode);
+    }
+
     private static readonly DeviceIdentity Identity = new(Guid.Parse("8fb5790c-4533-47bb-90af-827291247fe1"), "Windows");
 
     private static FileReceiver NewReceiver(TemporaryDirectory temp, long freeSpace = long.MaxValue, Func<DateTimeOffset>? clock = null,

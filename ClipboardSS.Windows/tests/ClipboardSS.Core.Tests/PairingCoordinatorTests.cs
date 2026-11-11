@@ -256,6 +256,8 @@ public sealed class PairingCoordinatorTests : IDisposable
 
         Assert.Equal(["/v1/pair/start", "/v1/pair/reveal", "/v1/pair/confirm"], loopback.Requests.Select(request => request.Path));
         Assert.Equal(["10.0.0.2"], loopback.Requests.Select(request => request.Host).Distinct());
+        // The target may hold the confirm for 60 s, so only it gets the long timeout.
+        Assert.Equal([null, null, PairingCoordinator.DefaultConfirmRequestTimeout], loopback.Requests.Select(request => request.Timeout));
     }
 
     [Fact]
@@ -368,12 +370,12 @@ public sealed class PairingCoordinatorTests : IDisposable
     /// <summary>Delivers each request to a target's real router in-process, recording where it was sent.</summary>
     private sealed class LoopbackPeerTransport(ClipServerRouter router) : IPeerTransport
     {
-        public List<(string Host, string Path)> Requests { get; } = [];
+        public List<(string Host, string Path, TimeSpan? Timeout)> Requests { get; } = [];
 
-        public async Task<byte[]> SendAsync(byte[] data, Peer peer, CancellationToken cancellationToken = default)
+        public async Task<byte[]> SendAsync(byte[] data, Peer peer, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
             var request = HttpCodec.ParseRequest(data);
-            lock (Requests) Requests.Add((peer.Host, request.Path));
+            lock (Requests) Requests.Add((peer.Host, request.Path, timeout));
             var response = await router.RouteAsync(request, "10.0.0.9", cancellationToken);
             return HttpCodec.EncodeResponse(response);
         }
@@ -404,13 +406,13 @@ public sealed class PairingCoordinatorTests : IDisposable
     {
         private readonly Queue<byte[]> _responses = new(responses);
 
-        public Task<byte[]> SendAsync(byte[] data, Peer peer, CancellationToken cancellationToken = default) =>
+        public Task<byte[]> SendAsync(byte[] data, Peer peer, TimeSpan? timeout = null, CancellationToken cancellationToken = default) =>
             Task.FromResult(_responses.Dequeue());
     }
 
     private sealed class UnusedPeerTransport : IPeerTransport
     {
-        public Task<byte[]> SendAsync(byte[] data, Peer peer, CancellationToken cancellationToken = default) =>
+        public Task<byte[]> SendAsync(byte[] data, Peer peer, TimeSpan? timeout = null, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("The hosting side does not send.");
     }
 }

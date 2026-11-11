@@ -29,6 +29,7 @@ public sealed class FileReceiver : IDisposable
     private readonly Func<long> _freeSpace;
     private readonly Func<FileStream, long, byte[], CancellationToken, Task> _writeChunk;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    /// <summary>Raised after the request that caused it has been handled, outside the transfer lock.</summary>
     public event Action<FileTransferProgress>? TransferChanged;
 
     /// <param name="freeSpaceProvider">Bytes available on the transfers volume; defaults to the real drive.</param>
@@ -58,103 +59,103 @@ public sealed class FileReceiver : IDisposable
     /// <summary>Remembered cancelled ids (test hook for pruning).</summary>
     public int CancelledTransferCount => _cancelled.Count;
 
-    public async Task<FileReceiveResult> OfferAsync(FileOfferPayload offer, byte[] pairKey, Guid sourceDeviceId, CancellationToken token = default)
+    public Task<FileReceiveResult> OfferAsync(FileOfferPayload offer, byte[] pairKey, Guid sourceDeviceId, CancellationToken token = default) =>
+        UnderGateAsync(events => Task.FromResult(Offer(offer, pairKey, sourceDeviceId, events)), token);
+
+    private FileReceiveResult Offer(FileOfferPayload offer, byte[] pairKey, Guid sourceDeviceId, List<FileTransferProgress> events)
     {
-        await _gate.WaitAsync(token); try
-        {
-            CleanupExpiredLocked();
-            if (!TransferIdPattern.IsMatch(offer.TransferId)) return new(400, "invalidId");
-            var id = Normalize(offer.TransferId);
-            if (_sessions.ContainsKey(id)) return new(409, "duplicate");
-            if (offer.ChunkSize <= 0 || offer.ChunkSize > FileTransferConstants.MaxChunkSize || offer.FileSize < 0 || offer.ChunkCount < 0 ||
-                offer.ChunkCount != offer.FileSize / offer.ChunkSize + (offer.FileSize % offer.ChunkSize == 0 ? 0 : 1)) return new(400, "invalidOffer");
-            if (_sessions.Values.Count(s => s.SourceDeviceId == sourceDeviceId) >= FileTransferConstants.MaxSessionsPerDevice)
-                return new(429, "tooManyTransfers");
-            // The committed term (bytes owed but not yet allocated on disk) is zero here: every
-            // active session was preallocated by SetLength, so free space already excludes it.
-            if (offer.FileSize > _freeSpace() - FileTransferConstants.FreeSpaceReserve) return new(400, "tooLarge");
-            var path = Path.Combine(_tempDirectory, id + ".part");
-            var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.RandomAccess);
-            try { stream.SetLength(offer.FileSize); }
-            catch { stream.Dispose(); TryDelete(path); return new(400, "error"); }
-            _cancelled.Remove(id);
-            _sessions[id] = new(offer with { TransferId = id }, sourceDeviceId, FileTransferCrypto.DeriveFileKey(pairKey, id), path, stream, _clock());
-            TransferChanged?.Invoke(new(id, offer.FileName, 0, offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Active));
-            return new(200, "ready");
-        } finally { _gate.Release(); }
+        CleanupExpiredLocked();
+        if (!TransferIdPattern.IsMatch(offer.TransferId)) return new(400, "invalidId");
+        var id = Normalize(offer.TransferId);
+        if (_sessions.ContainsKey(id)) return new(409, "duplicate");
+        if (offer.ChunkSize <= 0 || offer.ChunkSize > FileTransferConstants.MaxChunkSize || offer.FileSize < 0 || offer.ChunkCount < 0 ||
+            offer.ChunkCount != offer.FileSize / offer.ChunkSize + (offer.FileSize % offer.ChunkSize == 0 ? 0 : 1)) return new(400, "invalidOffer");
+        if (_sessions.Values.Count(s => s.SourceDeviceId == sourceDeviceId) >= FileTransferConstants.MaxSessionsPerDevice)
+            return new(429, "tooManyTransfers");
+        // The committed term (bytes owed but not yet allocated on disk) is zero here: every
+        // active session was preallocated by SetLength, so free space already excludes it.
+        if (offer.FileSize > _freeSpace() - FileTransferConstants.FreeSpaceReserve) return new(400, "tooLarge");
+        var path = Path.Combine(_tempDirectory, id + ".part");
+        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.RandomAccess);
+        try { stream.SetLength(offer.FileSize); }
+        catch { stream.Dispose(); TryDelete(path); return new(400, "error"); }
+        _cancelled.Remove(id);
+        _sessions[id] = new(offer with { TransferId = id }, sourceDeviceId, FileTransferCrypto.DeriveFileKey(pairKey, id), path, stream, _clock());
+        events.Add(new(id, offer.FileName, 0, offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Active));
+        return new(200, "ready");
     }
 
     /// <summary>
     /// Chunks are unauthenticated at the HTTP layer (anyone who sees <c>X-Transfer-Id</c> can post one),
     /// so a rejected chunk never touches the session: it stays intact for the real sender.
     /// </summary>
-    public async Task<FileReceiveResult> ChunkAsync(string transferId, int index, byte[] body, CancellationToken token = default)
+    public Task<FileReceiveResult> ChunkAsync(string transferId, int index, byte[] body, CancellationToken token = default) =>
+        UnderGateAsync(events => ChunkLockedAsync(transferId, index, body, events, token), token);
+
+    private async Task<FileReceiveResult> ChunkLockedAsync(string transferId, int index, byte[] body, List<FileTransferProgress> events, CancellationToken token)
     {
-        await _gate.WaitAsync(token); try
+        CleanupExpiredLocked(); var id = Normalize(transferId);
+        if (!_sessions.TryGetValue(id, out var session)) return _cancelled.ContainsKey(id) ? new(410, "cancelled") : new(404, "unknown");
+        if (index < 0 || index >= session.Offer.ChunkCount) return new(400, "badIndex");
+        byte[] plaintext;
+        try { plaintext = FileTransferCrypto.OpenChunk(session.Key, index, body); }
+        catch { return new(400, "decryptFailed"); }
+        var expected = index == session.Offer.ChunkCount - 1
+            ? checked((int)(session.Offer.FileSize - (long)index * session.Offer.ChunkSize)) : session.Offer.ChunkSize;
+        if (plaintext.Length != expected) return new(400, "badSize");
+        // The index counts as received only once its bytes are on disk; a retry rewrites it.
+        if (!session.Received.Contains(index))
         {
-            CleanupExpiredLocked(); var id = Normalize(transferId);
-            if (!_sessions.TryGetValue(id, out var session)) return _cancelled.ContainsKey(id) ? new(410, "cancelled") : new(404, "unknown");
-            if (index < 0 || index >= session.Offer.ChunkCount) return new(400, "badIndex");
-            byte[] plaintext;
-            try { plaintext = FileTransferCrypto.OpenChunk(session.Key, index, body); }
-            catch { return new(400, "decryptFailed"); }
-            var expected = index == session.Offer.ChunkCount - 1
-                ? checked((int)(session.Offer.FileSize - (long)index * session.Offer.ChunkSize)) : session.Offer.ChunkSize;
-            if (plaintext.Length != expected) return new(400, "badSize");
-            // The index counts as received only once its bytes are on disk; a retry rewrites it.
-            if (!session.Received.Contains(index))
-            {
-                try { await _writeChunk(session.Stream, (long)index * session.Offer.ChunkSize, plaintext, token); }
-                catch (Exception) when (!token.IsCancellationRequested) { return new(400, "writeFailed"); }
-                session.Received.Add(index);
-                session.BytesReceived += expected;
-            }
-            session.LastActivity = _clock();
-            TransferChanged?.Invoke(new(id, session.Offer.FileName, session.BytesReceived, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Active));
-            return new(200, "ok", session.Received.Count);
-        } finally { _gate.Release(); }
+            try { await _writeChunk(session.Stream, (long)index * session.Offer.ChunkSize, plaintext, token); }
+            catch (Exception) when (!token.IsCancellationRequested) { return new(400, "writeFailed"); }
+            session.Received.Add(index);
+            session.BytesReceived += expected;
+        }
+        session.LastActivity = _clock();
+        events.Add(new(id, session.Offer.FileName, session.BytesReceived, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Active));
+        return new(200, "ok", session.Received.Count);
     }
 
-    public async Task<FileReceiveResult> FinishAsync(string transferId, Guid sourceDeviceId, CancellationToken token = default)
+    public Task<FileReceiveResult> FinishAsync(string transferId, Guid sourceDeviceId, CancellationToken token = default) =>
+        UnderGateAsync(events => FinishLockedAsync(transferId, sourceDeviceId, events, token), token);
+
+    private async Task<FileReceiveResult> FinishLockedAsync(string transferId, Guid sourceDeviceId, List<FileTransferProgress> events, CancellationToken token)
     {
-        await _gate.WaitAsync(token); try
+        CleanupExpiredLocked(); var id = Normalize(transferId);
+        // Another paired device must not learn of, or finish, this device's transfer.
+        if (!_sessions.TryGetValue(id, out var session) || session.SourceDeviceId != sourceDeviceId) return new(404, "unknown");
+        if (session.Received.Count != session.Offer.ChunkCount) return new(409, "incomplete");
+        string destination;
+        try
         {
-            CleanupExpiredLocked(); var id = Normalize(transferId);
-            // Another paired device must not learn of, or finish, this device's transfer.
-            if (!_sessions.TryGetValue(id, out var session) || session.SourceDeviceId != sourceDeviceId) return new(404, "unknown");
-            if (session.Received.Count != session.Offer.ChunkCount) return new(409, "incomplete");
-            string destination;
-            try
-            {
-                session.Stream.Dispose();
-                string hash;
-                await using (var file = new FileStream(session.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-                    hash = await ContentHasher.FileHashAsync(file, token);
-                if (!string.Equals(hash, session.Offer.FileHash, StringComparison.OrdinalIgnoreCase)) return FailLocked(id, session, 422, "hashMismatch");
-                var downloads = _downloadsDirectory();
-                Directory.CreateDirectory(downloads);
-                destination = CollisionSafePath(downloads, session.Offer.FileName);
-                File.Move(session.Path, destination);
-                MarkAsDownloaded(destination);
-            }
-            catch (Exception) when (!token.IsCancellationRequested) { return FailLocked(id, session, 422, "error"); }
-            catch { FailLocked(id, session, 422, "error"); throw; }
-            _sessions.Remove(id);
-            TransferChanged?.Invoke(new(id, session.Offer.FileName, session.Offer.FileSize, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Completed, destination));
-            return new(200, "complete", SavedPath: destination);
-        } finally { _gate.Release(); }
+            session.Stream.Dispose();
+            string hash;
+            await using (var file = new FileStream(session.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                hash = await ContentHasher.FileHashAsync(file, token);
+            if (!string.Equals(hash, session.Offer.FileHash, StringComparison.OrdinalIgnoreCase)) return FailLocked(id, session, 422, "hashMismatch", events);
+            var downloads = _downloadsDirectory();
+            Directory.CreateDirectory(downloads);
+            destination = CollisionSafePath(downloads, session.Offer.FileName);
+            File.Move(session.Path, destination);
+            MarkAsDownloaded(destination);
+        }
+        catch (Exception) when (!token.IsCancellationRequested) { return FailLocked(id, session, 422, "error", events); }
+        catch { FailLocked(id, session, 422, "error", events); throw; }
+        _sessions.Remove(id);
+        events.Add(new(id, session.Offer.FileName, session.Offer.FileSize, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Completed, destination));
+        return new(200, "complete", SavedPath: destination);
     }
 
-    public async Task<FileReceiveResult> CancelAsync(string transferId, Guid sourceDeviceId, CancellationToken token = default)
+    public Task<FileReceiveResult> CancelAsync(string transferId, Guid sourceDeviceId, CancellationToken token = default) =>
+        UnderGateAsync(events => Task.FromResult(Cancel(transferId, sourceDeviceId, events)), token);
+
+    private FileReceiveResult Cancel(string transferId, Guid sourceDeviceId, List<FileTransferProgress> events)
     {
-        await _gate.WaitAsync(token); try
-        {
-            CleanupExpiredLocked(); var id = Normalize(transferId);
-            if (_sessions.TryGetValue(id, out var owned) && owned.SourceDeviceId != sourceDeviceId) return new(404, "unknown");
-            _cancelled[id] = _clock();
-            if (_sessions.Remove(id, out var session)) { session.Stream.Dispose(); TryDelete(session.Path); TransferChanged?.Invoke(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Cancelled)); }
-            return new(200, "cancelled");
-        } finally { _gate.Release(); }
+        CleanupExpiredLocked(); var id = Normalize(transferId);
+        if (_sessions.TryGetValue(id, out var owned) && owned.SourceDeviceId != sourceDeviceId) return new(404, "unknown");
+        _cancelled[id] = _clock();
+        if (_sessions.Remove(id, out var session)) { session.Stream.Dispose(); TryDelete(session.Path); events.Add(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Cancelled)); }
+        return new(200, "cancelled");
     }
 
     public async Task CleanupExpiredAsync(CancellationToken token = default) { await _gate.WaitAsync(token); try { CleanupExpiredLocked(); } finally { _gate.Release(); } }
@@ -163,7 +164,27 @@ public sealed class FileReceiver : IDisposable
         foreach (var pair in _sessions.Where(p => _clock() - p.Value.LastActivity >= FileTransferConstants.SessionIdleTimeout).ToArray()) { pair.Value.Stream.Dispose(); TryDelete(pair.Value.Path); _sessions.Remove(pair.Key); }
         foreach (var pair in _cancelled.Where(p => _clock() - p.Value >= FileTransferConstants.CancelledRetention).ToArray()) _cancelled.Remove(pair.Key);
     }
-    private FileReceiveResult FailLocked(string id, Session session, int code, string status) { session.Stream.Dispose(); TryDelete(session.Path); _sessions.Remove(id); TransferChanged?.Invoke(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Failed, Error: status)); return new(code, status); }
+    private FileReceiveResult FailLocked(string id, Session session, int code, string status, List<FileTransferProgress> events) { session.Stream.Dispose(); TryDelete(session.Path); _sessions.Remove(id); events.Add(new(id, session.Offer.FileName, 0, session.Offer.FileSize, FileTransferDirection.Receiving, FileTransferStatus.Failed, Error: status)); return new(code, status); }
+
+    /// <summary>
+    /// Runs <paramref name="body"/> under the transfer lock and raises the <see cref="TransferChanged"/>
+    /// events it collected only once the lock is released, so a handler (UI work, a dialog) can neither
+    /// hold up other transfers nor deadlock by calling back into the receiver.
+    /// </summary>
+    private async Task<FileReceiveResult> UnderGateAsync(Func<List<FileTransferProgress>, Task<FileReceiveResult>> body, CancellationToken token)
+    {
+        var events = new List<FileTransferProgress>();
+        try
+        {
+            await _gate.WaitAsync(token);
+            try { return await body(events); }
+            finally { _gate.Release(); }
+        }
+        finally
+        {
+            foreach (var change in events) TransferChanged?.Invoke(change);
+        }
+    }
     private static string Normalize(string id) => id.ToLowerInvariant();
     private static void TryDelete(string path) { try { File.Delete(path); } catch { } }
     private static readonly HashSet<string> ReservedDeviceNames = new(

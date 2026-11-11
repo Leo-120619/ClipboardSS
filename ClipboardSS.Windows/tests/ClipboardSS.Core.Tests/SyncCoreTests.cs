@@ -277,6 +277,62 @@ public sealed class SyncCoreTests
     }
 
     [Fact]
+    public async Task FinishUsesExtendedTimeoutForLargeFile()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(205), FileTransferConstants.FinishTimeout(4L * 1024 * 1024 * 1024));
+        Assert.Equal(TimeSpan.FromSeconds(30), FileTransferConstants.FinishTimeout(0));
+        Assert.Equal(TimeSpan.FromSeconds(31), FileTransferConstants.FinishTimeout(30L * 20 * 1024 * 1024 + 1));
+        Assert.Equal(TimeSpan.FromSeconds(600), FileTransferConstants.FinishTimeout(1L << 40));
+
+        using var directory = new TemporaryDirectory();
+        var (sender, peer, transport) = FileSenderFixture(directory);
+        var file = System.IO.Path.Combine(directory.Path, "payload.bin");
+        await File.WriteAllBytesAsync(file, new byte[FileTransferConstants.ChunkSize + 3], TestContext.Current.CancellationToken);
+
+        Assert.Equal(FileSendOutcome.Delivered, await sender.SendAsync(file, peer, cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            [("/v1/file/offer", null), ("/v1/file/chunk", null), ("/v1/file/chunk", null),
+             ("/v1/file/finish", FileTransferConstants.FinishTimeout(FileTransferConstants.ChunkSize + 3))],
+            transport.Calls);
+    }
+
+    [Fact]
+    public async Task SenderDoesNotCancelAfterFinishTimeout()
+    {
+        using var directory = new TemporaryDirectory();
+        var (sender, peer, transport) = FileSenderFixture(directory);
+        transport.TimeOutPaths.Add("/v1/file/finish");
+        var file = System.IO.Path.Combine(directory.Path, "payload.bin");
+        await File.WriteAllBytesAsync(file, [1, 2, 3], TestContext.Current.CancellationToken);
+        var reports = new List<FileTransferStatus>();
+
+        // A saved file must not be reported failed or deleted (Review Focus 4).
+        var outcome = await sender.SendAsync(file, peer, new InlineProgress(p => reports.Add(p.Status)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(FileSendOutcome.Unconfirmed, outcome);
+        Assert.Equal(["/v1/file/offer", "/v1/file/chunk", "/v1/file/finish"], transport.Calls.Select(call => call.Path));
+        Assert.Equal(FileTransferStatus.Unconfirmed, reports[^1]);
+    }
+
+    private static (FileSender Sender, Peer Peer, FakePeerTransport Transport) FileSenderFixture(TemporaryDirectory directory)
+    {
+        var peerId = Guid.NewGuid();
+        var pairedStore = new PairedDeviceStore(System.IO.Path.Combine(directory.Path, "paired.json"), new InMemoryPairKeyStorage());
+        pairedStore.AddDevice(new PairedDevice(peerId, "Phone"), Enumerable.Repeat((byte)9, 32).ToArray());
+        var transport = new FakePeerTransport();
+        return (new FileSender(new DeviceIdentity(Guid.NewGuid(), "Windows"), pairedStore, transport),
+            new Peer(peerId, "Phone", "10.0.0.3", 51888), transport);
+    }
+
+    /// <summary>Reports synchronously (<see cref="Progress{T}"/> posts to the thread pool).</summary>
+    private sealed class InlineProgress(Action<FileTransferProgress> report) : IProgress<FileTransferProgress>
+    {
+        public void Report(FileTransferProgress value) => report(value);
+    }
+
+    [Fact]
     public async Task SendersReportStaleAnswersAsClockOutOfSyncWithThatDevice()
     {
         using var directory = new TemporaryDirectory();
@@ -356,15 +412,23 @@ public sealed class SyncCoreTests
     private sealed class FakePeerTransport : IPeerTransport
     {
         public List<(byte[] Data, Peer Peer)> Requests { get; } = [];
+        /// <summary>Path and per-request timeout of each call (null: the transport default).</summary>
+        public List<(string Path, TimeSpan? Timeout)> Calls { get; } = [];
+        /// <summary>Paths whose request times out instead of being answered.</summary>
+        public HashSet<string> TimeOutPaths { get; } = [];
         public byte[] Response { get; set; } = HttpCodec.EncodeResponse(
             new HttpResponse(200, new Dictionary<string, string>(), Encoding.UTF8.GetBytes("OK")));
 
         public Task<byte[]> SendAsync(
             byte[] data,
             Peer peer,
+            TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
             Requests.Add((data, peer));
+            var path = HttpCodec.ParseRequest(data).Path;
+            Calls.Add((path, timeout));
+            if (TimeOutPaths.Contains(path)) throw new TimeoutException("timed out");
             return Task.FromResult(Response);
         }
     }

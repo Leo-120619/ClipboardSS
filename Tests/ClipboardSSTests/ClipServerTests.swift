@@ -355,7 +355,7 @@ private final class HarnessPairKeyStorage: PairKeyStorage, @unchecked Sendable {
 }
 
 private struct HarnessPeerTransport: PeerTransport {
-    func send(_ data: Data, to peer: Peer) async throws -> Data { Data() }
+    func send(_ data: Data, to peer: Peer, timeout: TimeInterval) async throws -> Data { Data() }
 }
 
 private final class HarnessPasteboard: PasteboardClient {

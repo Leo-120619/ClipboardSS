@@ -21,13 +21,15 @@ struct FileReceiverTests {
 
     private func makeFixture(
         now: Date = Date(timeIntervalSince1970: 1_000),
+        clock: MutableClock? = nil,
         freeSpace: Int64 = 1 << 40,
+        destinationProvider: (@Sendable (URL) -> URL)? = nil,
         chunkWriter: @escaping @Sendable (FileHandle, UInt64, Data) throws -> Void = FileReceiver.defaultChunkWriter
     ) async throws -> Fixture {
         let peerId = UUID()
         let key = SymmetricKey(size: .bits256)
         let store = try await makePairedStore(peerId: peerId, key: key)
-        let clock = MutableClock(now)
+        let clock = clock ?? MutableClock(now)
         let destinationDir = try temporaryDirectory()
         let localId = UUID()
         let transfersDir = try temporaryDirectory().appendingPathComponent("Transfers")
@@ -35,7 +37,7 @@ struct FileReceiverTests {
             pairedStore: store,
             localDeviceId: localId,
             transfersDirectory: transfersDir,
-            destinationProvider: { destinationDir },
+            destinationProvider: { destinationProvider?(destinationDir) ?? destinationDir },
             now: clock.now,
             idleTimeout: 60,
             freeSpaceProvider: { freeSpace },
@@ -416,6 +418,33 @@ struct FileReceiverTests {
         fixture.clock.advance(by: 61)
         await fixture.receiver.garbageCollect()
         #expect(await fixture.receiver.handleChunk(transferId: id, chunkIndex: 1, body: chunks[1]).statusCode == 404)
+    }
+
+    @Test("a garbage collection while a finish is hashing does not destroy the session")
+    func finishRefreshesLastActivity() async throws {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000))
+        let fixture = try await makeFixture(clock: clock, destinationProvider: { dir in
+            // finalize runs after the hash: a hash that took 2 minutes.
+            clock.advance(by: 120)
+            return dir
+        })
+        let data = Data((0..<10).map { UInt8($0) })
+        let (offer, chunks, id) = try makeTransfer(fixture, data: data, chunkSize: 4)
+        _ = await fixture.receiver.handleOffer(envelope: offer)
+        for (i, chunk) in chunks.enumerated() {
+            _ = await fixture.receiver.handleChunk(transferId: id, chunkIndex: i, body: chunk)
+        }
+        fixture.clock.advance(by: 59)
+
+        let receiver = fixture.receiver
+        let finish = try finishEnvelope(fixture, id)
+        let finishing = Task { await receiver.handleFinish(envelope: finish) }
+        let collecting = Task { await receiver.garbageCollect() }
+        let response = await finishing.value
+        await collecting.value
+
+        #expect(response.statusCode == 200)
+        #expect(FileManager.default.fileExists(atPath: fixture.destinationDir.appendingPathComponent("file.bin").path))
     }
 
     @Test("chunk for an unknown transfer returns 404")

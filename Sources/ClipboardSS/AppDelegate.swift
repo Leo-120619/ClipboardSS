@@ -48,8 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let pairingCoordinator = PairingCoordinator(
                 identity: identity,
                 pairedStore: pairedStore,
-                transport: transport,
-                confirmTransport: NWPeerTransport(timeout: PairingCoordinator.confirmRequestTimeout)
+                transport: transport
             )
             let monitor = ClipboardMonitor(pasteboard: pasteboard, store: store)
             let clipReceiver = ClipReceiver(store: store, pasteboard: pasteboard, monitor: monitor)
