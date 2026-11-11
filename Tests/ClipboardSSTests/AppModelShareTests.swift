@@ -140,7 +140,8 @@ struct AppModelShareTests {
 
     @Test("quitting after some files of a share were staged keeps the unsent ones for the next launch")
     func partlySentShareSurvivesRestart() async throws {
-        let transport = CountingTransport(delay: .seconds(30))
+        let transport = CountingTransport(held: true)
+        defer { transport.release() }
         let fixture = try await ShareFixture(transport: transport)
         let drop = try fixture.makeDrop(names: ["a.png", "b.png", "c.png"])
         await fixture.goOnline([fixture.deviceId])
@@ -164,7 +165,8 @@ struct AppModelShareTests {
 
     @Test("a cancelled queued file of a share is not re-sent after a restart")
     func cancelledQueuedShareFileIsDroppedFromManifest() async throws {
-        let transport = CountingTransport(delay: .seconds(30))
+        let transport = CountingTransport(held: true)
+        defer { transport.release() }
         let fixture = try await ShareFixture(transport: transport)
         let drop = try fixture.makeDrop(names: ["a.png", "b.png", "c.png"])
         await fixture.goOnline([fixture.deviceId])
@@ -180,7 +182,8 @@ struct AppModelShareTests {
 
     @Test("cancelling the last queued file of a share removes the drop instead of leaving an empty manifest")
     func cancellingLastQueuedShareFileRemovesDrop() async throws {
-        let transport = CountingTransport(delay: .seconds(30))
+        let transport = CountingTransport(held: true)
+        defer { transport.release() }
         let fixture = try await ShareFixture(transport: transport)
         let drop = try fixture.makeDrop(names: ["a.png", "b.png"])
         await fixture.goOnline([fixture.deviceId])
@@ -316,7 +319,8 @@ private final class ShareFakePasteboard: PasteboardClient {
     func writeImageData(_ data: Data) {}
 }
 
-/// Fails every request after `delay`, recording how many sends overlap and which
+/// Fails every request after `delay` (and, when `held`, only once `release()` is called),
+/// recording how many sends overlap and which
 /// file-transfer paths were offered.
 private final class CountingTransport: PeerTransport, @unchecked Sendable {
     private let lock = NSLock()
@@ -324,8 +328,15 @@ private final class CountingTransport: PeerTransport, @unchecked Sendable {
     private var inFlight = 0
     private var _max = 0
     private var _offered: [String] = []
+    private var held: Bool
 
-    init(delay: Duration = .milliseconds(5)) { self.delay = delay }
+    init(delay: Duration = .milliseconds(5), held: Bool = false) {
+        self.delay = delay
+        self.held = held
+    }
+
+    /// Lets held requests finish.
+    func release() { lock.withLock { held = false } }
 
     var maxConcurrentSends: Int { lock.withLock { _max } }
     var offeredPaths: [String] { lock.withLock { _offered } }
@@ -339,6 +350,9 @@ private final class CountingTransport: PeerTransport, @unchecked Sendable {
             if path == "/v1/file/offer" { _offered.append(path) }
         }
         defer { lock.withLock { inFlight -= 1 } }
+        while lock.withLock({ held }) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         try await Task.sleep(for: delay)
         throw URLError(.cannotConnectToHost)
     }

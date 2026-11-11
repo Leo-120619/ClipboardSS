@@ -755,9 +755,10 @@ final class AppModel: ObservableObject {
         var url = job.url
         if let key = job.shareKey {
             defer { shareFileHandedOff(key) }
-            let staged = stageSharedFile(job.url)
+            // Drop the file from the manifest before moving it: a crash in between must not
+            // leave a manifest naming a missing file, which would reject the whole drop.
             retainUnsentShareFiles(key, leaving: job.url)
-            guard let staged else {
+            guard let staged = stageSharedFile(job.url) else {
                 completeSend(uiId: uiId, status: .failed(FileSendError.fileUnreadable.localizedDescription))
                 return false
             }
