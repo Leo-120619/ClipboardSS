@@ -33,22 +33,33 @@ public sealed class ShareActivationCoordinator
 
             var items = await operation.Data.GetStorageItemsAsync();
             if (items.Count == 0) throw new InvalidOperationException("No files were included in this share.");
-            if (items.Any(item => item is not StorageFile))
-                throw new InvalidOperationException("Folders cannot be shared with ClipboardSS.");
-
-            foreach (var file in items.Cast<StorageFile>())
+            var paths = new List<string>();
+            foreach (var item in items)
             {
-                var copy = await file.CopyAsync(
-                    ApplicationData.Current.TemporaryFolder,
-                    file.Name,
-                    NameCollisionOption.GenerateUniqueName);
-                staged.Add(copy.Path);
+                if (item is StorageFile file)
+                {
+                    var copy = await file.CopyAsync(
+                        ApplicationData.Current.TemporaryFolder,
+                        file.Name,
+                        NameCollisionOption.GenerateUniqueName);
+                    staged.Add(copy.Path);
+                    paths.Add(copy.Path);
+                }
+                else if (item is StorageFolder folder && Directory.Exists(folder.Path))
+                {
+                    // Folders are read in place and zipped when sent; the app runs full trust.
+                    paths.Add(folder.Path);
+                }
+                else
+                {
+                    throw new InvalidOperationException($"\"{item.Name}\" cannot be read.");
+                }
             }
             operation.ReportDataRetrieved();
 
-            var deviceId = await ChooseTargetAsync(staged);
+            var deviceId = await ChooseTargetAsync(paths);
             if (deviceId is null) throw new OperationCanceledException("The share was cancelled.");
-            await _model.SendFilesAsync(staged, deviceId.Value);
+            await _model.SendFilesAsync(paths, deviceId.Value);
             operation.ReportCompleted();
         }
         catch (OperationCanceledException)
