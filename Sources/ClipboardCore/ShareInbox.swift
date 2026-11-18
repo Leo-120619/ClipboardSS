@@ -1,32 +1,16 @@
 import Foundation
 
-/// Bridges the macOS Share Extension (sandboxed) and the host app (not sandboxed).
+/// Hands items from the macOS Share Extension (sandboxed) to the host app (not sandboxed).
 ///
-/// The extension stages shared files in a per-drop folder inside the shared
-/// app-group container and writes a `manifest.json` last (so the host only ever sees
-/// complete drops). The host polls the outbox, stages the files locally, deletes the
-/// drop folder, and hands the staged URLs to its normal file-send flow.
+/// The extension cannot write anywhere the host may read: the app is signed without a Team
+/// ID, so macOS denies it the app-group container. It therefore only posts *what* was shared
+/// (`ShareHandoff`) and opens the host, which copies the files (zipping folders) into a
+/// per-drop folder of its own outbox and writes a `manifest.json` last, so only complete
+/// drops are ever sent. The drop stays in the outbox until its files are handed to the
+/// normal file-send flow, which lets a share survive a relaunch.
 public enum ShareInbox {
-    /// App-group identifier shared by the app target and the ShareExtension target.
-    public static let appGroupIdentifier = "group.com.local.ClipboardSS"
-
     /// Custom URL scheme the extension opens to foreground the host app.
     public static let urlScheme = "clipboardss"
-
-    /// Resolves the shared app-group container. Falls back to the well-known path so a
-    /// non-sandboxed host without a resolvable entitlement can still read it.
-    public static func containerURL() -> URL? {
-        if let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) {
-            return url
-        }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent("Library/Group Containers/\(appGroupIdentifier)", isDirectory: true)
-    }
-
-    /// Directory holding one subfolder per pending share drop.
-    public static func outboxDirectory() -> URL? {
-        containerURL()?.appendingPathComponent("ShareOutbox", isDirectory: true)
-    }
 
     private static let manifestName = "manifest.json"
 
@@ -34,14 +18,11 @@ public enum ShareInbox {
     /// is removed once its folder is this old, so the poll stops re-parsing it.
     public static let rejectedDropMaxAge: TimeInterval = 24 * 60 * 60
 
-    // MARK: - Extension side
+    // MARK: - Building a drop
 
-    /// Creates an empty outbox drop. Call `finalizeDrop` only after all files have been
+    /// Creates an empty drop in `outbox`. Call `finalizeDrop` only after all files have been
     /// staged in this directory; writing its manifest last is the completeness barrier.
-    public static func createDrop() throws -> (id: String, directory: URL) {
-        guard let outbox = outboxDirectory() else {
-            throw ShareInboxError.containerUnavailable
-        }
+    public static func createDrop(in outbox: URL) throws -> (id: String, directory: URL) {
         let id = UUID().uuidString.lowercased()
         let dropDir = outbox.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: dropDir, withIntermediateDirectories: true)
@@ -49,40 +30,45 @@ public enum ShareInbox {
     }
 
     /// Marks a fully staged drop complete by writing `manifest.json` last.
-    public static func finalizeDrop(id: String, names: [String]) throws {
-        guard let outbox = outboxDirectory() else {
-            throw ShareInboxError.containerUnavailable
-        }
+    public static func finalizeDrop(id: String, names: [String], in outbox: URL) throws {
         let dropDir = outbox.appendingPathComponent(id, isDirectory: true)
         let manifest = ShareManifest(id: id, fileNames: names)
         let data = try JSONEncoder().encode(manifest)
         try data.write(to: dropDir.appendingPathComponent(manifestName), options: .atomic)
     }
 
-    /// Writes a drop into the outbox. Existing callers supply extension-owned staging
-    /// URLs, so files are moved rather than copied (with a copy fallback).
-    /// Returns the drop id on success.
+    /// Builds a complete drop in `outbox` from items the share extension handed over: files
+    /// are copied, folders are zipped, and in-memory items are written out. Any failure
+    /// removes the partial drop and throws, so a share is never sent with items missing.
+    /// Returns the drop id.
     @discardableResult
-    public static func writeDrop(sources: [URL]) throws -> String {
-        let drop = try createDrop()
-
-        var storedNames: [String] = []
-        for source in sources {
-            let name = uniqueName(source.lastPathComponent, existing: storedNames)
-            let dest = drop.directory.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try? FileManager.default.removeItem(at: dest)
+    public static func importItems(_ items: [ShareHandoff.Item], into outbox: URL) throws -> String {
+        let drop = try createDrop(in: outbox)
+        do {
+            var names: [String] = []
+            for item in items {
+                if let path = item.path {
+                    let source = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+                    if FolderArchiver.isDirectory(source) {
+                        names.append(try FolderArchiver.zip(source, into: drop.directory).lastPathComponent)
+                    } else {
+                        let name = uniqueName(source.lastPathComponent, existing: names)
+                        try FileManager.default.copyItem(at: source, to: drop.directory.appendingPathComponent(name))
+                        names.append(name)
+                    }
+                } else if let data = item.data {
+                    let name = uniqueName(safeFileName(item.name), existing: names)
+                    try data.write(to: drop.directory.appendingPathComponent(name))
+                    names.append(name)
+                }
             }
-            do {
-                try FileManager.default.moveItem(at: source, to: dest)
-            } catch {
-                try FileManager.default.copyItem(at: source, to: dest)
-            }
-            storedNames.append(name)
+            guard !names.isEmpty else { throw ShareInboxError.nothingToShare }
+            try finalizeDrop(id: drop.id, names: names, in: outbox)
+            return drop.id
+        } catch {
+            try? FileManager.default.removeItem(at: drop.directory)
+            throw error
         }
-
-        try finalizeDrop(id: drop.id, names: storedNames)
-        return drop.id
     }
 
     // MARK: - Host side
@@ -91,7 +77,7 @@ public enum ShareInbox {
     public struct PendingDrop {
         public let directory: URL
         public let fileURLs: [URL]
-        /// When the extension finalized the drop (its manifest's modification date).
+        /// When the drop was finalized (its manifest's modification date).
         public let createdAt: Date
 
         public init(directory: URL, fileURLs: [URL], createdAt: Date) {
@@ -99,12 +85,6 @@ public enum ShareInbox {
             self.fileURLs = fileURLs
             self.createdAt = createdAt
         }
-    }
-
-    /// Returns every complete drop currently sitting in the outbox.
-    public static func pendingDrops() -> [PendingDrop] {
-        guard let outbox = outboxDirectory() else { return [] }
-        return pendingDrops(in: outbox)
     }
 
     /// Returns every complete drop in `outbox`. Rejected or incomplete drops whose folder is
@@ -192,6 +172,12 @@ public enum ShareInbox {
         return url
     }
 
+    /// A single, non-empty path component for an in-memory item's suggested name.
+    private static func safeFileName(_ name: String?) -> String {
+        let last = ((name ?? "") as NSString).lastPathComponent
+        return last.isEmpty || last == "." || last == ".." || last == "/" ? "file" : last
+    }
+
     private static func uniqueName(_ name: String, existing: [String]) -> String {
         let base = name.isEmpty ? "file" : name
         guard existing.contains(base) else { return base }
@@ -217,5 +203,5 @@ public struct ShareManifest: Codable {
 }
 
 public enum ShareInboxError: Error {
-    case containerUnavailable
+    case nothingToShare
 }

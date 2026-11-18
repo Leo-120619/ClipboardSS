@@ -2,9 +2,9 @@ import Cocoa
 import ClipboardCore
 import UniformTypeIdentifiers
 
-/// Principal view controller for the macOS share extension. It stages shared
-/// file(s) into the app-group outbox, opens the host app via its URL scheme so the
-/// user can pick a device, then dismisses itself.
+/// Principal view controller for the macOS share extension. It hands the shared files and
+/// folders to the host app (`ShareHandoff`), opens it via its URL scheme so it can send
+/// them, then dismisses itself.
 final class ShareViewController: NSViewController {
     private let statusLabel = NSTextField(labelWithString: "Sending to ClipboardSS…")
 
@@ -37,37 +37,26 @@ final class ShareViewController: NSViewController {
             return
         }
 
-        let drop: (id: String, directory: URL)
-        do {
-            drop = try ShareInbox.createDrop()
-        } catch {
-            finish(error: "Couldn't prepare the shared item.")
-            return
-        }
-
         let group = DispatchGroup()
-        let lock = NSLock()
-        var collected: [URL] = []
-
-        for provider in providers {
+        let collector = ItemCollector(count: providers.count)
+        for (index, provider) in providers.enumerated() {
             group.enter()
-            loadFile(from: provider, into: drop.directory) { url in
-                if let url {
-                    lock.lock(); collected.append(url); lock.unlock()
-                }
+            loadItem(from: provider) { item in
+                collector.set(item, at: index)
                 group.leave()
             }
         }
 
         group.notify(queue: .main) { [weak self] in
             guard let self else { return }
-            guard !collected.isEmpty else {
+            // Hand over everything or nothing: a share must not go out with items missing.
+            guard let items = collector.allItems() else {
                 self.finish(error: "Couldn't read the shared item.")
                 return
             }
             do {
-                try ShareInbox.finalizeDrop(id: drop.id, names: collected.map(\.lastPathComponent))
-                self.openHost(dropId: drop.id)
+                let id = try ShareHandoff.post(items)
+                self.openHost(handoffId: id)
                 self.finish(error: nil)
             } catch {
                 self.finish(error: "Couldn't hand off to ClipboardSS.")
@@ -75,9 +64,10 @@ final class ShareViewController: NSViewController {
         }
     }
 
-    /// Materialises a provider's payload directly inside the final outbox drop.
-    private func loadFile(from provider: NSItemProvider, into dropDirectory: URL, completion: @escaping (URL?) -> Void) {
-        // Prefer an explicit file URL (Finder, most document apps).
+    /// Describes a provider's payload for the host: a file or folder by path, or its bytes.
+    private func loadItem(from provider: NSItemProvider, completion: @escaping @Sendable (ShareHandoff.Item?) -> Void) {
+        // Prefer an explicit file URL (Finder, most document apps). The host is not
+        // sandboxed, so it reads the file or folder in place.
         if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
                 let sourceURL: URL?
@@ -88,47 +78,30 @@ final class ShareViewController: NSViewController {
                 } else {
                     sourceURL = nil
                 }
-                guard let source = sourceURL else { completion(nil); return }
-                completion(Self.copyIntoDrop(source, dropDirectory: dropDirectory))
+                guard let source = sourceURL, source.isFileURL else { completion(nil); return }
+                completion(ShareHandoff.Item(path: source.path))
             }
             return
         }
 
-        // Otherwise ask the provider to write a file representation (images from Photos, etc.).
+        // Otherwise take the payload's bytes (an image shared from a preview, etc.).
         let typeIdentifier = provider.registeredTypeIdentifiers.first { UTType($0)?.conforms(to: .item) == true }
             ?? provider.registeredTypeIdentifiers.first
             ?? UTType.data.identifier
-        provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { url, _ in
-            guard let url else { completion(nil); return }
-            completion(Self.copyIntoDrop(url, dropDirectory: dropDirectory))
+        var name = provider.suggestedName ?? "Shared Item"
+        if (name as NSString).pathExtension.isEmpty,
+           let ext = UTType(typeIdentifier)?.preferredFilenameExtension {
+            name += ".\(ext)"
+        }
+        let fileName = name
+        _ = provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
+            guard let data else { completion(nil); return }
+            completion(ShareHandoff.Item(name: fileName, data: data))
         }
     }
 
-    /// Copies a (possibly security-scoped) provider file into the final outbox drop.
-    private static func copyIntoDrop(_ source: URL, dropDirectory: URL) -> URL? {
-        let scoped = source.startAccessingSecurityScopedResource()
-        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-
-        let name = source.lastPathComponent.isEmpty ? "file" : source.lastPathComponent
-        var dest = dropDirectory.appendingPathComponent(name)
-        var counter = 2
-        while FileManager.default.fileExists(atPath: dest.path) {
-            let ext = (name as NSString).pathExtension
-            let stem = (name as NSString).deletingPathExtension
-            let candidate = ext.isEmpty ? "\(stem)-\(counter)" : "\(stem)-\(counter).\(ext)"
-            dest = dropDirectory.appendingPathComponent(candidate)
-            counter += 1
-        }
-        do {
-            try FileManager.default.copyItem(at: source, to: dest)
-            return dest
-        } catch {
-            return nil
-        }
-    }
-
-    private func openHost(dropId: String) {
-        guard let url = URL(string: "\(ShareInbox.urlScheme)://share?id=\(dropId)") else { return }
+    private func openHost(handoffId: String) {
+        guard let url = URL(string: "\(ShareInbox.urlScheme)://share?id=\(handoffId)") else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -143,5 +116,26 @@ final class ShareViewController: NSViewController {
         } else {
             extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
         }
+    }
+}
+
+/// Collects each provider's item in provider order from concurrent completion handlers.
+private final class ItemCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [ShareHandoff.Item?]
+
+    init(count: Int) {
+        items = Array(repeating: nil, count: count)
+    }
+
+    func set(_ item: ShareHandoff.Item?, at index: Int) {
+        lock.lock(); items[index] = item; lock.unlock()
+    }
+
+    /// Every item, or nil when any provider failed to load.
+    func allItems() -> [ShareHandoff.Item]? {
+        lock.lock(); defer { lock.unlock() }
+        let loaded = items.compactMap { $0 }
+        return loaded.count == items.count ? loaded : nil
     }
 }

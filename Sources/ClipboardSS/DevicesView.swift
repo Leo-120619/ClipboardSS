@@ -277,7 +277,7 @@ struct PairedDeviceRow: View {
             Button(isConnected ? "Disconnect" : "Connect") {
                 model.setDeviceConnected(device.id, !isConnected)
             }
-            Button("Send File…") {
+            Button("Send File or Folder…") {
                 presentOpenPanel()
             }
             .disabled(!isOnline || needsUpdate || model.resolvePeer(for: device.id) == nil)
@@ -291,7 +291,7 @@ struct PairedDeviceRow: View {
     private func presentOpenPanel() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Send"
         if panel.runModal() == .OK, let url = panel.url {

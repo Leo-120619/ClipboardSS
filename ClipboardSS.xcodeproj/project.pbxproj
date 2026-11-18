@@ -55,11 +55,13 @@
 		B299D7BE36E5B27EF02071A3 /* PeerBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22D5ACAE3270EE78B3667EC6 /* PeerBrowser.swift */; };
 		B3B5B0C472F5939D53632A87 /* ShortcutRecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC946A8CB782158B26C87C35 /* ShortcutRecorderView.swift */; };
 		B67DE6CA66590A7DF904A4D3 /* PairingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64C33F77CE8F8A5FB9BC1826 /* PairingCoordinator.swift */; };
+		BB0BAB8331FE177D1A0F33A8 /* FolderArchiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = E67979B5670E29278904827E /* FolderArchiver.swift */; };
 		BD1ED9B5901215FF8402D7D2 /* ScreenTextOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CA83282D7974D858CFC7ADB /* ScreenTextOverlayController.swift */; };
 		BE6AF7E0D1720A9FB40C3ACD /* ClipboardWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE4C72AE22F808B408EF8ACE /* ClipboardWindowController.swift */; };
 		C136422D6A452B156CAF17D0 /* FileTransferState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21C5E1218BCBE0D706904164 /* FileTransferState.swift */; };
 		D126A0CAD676A7DA215AE662 /* ScreenshotReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E1C46DB19A8F7CF1957D56 /* ScreenshotReviewView.swift */; };
 		D1424DE0F094CBE01391C8EB /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F944F4408DEE4A25E9601802 /* AppModel.swift */; };
+		D63AAE17D7F54A1EDE8EF029 /* ShareHandoff.swift in Sources */ = {isa = PBXBuildFile; fileRef = D225AE7C77F080DFC079FC82 /* ShareHandoff.swift */; };
 		DFCFD9C4692C9B341EE3A14C /* FileSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = 636F2D8CAF716D18A4F5EEB7 /* FileSender.swift */; };
 		E1869C83EA3F25769113EED9 /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2E256214EC57087943FAF035 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		E282DAB90A642F849E364A15 /* ClipEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 617404615A0733214F622DF2 /* ClipEnvelope.swift */; };
@@ -156,12 +158,14 @@
 		C05EB26C97F57889DA50FF46 /* PairingSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingSession.swift; sourceTree = "<group>"; };
 		C11D3B4155B034C9A150A66E /* FileReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileReceiver.swift; sourceTree = "<group>"; };
 		C859D053DC78587B277EF530 /* ClipboardSSLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardSSLogo.swift; sourceTree = "<group>"; };
+		D225AE7C77F080DFC079FC82 /* ShareHandoff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareHandoff.swift; sourceTree = "<group>"; };
 		D30542EEF6FE90988261AE73 /* HTTPCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPCodec.swift; sourceTree = "<group>"; };
 		D347E5B2CF5C3994850F1148 /* AppPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPermission.swift; sourceTree = "<group>"; };
 		DE4C72AE22F808B408EF8ACE /* ClipboardWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardWindowController.swift; sourceTree = "<group>"; };
 		DFD4E961237AF34D5E50086B /* VisionTextRecognition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionTextRecognition.swift; sourceTree = "<group>"; };
 		E28B29116140529683733A79 /* DevicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesView.swift; sourceTree = "<group>"; };
 		E402BD00A36824726C5FD8A2 /* OCRService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRService.swift; sourceTree = "<group>"; };
+		E67979B5670E29278904827E /* FolderArchiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderArchiver.swift; sourceTree = "<group>"; };
 		E859BCA2A7E4252B7E65A6E7 /* TextSnippets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSnippets.swift; sourceTree = "<group>"; };
 		EA85C1C9A89F36C23E2B0859 /* SubnetSweeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubnetSweeper.swift; sourceTree = "<group>"; };
 		EB07D3D15F5F6B37470252C2 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -224,6 +228,7 @@
 				636F2D8CAF716D18A4F5EEB7 /* FileSender.swift */,
 				332F62CEF48FCA7C806A89E4 /* FileTransferCrypto.swift */,
 				3EE1DF9F2F3021EA4B96D153 /* FileTransferPayload.swift */,
+				E67979B5670E29278904827E /* FolderArchiver.swift */,
 				D30542EEF6FE90988261AE73 /* HTTPCodec.swift */,
 				8D06ECA8D344F2F35B5609AC /* ImageDataValidator.swift */,
 				EF3E58D8CA2AD609DC70BE3B /* LivenessPing.swift */,
@@ -232,6 +237,7 @@
 				C05EB26C97F57889DA50FF46 /* PairingSession.swift */,
 				737EFD7E94EF76FBD3961D45 /* ReplayGuard.swift */,
 				AE67DEABB709D1468DDDE059 /* ScreenTextSelectionState.swift */,
+				D225AE7C77F080DFC079FC82 /* ShareHandoff.swift */,
 				8A8A2FF3B6CF405BCFFCC1BA /* ShareInbox.swift */,
 			);
 			name = ClipboardCore;
@@ -438,6 +444,7 @@
 				DFCFD9C4692C9B341EE3A14C /* FileSender.swift in Sources */,
 				8A9598C4DF3B704B90FDA9F0 /* FileTransferCrypto.swift in Sources */,
 				1B73E4C603E72C038B843963 /* FileTransferPayload.swift in Sources */,
+				BB0BAB8331FE177D1A0F33A8 /* FolderArchiver.swift in Sources */,
 				9C419AEA7E4ACBAEA1CB62EC /* HTTPCodec.swift in Sources */,
 				7CBCEA15DDB4166B3A35941F /* ImageDataValidator.swift in Sources */,
 				1153D2E97E2C1E5975D79357 /* LivenessPing.swift in Sources */,
@@ -446,6 +453,7 @@
 				4CE75BA08C8A703B597ED847 /* PairingSession.swift in Sources */,
 				564D5FE64D373DE4C7CFC363 /* ReplayGuard.swift in Sources */,
 				9C0BB76600E907954CB2D9AD /* ScreenTextSelectionState.swift in Sources */,
+				D63AAE17D7F54A1EDE8EF029 /* ShareHandoff.swift in Sources */,
 				49A0E2849B04EB8E07B718C9 /* ShareInbox.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

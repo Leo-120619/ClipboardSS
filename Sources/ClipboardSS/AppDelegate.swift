@@ -232,16 +232,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         processShareOutbox()
     }
 
-    /// Handles a `clipboardss://` open triggered by the share extension. The payload is
-    /// irrelevant — any activation means "check the share outbox".
+    /// Handles a `clipboardss://share?id=…` open from the share extension: takes the items
+    /// it posted under that id and imports them into the share outbox. An id with nothing
+    /// waiting (a stray or repeated open) just re-checks the outbox.
     @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent: NSAppleEventDescriptor) {
-        processShareOutbox()
+        let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue ?? ""
+        let id = URLComponents(string: urlString)?.queryItems?.first { $0.name == "id" }?.value
+        if let id, let items = ShareHandoff.take(id: id) {
+            model?.importSharedItems(items)
+        } else {
+            processShareOutbox()
+        }
     }
 
-    /// Queues complete drops written by the share extension. The model sends them once a
+    /// Queues complete drops waiting in the share outbox. The model sends them once a
     /// paired device is reachable; the drop stays in the outbox until then.
     private func processShareOutbox() {
-        model?.enqueueShares(ShareInbox.pendingDrops())
+        guard let model else { return }
+        model.enqueueShares(ShareInbox.pendingDrops(in: model.shareOutboxDirectory))
     }
 
     private func configureStatusItem() {

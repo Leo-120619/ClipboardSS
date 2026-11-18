@@ -3,7 +3,7 @@ import ClipboardCore
 import Vision
 
 /// Recognizes text in a stored screenshot. Injected so tests don't run Vision, whose
-/// latency is unbounded while the `.accurate` model compiles (see `RecognitionLevelGate`).
+/// latency depends on the machine and what is on screen.
 @MainActor
 protocol ScreenshotTextRecognizing {
     func recognizeText(in imageURL: URL) async throws -> [OCRTextBlock]

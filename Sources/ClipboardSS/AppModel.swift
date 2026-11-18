@@ -92,6 +92,8 @@ final class AppModel: ObservableObject {
     private var livenessTask: Task<Void, Never>?
     /// Where shared files are staged while they are being sent.
     let shareStagingDirectory: URL
+    /// Holds one folder per share-extension drop until its files are handed to the sender.
+    let shareOutboxDirectory: URL
     /// Share-extension drops waiting for a reachable, up-to-date device. A drop leaves the
     /// outbox only once its files are handed to `FileSender`.
     private(set) var pendingShares: [ShareInbox.PendingDrop] = []
@@ -178,6 +180,7 @@ final class AppModel: ObservableObject {
         self.fileReceiver = fileReceiver
         self.clips = store.items
         self.shareStagingDirectory = store.storageDirectory.appendingPathComponent("ShareStaging", isDirectory: true)
+        self.shareOutboxDirectory = store.storageDirectory.appendingPathComponent("ShareOutbox", isDirectory: true)
         self.clipboardShortcut = .savedClipboardShortcut
         self.screenshotShortcut = .savedScreenshotShortcut
         self.screenTextShortcut = .savedScreenTextShortcut
@@ -668,26 +671,58 @@ final class AppModel: ObservableObject {
         sendFiles([url], to: deviceId)
     }
 
-    /// Reconnects once, then queues `urls` (in order) for the device's send queue.
+    /// Reconnects once, then queues `urls` (in order) for the device's send queue. A folder
+    /// is zipped first and sent as `<name>.zip`.
     func sendFiles(_ urls: [URL], to deviceId: UUID) {
         Task {
             guard await reconnectDevice(deviceId, reportError: false) else {
                 lastError = unreachableMessage(for: deviceId)
                 return
             }
-            for url in urls { startFileSend(url: url, to: deviceId) }
+            for url in urls {
+                guard FolderArchiver.isDirectory(url) else {
+                    startFileSend(url: url, to: deviceId)
+                    continue
+                }
+                let staging = shareStagingDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                let archive = await Task.detached { try? FolderArchiver.zip(url, into: staging) }.value
+                guard let archive else {
+                    try? FileManager.default.removeItem(at: staging)
+                    lastError = "Couldn't prepare the folder “\(url.lastPathComponent)” for sending."
+                    continue
+                }
+                if !startFileSend(url: archive, to: deviceId, stagingDirectory: staging) {
+                    try? FileManager.default.removeItem(at: staging)
+                }
+            }
         }
     }
 
     /// Queues a file for the device; it is handed to `FileSender` when its turn comes.
+    /// `stagingDirectory` (a temporary folder holding the file) is removed when the send ends.
     @discardableResult
-    private func startFileSend(url: URL, to deviceId: UUID) -> Bool {
+    private func startFileSend(url: URL, to deviceId: UUID, stagingDirectory: URL? = nil) -> Bool {
         guard !deviceNeedsUpdate(deviceId), resolvePeer(for: deviceId) != nil else {
             lastError = unreachableMessage(for: deviceId)
             return false
         }
-        enqueueFileSend(url: url, to: deviceId, shareKey: nil)
+        enqueueFileSend(url: url, to: deviceId, shareKey: nil, stagingDirectory: stagingDirectory)
         return true
+    }
+
+    /// Builds an outbox drop from items the share extension handed over (copying files and
+    /// zipping folders off the main thread), then queues it like any other share.
+    func importSharedItems(_ items: [ShareHandoff.Item]) {
+        let outbox = shareOutboxDirectory
+        Task {
+            let imported = await Task.detached { (try? ShareInbox.importItems(items, into: outbox)) != nil }.value
+            guard imported else {
+                lastError = "Couldn't read the shared item."
+                onShareNeedsAttention?()
+                return
+            }
+            enqueueShares(ShareInbox.pendingDrops(in: outbox))
+        }
     }
 
     /// One file waiting its turn in a device's send queue. A share file (`shareKey` set) is
@@ -707,8 +742,9 @@ final class AppModel: ObservableObject {
         let pickedByUser: Bool
     }
 
-    private func enqueueFileSend(url: URL, to deviceId: UUID, shareKey: String?) {
+    private func enqueueFileSend(url: URL, to deviceId: UUID, shareKey: String?, stagingDirectory: URL? = nil) {
         let uiId = UUID()
+        if let stagingDirectory { shareStagingBySend[uiId] = stagingDirectory }
         sendTokens[uiId] = CancellationToken()
         transfers.insert(
             FileTransferState(
@@ -864,10 +900,9 @@ final class AppModel: ObservableObject {
         sendTokens[id]?.cancel()
     }
 
-    /// Routes dropped files: send straight to the sole reachable paired device, or present
-    /// a picker when several are reachable.
-    func handleDroppedFiles(_ urls: [URL]) {
-        let files = urls.filter { !$0.hasDirectoryPath }
+    /// Routes dropped files and folders: send straight to the sole reachable paired device,
+    /// or present a picker when several are reachable.
+    func handleDroppedFiles(_ files: [URL]) {
         guard !files.isEmpty else { return }
 
         let reachable = pairedDevices.filter { resolvePeer(for: $0.id) != nil }
