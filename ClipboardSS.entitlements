@@ -2,5 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Data protection keychain (Touch ID-guarded pair keys). These are restricted
+	     entitlements: the app only launches when signed by team H2GP3VABB6 with
+	     Signing/ClipboardSS.provisionprofile embedded. -->
+	<key>com.apple.application-identifier</key>
+	<string>H2GP3VABB6.com.local.ClipboardSS</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>H2GP3VABB6</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>H2GP3VABB6.com.local.ClipboardSS</string>
+	</array>
 </dict>
 </plist>

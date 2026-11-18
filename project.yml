@@ -34,7 +34,9 @@ targets:
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.local.ClipboardSS
       CODE_SIGN_STYLE: Manual
-      CODE_SIGN_IDENTITY: "ClipboardSS Local Code Signing"
+      DEVELOPMENT_TEAM: H2GP3VABB6
+      CODE_SIGN_IDENTITY: "Developer ID Application"
+      PROVISIONING_PROFILE_SPECIFIER: "Mac Team Direct Provisioning Profile: com.local.ClipboardSS"
       CODE_SIGN_ENTITLEMENTS: ClipboardSS.entitlements
       CODE_SIGNING_REQUIRED: YES
       ENABLE_DEBUG_DYLIB: NO
@@ -62,7 +64,8 @@ targets:
       PRODUCT_BUNDLE_IDENTIFIER: com.local.ClipboardSS.ShareExtension
       PRODUCT_MODULE_NAME: ShareExtension
       CODE_SIGN_STYLE: Manual
-      CODE_SIGN_IDENTITY: "ClipboardSS Local Code Signing"
+      DEVELOPMENT_TEAM: H2GP3VABB6
+      CODE_SIGN_IDENTITY: "Developer ID Application"
       CODE_SIGN_ENTITLEMENTS: ShareExtension.entitlements
       CODE_SIGNING_REQUIRED: YES
       ENABLE_HARDENED_RUNTIME: YES

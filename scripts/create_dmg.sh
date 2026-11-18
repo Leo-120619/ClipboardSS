@@ -47,5 +47,5 @@ hdiutil create \
 
 echo "✅ Successfully created DMG at $DMG_NAME"
 echo "Users can open it and drag $APP_NAME to their Applications folder."
-echo "Note: the app is self-signed and not notarized, so other Macs will show a Gatekeeper"
-echo "warning (and may refuse to open it) until the app is signed with a Developer ID and notarized."
+echo "Note: the app is Developer ID signed but not notarized, so other Macs will show a Gatekeeper"
+echo "warning (and may refuse to open it) until it is notarized."

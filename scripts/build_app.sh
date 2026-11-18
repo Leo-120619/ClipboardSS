@@ -4,7 +4,8 @@ set -euo pipefail
 # Builds ClipboardSS (with its embedded Share Extension) via xcodebuild.
 # The extension can only be compiled/embedded by Xcode, not `swift build`, so this
 # script generates the project with xcodegen, builds unsigned, stamps the icon, then
-# code-signs inside-out with the local self-signed identity and the entitlement files.
+# code-signs inside-out with the SynCity FZE Developer ID identity, the embedded
+# provisioning profile, and the entitlement files.
 
 INSTALL_APP=0
 if [[ "${1:-}" == "--install" ]]; then
@@ -98,20 +99,28 @@ xattr -cr "$APP_DIR"
 # 4. Stamp the app icon.
 generate_app_icon "$APP_DIR"
 
-# 5. Resolve the signing identity.
-DEFAULT_SIGN_IDENTITY="ClipboardSS Local Code Signing"
-if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-    SIGN_IDENTITY="$CODESIGN_IDENTITY"
-elif security find-identity -v -p codesigning | grep -F "\"$DEFAULT_SIGN_IDENTITY\"" >/dev/null; then
-    SIGN_IDENTITY="$DEFAULT_SIGN_IDENTITY"
-else
-    # Ad-hoc signing produces a different signature on every build, which poisons
-    # keychain item ACLs and makes macOS prompt for the login keychain password.
-    echo "Error: no stable code-signing identity found." >&2
-    echo "Create the '$DEFAULT_SIGN_IDENTITY' certificate (self-signed, code signing) in Keychain Access," >&2
-    echo "or set CODESIGN_IDENTITY to another identity from: security find-identity -v -p codesigning" >&2
+# 5. Resolve the signing identity. The app carries restricted keychain entitlements
+#    (Touch ID-guarded pair keys), so it must be signed by team H2GP3VABB6 with the
+#    matching provisioning profile embedded, or macOS refuses to launch it.
+TEAM_ID="H2GP3VABB6"
+PROFILE="$REPO_ROOT/Signing/ClipboardSS.provisionprofile"
+DEFAULT_SIGN_IDENTITY="Developer ID Application: SynCity FZE ($TEAM_ID)"
+SIGN_IDENTITY="${CODESIGN_IDENTITY:-$DEFAULT_SIGN_IDENTITY}"
+if ! security find-identity -v -p codesigning | grep -F "\"$SIGN_IDENTITY\"" >/dev/null; then
+    echo "Error: signing identity not found: $SIGN_IDENTITY" >&2
+    echo "Install the SynCity FZE Developer ID certificate, or set CODESIGN_IDENTITY to another" >&2
+    echo "team $TEAM_ID identity from: security find-identity -v -p codesigning" >&2
     exit 1
 fi
+if [[ "$SIGN_IDENTITY" != *"($TEAM_ID)"* ]]; then
+    echo "Error: $SIGN_IDENTITY is not a team $TEAM_ID identity; the app would not launch." >&2
+    exit 1
+fi
+if [[ ! -f "$PROFILE" ]]; then
+    echo "Missing provisioning profile: $PROFILE" >&2
+    exit 66
+fi
+cp "$PROFILE" "$APP_DIR/Contents/embedded.provisionprofile"
 echo "Signing with identity: $SIGN_IDENTITY"
 
 # 6. Sign inside-out: the extension first, then the app.
@@ -140,5 +149,9 @@ if [[ "$INSTALL_APP" == "1" ]]; then
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
         -u "$APP_DIR" >/dev/null 2>&1 || true
     rm -rf "$APP_DIR"
+    # Drop the unsigned intermediate too, or Launchpad shows it as a second, iconless copy.
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+        -u "$BUILT_APP" >/dev/null 2>&1 || true
+    rm -rf "$SYMROOT"
     echo "Installed $INSTALL_DIR"
 fi
