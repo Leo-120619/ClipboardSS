@@ -535,7 +535,7 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
 
     public async Task SendFilesAsync(IEnumerable<string> paths, Guid deviceId)
     {
-        var validPaths = paths.Where(File.Exists).ToArray();
+        var validPaths = paths.Where(IsFileOrFolder).ToArray();
         if (validPaths.Length == 0) throw new InvalidOperationException("No shared files are available to send.");
         try
         {
@@ -564,13 +564,36 @@ public sealed class AppModel : INotifyPropertyChanged, IClipServerBackend, IDisp
         var transferId = Guid.NewGuid().ToString("D").ToLowerInvariant();
         _fileCancellations[transferId] = cancellation;
         var progress = new Progress<FileTransferProgress>(UpdateTransfer);
-        try { await _fileSender.SendAsync(path, peer, progress, cancellation.Token, transferId); }
-        finally { _fileCancellations.Remove(transferId); cancellation.Dispose(); }
+        // A folder is zipped first and sent as "<name>.zip", like the Mac app does.
+        string? staging = null;
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                staging = Path.Combine(Path.GetTempPath(), "ClipboardSS", "FolderStaging", Guid.NewGuid().ToString("N"));
+                var folder = path;
+                path = await Task.Run(() => FolderArchiver.Zip(folder, staging));
+            }
+            await _fileSender.SendAsync(path, peer, progress, cancellation.Token, transferId);
+        }
+        finally
+        {
+            _fileCancellations.Remove(transferId);
+            cancellation.Dispose();
+            if (staging is not null)
+            {
+                try { Directory.Delete(staging, recursive: true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
     }
+
+    private static bool IsFileOrFolder(string path) => File.Exists(path) || Directory.Exists(path);
 
     public async Task HandleDroppedFilesAsync(string[] paths)
     {
-        var validPaths = paths.Where(File.Exists).ToArray();
+        var validPaths = paths.Where(IsFileOrFolder).ToArray();
         if (validPaths.Length == 0) return;
         var targets = PairedDevices
             .Select(device => ResolveVerifiedPeer(device, IsDeviceOnline(device.Id), VisiblePeers))

@@ -183,6 +183,16 @@ public partial class DevicesWindow : Wpf.Ui.Controls.FluentWindow
         catch (Exception exception) { ErrorText.Text = exception.Message; }
     }
 
+    private async void SendFolder_OnClick(object sender, RoutedEventArgs args)
+    {
+        if (sender is not Button { Tag: Guid id }) return;
+        var picker = new OpenFolderDialog { Title = "Send a folder" };
+        if (picker.ShowDialog(this) != true) return;
+        ErrorText.Text = string.Empty;
+        try { await _model.SendFileAsync(picker.FolderName, id); }
+        catch (Exception exception) { ErrorText.Text = exception.Message; }
+    }
+
     private void Refresh()
     {
         PairedList.ItemsSource = _model.PairedDevices
