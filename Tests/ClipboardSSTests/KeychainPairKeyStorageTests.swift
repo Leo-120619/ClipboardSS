@@ -29,12 +29,22 @@ struct KeychainPairKeyStorageTests {
         func deleteLegacy(account: UUID) throws { legacy[account] = nil }
     }
 
-    final class Clock: @unchecked Sendable {
-        var date = Date(timeIntervalSince1970: 1_000)
-    }
-
     private func bytes(_ key: SymmetricKey?) -> Data? {
         key.map { $0.withUnsafeBytes { Data($0) } }
+    }
+
+    @Test("a listing that needs authentication means keys exist, not a failure")
+    func listingNeedingAuthMeansKeysExist() throws {
+        // macOS refuses to list .userPresence items without interaction; that
+        // must lead to the Touch ID prompt instead of locking the keys.
+        #expect(try SystemPairKeychain.protectedItemsExist(listingStatus: errSecInteractionNotAllowed, count: 0))
+        #expect(try SystemPairKeychain.protectedItemsExist(listingStatus: errSecAuthFailed, count: 0))
+        #expect(try SystemPairKeychain.protectedItemsExist(listingStatus: errSecSuccess, count: 2))
+        #expect(try !SystemPairKeychain.protectedItemsExist(listingStatus: errSecSuccess, count: 0))
+        #expect(try !SystemPairKeychain.protectedItemsExist(listingStatus: errSecItemNotFound, count: 0))
+        #expect(throws: PairKeychainError.status(errSecMissingEntitlement)) {
+            try SystemPairKeychain.protectedItemsExist(listingStatus: errSecMissingEntitlement, count: 0)
+        }
     }
 
     @Test("all keys unlock with one prompt and stay cached")
@@ -73,23 +83,41 @@ struct KeychainPairKeyStorageTests {
         #expect(keychain.protected[old] == Data(repeating: 7, count: 32))
     }
 
-    @Test("a cancelled prompt is not repeated until the cooldown passes")
-    func cancelCooldown() throws {
+    @Test("a cancelled prompt is never repeated by background reads")
+    func cancelStaysLocked() throws {
         let keychain = FakeKeychain()
         let id = UUID()
         keychain.protected = [id: Data(repeating: 3, count: 32)]
         keychain.promptResult = errSecUserCanceled
-        let clock = Clock()
-        let storage = KeychainPairKeyStorage(keychain: keychain, now: { clock.date })
+        let storage = KeychainPairKeyStorage(keychain: keychain)
 
         #expect(throws: PairKeychainError.status(errSecUserCanceled)) { try storage.getKey(for: id) }
-        #expect(throws: PairKeychainError.authenticationDeferred) { try storage.getKey(for: id) }
+        for _ in 0..<5 {
+            #expect(throws: PairKeychainError.authenticationDeferred) { try storage.getKey(for: id) }
+        }
         #expect(keychain.prompts == 1)
+        #expect(storage.needsUnlock)
+    }
+
+    @Test("an explicit unlock prompts again and restores the keys")
+    func explicitUnlock() throws {
+        let keychain = FakeKeychain()
+        let id = UUID()
+        keychain.protected = [id: Data(repeating: 3, count: 32)]
+        keychain.promptResult = errSecUserCanceled
+        let storage = KeychainPairKeyStorage(keychain: keychain)
+        _ = try? storage.getKey(for: id)
+
+        // A second cancel keeps it locked without unblocking background reads.
+        #expect(throws: PairKeychainError.status(errSecUserCanceled)) { try storage.unlock() }
+        #expect(throws: PairKeychainError.authenticationDeferred) { try storage.getKey(for: id) }
 
         keychain.promptResult = errSecSuccess
-        clock.date += KeychainPairKeyStorage.promptCooldown + 1
+        try storage.unlock()
+        #expect(!storage.needsUnlock)
         #expect(bytes(try storage.getKey(for: id)) == Data(repeating: 3, count: 32))
-        #expect(keychain.prompts == 2)
+        try storage.unlock() // already unlocked: no prompt
+        #expect(keychain.prompts == 3)
     }
 
     @Test("store and delete keep the unlocked cache in sync")

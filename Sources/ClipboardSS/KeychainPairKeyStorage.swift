@@ -9,27 +9,32 @@ import ClipboardCore
 ///
 /// Keys are read on every clip, file and liveness ping, so the storage unlocks
 /// all of them with a single prompt and keeps them in memory for the rest of
-/// the process. Keys left in the legacy login keychain by older builds are
-/// moved over on first use.
+/// the process. Background reads prompt at most once per launch: if that prompt
+/// is cancelled or fails, the keys stay locked until the user asks to unlock
+/// them (`unlock()`, behind the menu bar's "Unlock Paired Devices…" item).
+/// Keys left in the legacy login keychain by older builds are moved over on
+/// first use.
 public final class KeychainPairKeyStorage: PairKeyStorage, @unchecked Sendable {
-    /// After the user cancels or fails the prompt, don't ask again for this long:
-    /// liveness pings would otherwise re-prompt every few seconds.
-    static let promptCooldown: TimeInterval = 120
-
     private let keychain: PairKeychain
-    private let now: @Sendable () -> Date
     private let lock = NSLock()
     /// nil until the keychain has been unlocked in this process.
     private var cache: [UUID: SymmetricKey]?
-    private var promptBlockedUntil: Date?
+    /// Set once the launch's automatic unlock has failed; only `unlock()` clears it.
+    private var locked = false
 
     public convenience init() {
         self.init(keychain: SystemPairKeychain())
     }
 
-    init(keychain: PairKeychain, now: @escaping @Sendable () -> Date = Date.init) {
+    init(keychain: PairKeychain) {
         self.keychain = keychain
-        self.now = now
+    }
+
+    /// True when paired-device keys are unavailable until the user unlocks them.
+    public var needsUnlock: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return locked && cache == nil
     }
 
     public func storeKey(_ key: SymmetricKey, for deviceId: UUID) throws {
@@ -46,9 +51,17 @@ public final class KeychainPairKeyStorage: PairKeyStorage, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if let cache { return cache[deviceId] }
-        let loaded = try unlockAll()
-        cache = loaded
-        return loaded[deviceId]
+        if locked { throw PairKeychainError.authenticationDeferred }
+        return try unlockAll()[deviceId]
+    }
+
+    /// Prompts for Touch ID / password on the user's request, even after the
+    /// launch's automatic prompt was dismissed. Blocks until the prompt is answered.
+    public func unlock() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard cache == nil else { return }
+        _ = try unlockAll()
     }
 
     public func deleteKey(for deviceId: UUID) throws {
@@ -59,18 +72,18 @@ public final class KeychainPairKeyStorage: PairKeyStorage, @unchecked Sendable {
         cache?[deviceId] = nil
     }
 
-    /// Caller holds `lock`.
+    /// Caller holds `lock`. Any failure locks the keys until `unlock()`, so
+    /// background traffic never shows a second prompt.
     private func unlockAll() throws -> [UUID: SymmetricKey] {
-        if let blockedUntil = promptBlockedUntil, now() < blockedUntil {
-            throw PairKeychainError.authenticationDeferred
-        }
         migrateLegacyItems()
         do {
             let items = try keychain.loadAllProtected(reason: "unlock the keys for your paired devices")
-            promptBlockedUntil = nil
-            return items.mapValues { SymmetricKey(data: $0) }
-        } catch let error as PairKeychainError where error.isUserAuthenticationFailure {
-            promptBlockedUntil = now().addingTimeInterval(Self.promptCooldown)
+            let loaded = items.mapValues { SymmetricKey(data: $0) }
+            cache = loaded
+            locked = false
+            return loaded
+        } catch {
+            locked = true
             throw error
         }
     }
@@ -95,23 +108,13 @@ enum PairKeychainError: Error, Equatable, LocalizedError {
     case status(OSStatus)
     case authenticationDeferred
 
-    var isUserAuthenticationFailure: Bool {
-        switch self {
-        case .status(let status):
-            return status == errSecUserCanceled || status == errSecAuthFailed
-                || status == errSecInteractionNotAllowed
-        case .authenticationDeferred:
-            return false
-        }
-    }
-
     var errorDescription: String? {
         switch self {
         case .status(let status):
             let message = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
             return "Keychain error: \(message)"
         case .authenticationDeferred:
-            return "Paired device keys are locked until you authenticate again."
+            return "Paired device keys are locked. Choose Unlock Paired Devices… from the ClipboardSS menu."
         }
     }
 }
@@ -145,22 +148,43 @@ struct SystemPairKeychain: PairKeychain {
         return query
     }
 
-    private func accounts(dataProtection: Bool) throws -> [UUID] {
+    /// Lists matching items' attributes without ever prompting.
+    private func list(dataProtection: Bool) -> (status: OSStatus, accounts: [UUID]) {
         var query = base(dataProtection: dataProtection)
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitAll
         if dataProtection {
-            // Listing attributes never needs authentication; make sure it can't prompt.
             let context = LAContext()
             context.interactionNotAllowed = true
             query[kSecUseAuthenticationContext as String] = context
+        } else {
+            // A query without the data-protection flag also matches the Touch ID
+            // protected items; skip those so the legacy lookup can't prompt.
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
         }
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let items = result as? [[String: Any]] ?? []
+        return (status, items.compactMap { ($0[kSecAttrAccount as String] as? String).flatMap(UUID.init) })
+    }
+
+    private func accounts(dataProtection: Bool) throws -> [UUID] {
+        let (status, accounts) = list(dataProtection: dataProtection)
         if status == errSecItemNotFound { return [] }
         guard status == errSecSuccess else { throw PairKeychainError.status(status) }
-        let items = result as? [[String: Any]] ?? []
-        return items.compactMap { ($0[kSecAttrAccount as String] as? String).flatMap(UUID.init) }
+        return accounts
+    }
+
+    /// Whether protected keys exist, judged from a listing that was not allowed
+    /// to prompt. macOS won't list `.userPresence` items without interaction, so
+    /// "interaction required" means there are keys to unlock — not an error.
+    static func protectedItemsExist(listingStatus status: OSStatus, count: Int) throws -> Bool {
+        switch status {
+        case errSecSuccess: return count > 0
+        case errSecItemNotFound: return false
+        case errSecInteractionNotAllowed, errSecAuthFailed: return true
+        default: throw PairKeychainError.status(status)
+        }
     }
 
     func protectedAccounts() throws -> Set<UUID> {
@@ -168,7 +192,10 @@ struct SystemPairKeychain: PairKeychain {
     }
 
     func loadAllProtected(reason: String) throws -> [UUID: Data] {
-        guard !(try protectedAccounts()).isEmpty else { return [:] }
+        let listing = list(dataProtection: true)
+        guard try Self.protectedItemsExist(listingStatus: listing.status, count: listing.accounts.count) else {
+            return [:]
+        }
 
         // One evaluated context authorizes every item read below, so the user
         // sees a single Touch ID prompt for all paired devices.
@@ -241,6 +268,7 @@ struct SystemPairKeychain: PairKeychain {
         var query = base(dataProtection: false, account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
