@@ -1,4 +1,5 @@
 import ClipboardCore
+import ImageIO
 import SwiftUI
 
 struct ClipCard: View {
@@ -129,10 +130,16 @@ struct ClipCard: View {
             .clipCardCoachMarkTarget(coachTarget, isProminentClip: isProminent)
     }
 
-    private var metadata: String {
+    /// Shared: building a formatter per card on every render is wasted work.
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
-        return "\(clip.type.rawValue.capitalized) • \(formatter.localizedString(for: clip.createdAt, relativeTo: Date()))"
+        return formatter
+    }()
+
+    private var metadata: String {
+        let relative = Self.relativeFormatter.localizedString(for: clip.createdAt, relativeTo: Date())
+        return "\(clip.type.rawValue.capitalized) • \(relative)"
     }
 }
 
@@ -238,8 +245,31 @@ final class ThumbnailCache {
         if let cached = cache.object(forKey: key) {
             return cached
         }
-        guard let image = NSImage(contentsOf: url) else { return nil }
+        guard let image = Self.thumbnail(at: url) ?? NSImage(contentsOf: url) else { return nil }
         cache.setObject(image, forKey: key, cost: Self.decodedByteCost(of: image))
+        return image
+    }
+
+    /// Longest side of a cached preview, in pixels. Cards show images at most 140 pt tall,
+    /// so this covers a wide image on a Retina display.
+    static let maxThumbnailPixelSize = 1024
+
+    /// Decodes a downsampled preview straight from the file, so a full-size Retina
+    /// screenshot (tens of MB decoded) is never held in memory just to draw a card.
+    static func thumbnail(at url: URL, maxPixelSize: Int = maxThumbnailPixelSize) -> NSImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        ] as CFDictionary
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
+        // A bitmap rep reports the real pixel size, which the cache's cost is based on.
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        let image = NSImage(size: NSSize(width: cgImage.width, height: cgImage.height))
+        image.addRepresentation(rep)
         return image
     }
 

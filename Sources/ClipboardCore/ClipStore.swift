@@ -165,7 +165,15 @@ public final class ClipStore {
     }
 
     public func clips(matching query: String, filter: ClipFilter = .all) -> [ClipItem] {
-        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedQuery.isEmpty, filter == .all {
+            return items
+        }
+        // Case-insensitive search in place: lowercasing every clip's full text per
+        // keystroke copied the whole history each time.
+        func contains(_ text: String) -> Bool {
+            text.range(of: normalizedQuery, options: .caseInsensitive) != nil
+        }
         return items.filter { clip in
             let matchesFilter: Bool = switch filter {
             case .all:
@@ -178,8 +186,8 @@ public final class ClipStore {
                 clip.isPinned
             }
             let matchesQuery = normalizedQuery.isEmpty
-                || clip.previewText.lowercased().contains(normalizedQuery)
-                || (clip.text?.lowercased().contains(normalizedQuery) ?? false)
+                || contains(clip.previewText)
+                || (clip.text.map(contains) ?? false)
             return matchesFilter && matchesQuery
         }
     }

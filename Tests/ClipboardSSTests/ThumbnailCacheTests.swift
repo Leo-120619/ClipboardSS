@@ -17,4 +17,22 @@ struct ThumbnailCacheTests {
 
         #expect(ThumbnailCache.decodedByteCost(of: image) == 40 * 10 * 4)
     }
+
+    @Test("a large image is cached as a downsampled preview")
+    func largeImageIsDownsampled() throws {
+        let bitmap = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 2000, pixelsHigh: 1000, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("thumbnail-\(UUID().uuidString).png")
+        try png.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let image = try #require(ThumbnailCache(countLimit: 1).image(at: url))
+        #expect(image.size == NSSize(width: 1024, height: 512))
+        #expect(ThumbnailCache.decodedByteCost(of: image) == 1024 * 512 * 4)
+    }
 }

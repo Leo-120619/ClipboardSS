@@ -38,12 +38,15 @@ struct ClipboardRootView: View {
                                 DemoClipCard()
                             }
 
-                            if !model.historyClips.isEmpty {
+                            // Filter once per render; each access re-runs the search.
+                            let filtered = model.filteredClips
+                            let history = model.historyClips(from: filtered)
+                            if !history.isEmpty {
                                 SectionHeader(title: "History")
-                                ForEach(model.historyClips) { clip in
+                                ForEach(history) { clip in
                                     ClipCard(clip: clip, isProminent: false, model: model)
                                 }
-                            } else if model.filteredClips.isEmpty {
+                            } else if filtered.isEmpty {
                                 SectionHeader(title: "History")
                                 EmptyStateView()
                             }

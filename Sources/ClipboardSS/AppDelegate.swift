@@ -3,7 +3,7 @@ import ClipboardCore
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var windowController: ClipboardWindowController?
     private var screenTextOverlayController: ScreenTextOverlayController?
@@ -14,6 +14,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clipboardMonitor: ClipboardMonitor?
     private var receivedFileNotifications: ReceivedFileNotificationService?
     private var lastCleanupError: String?
+    private var keyStorage: KeychainPairKeyStorage?
+    private var unlockMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -40,9 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 id: Self.loadDeviceIdentityId(),
                 name: Host.current().localizedName ?? "Mac"
             )
+            let keyStorage = KeychainPairKeyStorage()
+            self.keyStorage = keyStorage
             let pairedStore = try PairedDeviceStore(
                 storageURL: store.storageDirectory.appendingPathComponent("paired-devices.json"),
-                keyStorage: KeychainPairKeyStorage()
+                keyStorage: keyStorage
             )
             let transport = NWPeerTransport()
             let pairingCoordinator = PairingCoordinator(
@@ -179,11 +183,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 windowController.show()
             }
 
-            monitorTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+            // The timer fires on the main run loop, so no Task hop is needed per tick.
+            let timer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
                     self?.pollClipboard()
                 }
             }
+            // Lets the system coalesce this wake-up with others to save energy.
+            timer.tolerance = 0.15
+            monitorTimer = timer
 
             processShareOutbox()
 
@@ -257,6 +265,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = ClipboardSSLogo.menuBarImage()
 
         let menu = NSMenu()
+        menu.delegate = self
+        // Shown only while the launch's Touch ID prompt was dismissed and the keys are locked.
+        let unlockItem = NSMenuItem(title: "Unlock Paired Devices…", action: #selector(unlockPairedDevices), keyEquivalent: "")
+        unlockItem.isHidden = true
+        menu.addItem(unlockItem)
+        unlockMenuItem = unlockItem
         menu.addItem(NSMenuItem(title: "Open Clipboard", action: #selector(openClipboard), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Select Screen Text", action: #selector(selectScreenText), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Devices", action: #selector(openDevices), keyEquivalent: ""))
@@ -266,6 +280,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
 
         self.statusItem = statusItem
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        unlockMenuItem?.isHidden = !(keyStorage?.needsUnlock ?? false)
+    }
+
+    @objc private func unlockPairedDevices() {
+        guard let keyStorage else { return }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        // unlock() blocks on the Touch ID prompt; keep it off the main thread.
+        Task.detached(priority: .userInitiated) {
+            do {
+                try keyStorage.unlock()
+            } catch {
+                print("Unlocking paired device keys failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     @objc private func openClipboard() {

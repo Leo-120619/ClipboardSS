@@ -433,7 +433,12 @@ final class AppModel: ObservableObject {
     }
 
     var historyClips: [ClipItem] {
-        Array(filteredClips.dropFirst(filteredClips.first?.id == latestClip?.id ? 1 : 0))
+        historyClips(from: filteredClips)
+    }
+
+    /// `filtered` without the latest clip, which the view shows in its own section.
+    func historyClips(from filtered: [ClipItem]) -> [ClipItem] {
+        Array(filtered.dropFirst(filtered.first?.id == latestClip?.id ? 1 : 0))
     }
 
     /// Republishes the store's clips. Never broadcasts: deleting, expiring or

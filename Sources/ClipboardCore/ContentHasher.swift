@@ -28,14 +28,28 @@ public enum ContentHasher {
         while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
             hasher.update(data: chunk)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return hex(hasher.finalize())
     }
 
+    /// Hashes `namespace + 0x00 + data` incrementally, without first copying `data`
+    /// (a copied image can be tens of MB) into a new buffer.
     private static func hash(_ data: Data, namespace: String) -> String {
-        var namespaced = Data(namespace.utf8)
-        namespaced.append(0)
-        namespaced.append(data)
-        let digest = SHA256.hash(data: namespaced)
-        return digest.map { String(format: "%02x", $0) }.joined()
+        var hasher = SHA256()
+        var prefix = Data(namespace.utf8)
+        prefix.append(0)
+        hasher.update(data: prefix)
+        hasher.update(data: data)
+        return hex(hasher.finalize())
+    }
+
+    private static func hex(_ digest: SHA256.Digest) -> String {
+        let digits = Array("0123456789abcdef".utf8)
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(SHA256.byteCount * 2)
+        for byte in digest {
+            bytes.append(digits[Int(byte >> 4)])
+            bytes.append(digits[Int(byte & 0x0F)])
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }
