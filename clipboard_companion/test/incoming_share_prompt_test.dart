@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:clipboard_companion/core/app_state.dart';
 import 'package:clipboard_companion/core/incoming_share.dart';
 import 'package:flutter/services.dart';
@@ -56,6 +57,21 @@ void main() {
     state.stageIncomingShare(_batchMap('batch-2', 1));
 
     expect(state.pendingShareBatch, isNull);
+  });
+
+  test('reachability for a share is judged after the resume re-probe', () async {
+    // Liveness is cleared while backgrounded and restored by the resume probe.
+    var online = false;
+    final resume = Completer<void>();
+
+    final verdict = reachableOnceSettled(
+      settled: () => resume.future,
+      isReachable: () => online,
+    );
+    online = true;
+    resume.complete();
+
+    expect(await verdict, isTrue);
   });
 
   test('the share prompt is offered once per batch', () {

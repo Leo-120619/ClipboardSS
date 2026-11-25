@@ -293,6 +293,17 @@ bool shouldPromptForShareBatch({
     !promptVisible &&
     !handledBatchIds.contains(batch.id);
 
+/// Answers [isReachable] only after [settled] completes, so a check made right
+/// after the app returns to the foreground sees re-probed liveness, not the
+/// cleared state left by the pause.
+Future<bool> reachableOnceSettled({
+  required Future<void> Function() settled,
+  required bool Function() isReachable,
+}) async {
+  await settled();
+  return isReachable();
+}
+
 /// Outcome of sending one shared batch, so the UI can report partial failures.
 class ShareSendResult {
   final int sent;
@@ -993,6 +1004,15 @@ class AppState extends ChangeNotifier {
   /// Completes once a pending resume has restarted sync and re-probed device
   /// liveness (immediately if the app was not paused).
   Future<void> whenResumeSettled() => _resumeGate.settled();
+
+  /// Whether any paired device is reachable, asked only after a pending resume
+  /// has re-probed them. A share from another app always arrives while this app
+  /// was backgrounded, when liveness is cleared; checking at once would report
+  /// every device offline and drop the share.
+  Future<bool> hasReachableDeviceOnceSettled() => reachableOnceSettled(
+    settled: whenResumeSettled,
+    isReachable: () => reachablePairedDevices.isNotEmpty,
+  );
 
   /// Adds a clip this device sends to the local history, unless it is already
   /// there (re-sending an existing clip).

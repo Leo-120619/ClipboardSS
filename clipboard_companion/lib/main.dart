@@ -1363,6 +1363,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
       // BuildContext across an async gap.
       final messenger = ScaffoldMessenger.of(context);
       try {
+        // The share brought the app back from the background; wait for the
+        // resume to re-probe devices before judging whether one is reachable.
+        await state.hasReachableDeviceOnceSettled();
+        if (!context.mounted) return;
         if (!_ensureReachable(context, state)) {
           await state.dismissPendingShare();
           return;
